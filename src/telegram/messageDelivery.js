@@ -9,29 +9,70 @@ export function createBotReplySender(bot, store) {
         })))
       }
       : undefined;
+
+    console.log(`[telegram-outbound] bot_api send contact=${user.id} buttons=${JSON.stringify(normalizedButtons)}`);
+    if (replyMarkup) {
+      console.log(`[telegram-outbound] bot_api reply_markup=${JSON.stringify(replyMarkup)}`);
+    }
+
     const telegramResponse = await bot.telegram.sendMessage(
       user.telegram_id,
       text,
       replyMarkup ? { reply_markup: replyMarkup } : undefined
     );
+
+    const returnedMarkup = telegramResponse?.reply_markup || telegramResponse?.replyMarkup || null;
+    console.log(
+      `[telegram-outbound] bot_api returned message_id=${telegramResponse.message_id} ` +
+      `reply_markup=${JSON.stringify(returnedMarkup)}`
+    );
+    if (normalizedButtons.length && !returnedMarkup) {
+      throw new Error(
+        'Bot API send returned no reply_markup. Inline buttons were not accepted for this chat.'
+      );
+    }
+
     await store.storeOutgoingMessage({
       telegramUserId: user.id,
       telegramMessageId: telegramResponse.message_id,
       text,
-      payload: { telegramResponse, buttons: normalizedButtons },
+      payload: {
+        telegramResponse,
+        buttons: normalizedButtons,
+        reply_markup: returnedMarkup,
+        channel: 'bot_api'
+      },
       senderType: 'bot',
+      source: 'bot_api',
       messageType: normalizedButtons.length ? 'buttons' : messageType
     });
     if (normalizedButtons.length) {
       console.log(`[telegram-outbound] welcome_buttons_sent contact=${user.id} channel=bot_api buttons=${countButtons(normalizedButtons)}`);
     }
-    return telegramResponse;
+    return {
+      ok: true,
+      queued: false,
+      source: 'bot_api',
+      messageId: telegramResponse.message_id,
+      buttons: normalizedButtons,
+      replyMarkup: returnedMarkup
+    };
   };
 }
 
 export function createAccountReplySender({ store }) {
   return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
     const normalizedButtons = normalizeButtonRows(buttons);
+    if (normalizedButtons.length) {
+      // Do not silently queue button messages for Telethon user sessions.
+      // Evidence: Telethon logs "buttons=2" then Telegram shows plain text
+      // because user/business accounts cannot attach Bot-style inline keyboards.
+      throw new Error(
+        'Inline buttons cannot be sent via the Telethon business-account queue. ' +
+        'Configure TELEGRAM_BOT_TOKEN so welcome/register buttons go through Bot API.'
+      );
+    }
+
     const temporaryTelegramMessageId = -Number(`${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
     const stored = await store.storeOutgoingMessage({
       telegramUserId: user.id,
@@ -45,7 +86,7 @@ export function createAccountReplySender({ store }) {
       },
       senderType: 'bot',
       source: 'business_account',
-      messageType: normalizedButtons.length ? 'buttons' : messageType,
+      messageType: messageType,
       sentAt: new Date().toISOString()
     });
     const outbound = await store.queueTelegramOutboundMessage({
@@ -60,10 +101,7 @@ export function createAccountReplySender({ store }) {
       VALUES ('outbound_queue:nudge', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run(String(outbound.id), new Date().toISOString());
-    console.log(`[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id} buttons=${countButtons(normalizedButtons)}`);
-    if (normalizedButtons.length) {
-      console.log(`[telegram-outbound] welcome_buttons_queued id=${outbound.id} contact=${user.id} buttons=${countButtons(normalizedButtons)}`);
-    }
+    console.log(`[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id} buttons=0`);
     return {
       ok: true,
       queued: true,
@@ -75,27 +113,28 @@ export function createAccountReplySender({ store }) {
 }
 
 /**
- * Prefer Bot API whenever inline buttons are present.
- * Telegram user/business accounts often cannot display Bot-style inline
- * callback buttons, so those messages would arrive as text-only.
+ * Inline-button messages MUST use Bot API.
+ * Text-only replies may still use the business-account outbound queue.
  */
-export async function createReplySender({ store, user, rootDir, bot, preferButtonsViaBot = true }) {
+export async function createReplySender({ store, user, rootDir, bot }) {
   const preferredSource = await store.getContactPreferredMessageSource(user.id);
   const accountEnabled = process.env.TELEGRAM_ACCOUNT_SYNC_ENABLED === 'true';
 
   return async function sendReply(options = {}) {
-    const hasButtons = normalizeButtonRows(options.buttons).length > 0;
-    if (preferButtonsViaBot && hasButtons && bot) {
-      try {
-        return await createBotReplySender(bot, store)(options);
-      } catch (error) {
-        console.warn(`[telegram-outbound] bot_api button send failed contact=${user.id}: ${error.message}; falling back to outbound queue`);
-        if (accountEnabled) {
-          return createAccountReplySender({ store })(options);
-        }
-        throw error;
+    const normalizedButtons = normalizeButtonRows(options.buttons);
+    const hasButtons = normalizedButtons.length > 0;
+
+    if (hasButtons) {
+      if (!bot) {
+        throw new Error(
+          'Cannot send welcome/register inline buttons: TELEGRAM_BOT_TOKEN bot is not running. ' +
+          'User/business Telethon sessions cannot render Button.inline callback keyboards.'
+        );
       }
+      console.log(`[telegram-outbound] routing button message via bot_api contact=${user.id}`);
+      return createBotReplySender(bot, store)({ ...options, buttons: normalizedButtons });
     }
+
     if (preferredSource === 'business_account' && accountEnabled) {
       return createAccountReplySender({ store })(options);
     }
@@ -103,8 +142,6 @@ export async function createReplySender({ store, user, rootDir, bot, preferButto
       return createBotReplySender(bot, store)(options);
     }
     if (accountEnabled) {
-      // Last resort: queue text (+ buttons_json) for Telethon. Buttons may be
-      // stripped by Telegram if the sender is not a bot account.
       return createAccountReplySender({ store })(options);
     }
     throw new Error('No Telegram reply channel is available for this contact.');
@@ -122,7 +159,6 @@ export function normalizeButtonRows(buttons = []) {
           const text = String(button.text || button.label || '').trim();
           const data = String(button.data || button.action || button.callback_data || '').trim();
           if (!text || !data) return null;
-          // Telegram callback_data max is 64 bytes.
           const encoded = Buffer.from(data, 'utf8');
           if (encoded.length > 64) {
             console.warn(`[telegram-outbound] callback_data too long (${encoded.length} bytes): ${data}`);

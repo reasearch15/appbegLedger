@@ -1,4 +1,4 @@
-import { decideBotReply, WELCOME_BUTTONS } from '../src/telegram/chatbotEngine.js';
+import { decideBotReply } from '../src/telegram/chatbotEngine.js';
 import { chatbotWelcomeCooldownMs } from '../src/registration/utils.js';
 
 function createFakeStore(initial = {}) {
@@ -29,41 +29,35 @@ async function run() {
     registration_status: 'New'
   };
 
-  // 1) First inbound → welcome
   const store = createFakeStore();
   const first = await decideBotReply({ store, contact, messageText: 'hi' });
   assertEqual(first.kind, 'welcome');
   assertEqual(first.markWelcomeSent, true);
-  assertEqual(JSON.stringify(first.replies[0].buttons), JSON.stringify(WELCOME_BUTTONS));
+  assertEqual(Boolean(first.replies[0].buttons), false);
+  assertIncludes(first.replies[0].text, 'Register');
+  assertIncludes(first.replies[0].text, 'Staff');
 
-  // Simulate welcome sent marker (time throttle, not permanent block)
   store.state.last_auto_welcome_at = new Date().toISOString();
   store.state.current_flow = 'bot_registration';
   store.state.current_step = 'welcome';
 
-  // 2) Later "hello" while still on welcome → must still reply (nudge or full welcome)
   const second = await decideBotReply({ store, contact, messageText: 'hello' });
   assertEqual(['welcome', 'welcome_nudge'].includes(second.kind), true);
-  assertEqual(second.replies[0].buttons.length > 0, true);
   assertEqual(second.statePatch.currentStep, 'welcome');
-  // Must NOT treat random text as registration start
   assertEqual(second.kind !== 'registration_ask_username', true);
-  console.log('ok follow-up hello still gets welcome/nudge buttons');
+  console.log('ok follow-up hello still gets welcome/nudge text');
 
-  // 3) After cooldown elapses, full welcome available again
   const cooldown = chatbotWelcomeCooldownMs();
   store.state.last_auto_welcome_at = new Date(Date.now() - cooldown - 1000).toISOString();
   const third = await decideBotReply({ store, contact, messageText: 'hey again' });
   assertEqual(third.kind, 'welcome');
   console.log('ok welcome cooldown is time-based not permanent');
 
-  // 4) Register button still starts username step
-  const started = await decideBotReply({ store, contact, action: 'bot:register' });
+  const started = await decideBotReply({ store, contact, messageText: 'Register' });
   assertEqual(started.kind, 'registration_ask_username');
   assertEqual(started.statePatch.currentStep, 'username');
-  console.log('ok register button');
+  console.log('ok Register text command');
 
-  // 5) Active flow message advances step
   store.state.current_flow = 'bot_registration';
   store.state.current_step = 'username';
   const advanced = await decideBotReply({ store, contact, messageText: 'luckyalex' });
@@ -77,6 +71,12 @@ async function run() {
 function assertEqual(actual, expected) {
   if (actual !== expected) {
     throw new Error(`Assertion failed: expected ${JSON.stringify(expected)} got ${JSON.stringify(actual)}`);
+  }
+}
+
+function assertIncludes(haystack, needle) {
+  if (!String(haystack).includes(needle)) {
+    throw new Error(`Expected text to include ${JSON.stringify(needle)}\nGot:\n${haystack}`);
   }
 }
 

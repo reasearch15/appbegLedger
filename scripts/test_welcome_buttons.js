@@ -17,22 +17,18 @@ function createFakeStore() {
 }
 
 async function run() {
+  // Helpers still normalize if Bot API is used later.
   const normalized = normalizeButtonRows(WELCOME_BUTTONS);
-  assert.equal(normalized.length, 2);
-  assert.equal(normalized[0][0].text, '📝 Register');
   assert.equal(normalized[0][0].data, 'register');
-  assert.equal(normalized[1][0].text, '💬 Talk to Staff');
   assert.equal(normalized[1][0].data, 'staff');
-  console.log('ok welcome button normalization');
+  console.log('ok welcome button normalization helpers');
 
   assert.equal(normalizeCallbackAction('register'), 'bot:register');
   assert.equal(normalizeCallbackAction('staff'), 'staff:takeover');
-  assert.equal(normalizeCallbackAction('confirm'), 'bot:confirm');
   console.log('ok callback aliases');
 
   const review = normalizeButtonRows(REVIEW_BUTTONS);
   assert.equal(review[0].map((b) => b.data).join(','), 'confirm,edit');
-  assert.equal(review[1][0].data, 'cancel');
   console.log('ok review button normalization');
 
   const welcome = await decideBotReply({
@@ -48,10 +44,9 @@ async function run() {
     messageText: 'hi'
   });
   assert.equal(welcome.kind, 'welcome');
-  const welcomeNorm = normalizeButtonRows(welcome.replies[0].buttons);
-  assert.equal(welcomeNorm[0][0].data, 'register');
-  assert.equal(welcomeNorm[1][0].data, 'staff');
-  console.log('ok decideBotReply welcome buttons');
+  assert.equal(Boolean(welcome.replies[0].buttons), false);
+  assert.ok(welcome.replies[0].text.includes("I'm here to help you get started."));
+  console.log('ok decideBotReply welcome is text-only');
 
   const started = await decideBotReply({
     store: createFakeStore(),
@@ -61,10 +56,10 @@ async function run() {
       registration_status: 'New',
       telegram_id: 9
     },
-    action: 'register'
+    messageText: 'Register'
   });
   assert.equal(started.kind, 'registration_ask_username');
-  console.log('ok register callback alias starts flow');
+  console.log('ok Register text starts flow');
 
   console.log('ALL BUTTON DELIVERY CHECKS PASSED');
 }

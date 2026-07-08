@@ -135,6 +135,19 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const flow = automationState.current_flow;
   const step = automationState.current_step || 'welcome';
 
+  // Exact text commands work without inline buttons (Telethon user sessions).
+  if (!action && isStaffCommand(text)) {
+    action = 'staff:takeover';
+  } else if (!action && isRegisterCommand(text)) {
+    action = 'bot:register';
+  } else if (!action && isConfirmCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+    action = 'bot:confirm';
+  } else if (!action && isEditCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+    action = 'bot:edit';
+  } else if (!action && isCancelCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+    action = 'bot:cancel';
+  }
+
   if (detectInsult(text) && !action) {
     return {
       kind: 'insult_soft',
@@ -160,7 +173,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     };
   }
 
-  if (action === 'staff:takeover' || action === 'bot:talk_to_staff' || /^\/staff\b/i.test(text)) {
+  if (action === 'staff:takeover' || action === 'bot:talk_to_staff') {
     return talkToStaffDecision();
   }
 
@@ -172,7 +185,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return decideRegisteredSupport({ text, action });
   }
 
-  if (action === 'flow:registration_info' || action === 'bot:register' || /^\/register\b/i.test(text)) {
+  if (action === 'flow:registration_info' || action === 'bot:register') {
     return startRegistrationDecision(contact, info);
   }
 
@@ -203,8 +216,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   return {
     kind: 'fallback_support',
     replies: [{
-      text: 'I’m here and ready — tell me what you need, or tap below if you’d rather chat with a human.',
-      buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
+      text: 'I’m here and ready — tell me what you need.\n\nReply Staff if you’d rather chat with a human.'
     }],
     statePatch: null,
     escalate: false
@@ -231,8 +243,7 @@ function cancelRegistrationDecision(contact, info) {
   return {
     kind: 'registration_cancelled',
     replies: [{
-      text: welcomeMessage(),
-      buttons: WELCOME_BUTTONS
+      text: welcomeMessage()
     }],
     statePatch: {
       currentFlow: 'bot_registration',
@@ -255,8 +266,9 @@ function welcomeDecision(contact, info, automationState = null, { forceFull = fa
   return {
     kind: throttled ? 'welcome_nudge' : 'welcome',
     replies: [{
-      text,
-      buttons: WELCOME_BUTTONS
+      text
+      // Text-only welcome: Telethon user/business sessions cannot render
+      // Bot-style inline callback buttons reliably.
     }],
     statePatch: {
       currentFlow: 'bot_registration',
@@ -298,8 +310,7 @@ function decideRegisteredSupport({ text, action }) {
     return {
       kind: 'registered_support',
       replies: [{
-        text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever), or I can grab a human teammate.',
-        buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
+        text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever).\n\nReply Staff anytime to reach a human teammate.'
       }],
       statePatch: null,
       escalate: false
@@ -309,8 +320,7 @@ function decideRegisteredSupport({ text, action }) {
   return {
     kind: 'registered_support',
     replies: [{
-      text: 'You’re all set on registration. Tell me what you need help with, or tap below for a human teammate.',
-      buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
+      text: 'You’re all set on registration. Tell me what you need help with.\n\nReply Staff anytime to reach a human teammate.'
     }],
     statePatch: null,
     escalate: false
@@ -434,8 +444,7 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
     return {
       kind: 'registration_ask_payment_app',
       replies: [{
-        text: `Nice pick: ${text}.\n\nWhich payment app do you use?`,
-        buttons: paymentAppButtons()
+        text: paymentAppPrompt(text)
       }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: nextInfo },
       escalate: false,
@@ -444,13 +453,11 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
   }
 
   if (normalizedStep === 'payment_app') {
-    // Prefer buttons; typed text is accepted as a fallback.
     if (!text) {
       return {
         kind: 'registration_ask_payment_app',
         replies: [{
-          text: 'Please choose a payment app below.',
-          buttons: paymentAppButtons()
+          text: paymentAppPrompt()
         }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
         escalate: false
@@ -507,14 +514,18 @@ function reviewDecision(info) {
     'Please confirm these details:',
     `• Username: ${info.preferred_appbeg_username || '—'}`,
     `• Payment app: ${info.payment_app || info.preferred_game || '—'}`,
-    `• Payment tag: ${info.payment_tag || '—'}`
+    `• Payment tag: ${info.payment_tag || '—'}`,
+    '',
+    'Reply with one of:',
+    'Confirm',
+    'Edit',
+    'Cancel'
   ].join('\n');
 
   return {
     kind: 'registration_review',
     replies: [{
-      text: `${summary}\n\nLooks good?`,
-      buttons: REVIEW_BUTTONS
+      text: summary
     }],
     statePatch: {
       currentFlow: 'bot_registration',
@@ -538,13 +549,54 @@ function normalizeStep(step, flow) {
 function welcomeMessage() {
   return `👋 Hey! Welcome to Royal VIP.
 
-It looks like you're not registered with us yet.
+I'm here to help you get started.
 
-Choose an option below.`;
+If you'd like to create an account, just reply:
+
+Register
+
+If you'd rather speak with one of our staff members, simply reply:
+
+Staff
+
+You can also ask me questions at any time. 😊`;
 }
 
 function welcomeNudgeMessage() {
-  return `You're not registered yet. Tap Register below to start.`;
+  return `You're not registered yet.
+
+Reply Register to create an account, or Staff to speak with our team.`;
+}
+
+function paymentAppPrompt(username = null) {
+  const intro = username ? `Nice pick: ${username}.\n\n` : '';
+  return `${intro}Which payment app do you use? Reply with one of:
+
+Cash App
+Chime
+Zelle
+Apple Pay
+Other`;
+}
+
+function isRegisterCommand(text) {
+  return /^(register|\/register)$/i.test(String(text || '').trim());
+}
+
+function isStaffCommand(text) {
+  return /^(staff|\/staff|talk to staff|human|agent)$/i.test(String(text || '').trim());
+}
+
+function isConfirmCommand(text) {
+  return /^(confirm|yes|y|ok|okay)$/i.test(String(text || '').trim());
+}
+
+function isEditCommand(text) {
+  return /^(edit|change|fix|no|n)$/i.test(String(text || '').trim());
+}
+
+function isCancelCommand(text) {
+  return /^(cancel|stop|quit)$/i.test(String(text || '').trim());
 }
 
 export function registrationStatusLabel(contact) {

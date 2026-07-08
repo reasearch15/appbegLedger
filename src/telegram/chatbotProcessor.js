@@ -30,10 +30,10 @@ export async function queueBotReply({ store, user, text, buttons = [], bot = nul
   if (result?.queued) {
     console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'} buttons=${buttonCount}`);
   } else {
-    console.log(`[chatbot] bot reply sent contact=${user.id} channel=bot_api buttons=${buttonCount}`);
+    console.log(`[chatbot] bot reply sent contact=${user.id} channel=${result?.source || 'bot_api'} message_id=${result?.messageId || 'n/a'} buttons=${buttonCount}`);
   }
   if (buttonCount) {
-    console.log(`[chatbot] welcome_buttons_${result?.queued ? 'queued' : 'sent'} contact=${user.id} buttons=${buttonCount}`);
+    console.log(`[chatbot] welcome_buttons_${result?.queued ? 'queued' : 'sent'} contact=${user.id} channel=${result?.source || 'unknown'} buttons=${JSON.stringify(normalizedButtons)}`);
   }
   return result;
 }

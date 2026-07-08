@@ -789,10 +789,53 @@ def build_inline_buttons(button_rows):
                     flush=True,
                 )
                 continue
-            built_row.append(Button.inline(str(label), encoded))
+            built = Button.inline(str(label), encoded)
+            print(
+                f"[telegram-outbound] built Button.inline text={label!r} data={action!r} "
+                f"type={type(built)!r} repr={built!r}",
+                flush=True,
+            )
+            built_row.append(built)
         if built_row:
             rows.append(built_row)
     return rows or None
+
+
+def log_buttons_just_before_send(buttons, *, outbound_id=None, raw_buttons_json=None):
+    """Log the exact object passed into client.send_message(buttons=...)."""
+    prefix = f"[telegram-outbound] send_message buttons id={outbound_id}"
+    print(f"{prefix} raw_buttons_json={raw_buttons_json!r}", flush=True)
+    print(f"{prefix} type={type(buttons)!r}", flush=True)
+    print(f"{prefix} repr={buttons!r}", flush=True)
+    if buttons is None:
+        print(f"{prefix} value=None (NO BUTTONS WILL BE SENT)", flush=True)
+        return
+    try:
+        print(f"{prefix} len={len(buttons)}", flush=True)
+    except TypeError:
+        print(f"{prefix} len=<not sized>", flush=True)
+    if isinstance(buttons, list):
+        for row_index, row in enumerate(buttons):
+            print(f"{prefix} row[{row_index}] type={type(row)!r} repr={row!r}", flush=True)
+            if isinstance(row, list):
+                for col_index, button in enumerate(row):
+                    print(
+                        f"{prefix} row[{row_index}][{col_index}] type={type(button)!r} repr={button!r}",
+                        flush=True,
+                    )
+
+
+def reply_markup_summary(message):
+    markup = getattr(message, "reply_markup", None)
+    if markup is None:
+        return {"present": False, "type": None, "rows": 0}
+    rows = getattr(markup, "rows", None) or []
+    return {
+        "present": True,
+        "type": type(markup).__name__,
+        "rows": len(rows),
+        "repr": repr(markup),
+    }
 
 
 def normalize_callback_action(action):
@@ -1051,14 +1094,48 @@ async def process_outbound_row(client, db, queue_row):
         entity = await client.get_entity(normalize_telegram_id(queue_row["telegram_user_id"]))
         if not isinstance(entity, User) or entity.bot or entity.deleted:
             raise RuntimeError("Target is not an active private Telegram user.")
-        buttons = build_inline_buttons(parse_buttons_json(queue_row["buttons_json"]))
+        raw_buttons_json = queue_row["buttons_json"]
+        parsed_buttons = parse_buttons_json(raw_buttons_json)
+        print(
+            f"[telegram-outbound] reconstruct id={queue_row['id']} "
+            f"raw_buttons_json={raw_buttons_json!r} parsed={parsed_buttons!r}",
+            flush=True,
+        )
+        buttons = build_inline_buttons(parsed_buttons)
         button_count = sum(len(row) for row in buttons) if buttons else 0
-        if button_count:
-            print(
-                f"[telegram-outbound] welcome_buttons_sending id={queue_row['id']} contact={queue_row['contact_id']} buttons={button_count}",
-                flush=True,
+        log_buttons_just_before_send(
+            buttons,
+            outbound_id=queue_row["id"],
+            raw_buttons_json=raw_buttons_json,
+        )
+        # Explicit kwargs — never omit buttons= when we intended a keyboard.
+        print(
+            f"[telegram-outbound] calling client.send_message("
+            f"entity={getattr(entity, 'id', entity)!r}, "
+            f"message=<len {len(queue_row['body'] or '')}>, "
+            f"buttons={buttons!r})",
+            flush=True,
+        )
+        message = await client.send_message(
+            entity,
+            queue_row["body"],
+            buttons=buttons,
+        )
+        markup_info = reply_markup_summary(message)
+        print(
+            f"[telegram-outbound] send_message returned message_id={message.id} "
+            f"reply_markup={markup_info!r}",
+            flush=True,
+        )
+        if button_count and not markup_info.get("present"):
+            # User/business accounts often accept the send but strip inline
+            # callback buttons. Treat that as a hard failure so we stop lying.
+            raise RuntimeError(
+                "Telethon send returned message WITHOUT reply_markup even though "
+                f"{button_count} Button.inline object(s) were passed. "
+                "Inline callback buttons require a Bot API sender "
+                "(TELEGRAM_BOT_TOKEN), not a user/business account session."
             )
-        message = await client.send_message(entity, queue_row["body"], buttons=buttons)
         payload = {
             "ok": True,
             "message_id": message.id,
@@ -1067,7 +1144,8 @@ async def process_outbound_row(client, db, queue_row):
             "sync_kind": "queued",
             "source": "business_account",
             "outboundQueueId": queue_row["id"],
-            "buttons": parse_buttons_json(queue_row["buttons_json"]),
+            "buttons": parsed_buttons,
+            "reply_markup": markup_info,
         }
         mark_outbound_sent(db, queue_row, message.id, utc_iso(message.date), payload)
         log_outbound(
@@ -1076,10 +1154,13 @@ async def process_outbound_row(client, db, queue_row):
             contact=queue_row["contact_id"],
             telegram_message_id=message.id,
             buttons=button_count,
+            reply_markup=markup_info.get("present"),
         )
         if button_count:
             print(
-                f"[telegram-outbound] welcome_buttons_sent id={queue_row['id']} contact={queue_row['contact_id']} telegram_message_id={message.id} buttons={button_count}",
+                f"[telegram-outbound] welcome_buttons_sent id={queue_row['id']} "
+                f"contact={queue_row['contact_id']} telegram_message_id={message.id} "
+                f"buttons={button_count} reply_markup_present={markup_info.get('present')}",
                 flush=True,
             )
             log_sync(
@@ -1090,7 +1171,8 @@ async def process_outbound_row(client, db, queue_row):
                     "outbound_id": queue_row["id"],
                     "contact_id": queue_row["contact_id"],
                     "telegram_message_id": message.id,
-                    "buttons": parse_buttons_json(queue_row["buttons_json"]),
+                    "buttons": parsed_buttons,
+                    "reply_markup": markup_info,
                 },
                 commit=False,
             )
@@ -1103,6 +1185,7 @@ async def process_outbound_row(client, db, queue_row):
                 "contact_id": queue_row["contact_id"],
                 "telegram_message_id": message.id,
                 "buttons": button_count,
+                "reply_markup": markup_info,
             },
         )
         notify_node(
