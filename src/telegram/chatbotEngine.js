@@ -129,7 +129,7 @@ export function normalizeCallbackAction(action) {
     'bot:talk_to_staff': 'staff:takeover',
     confirm: 'bot:confirm',
     edit: 'bot:edit',
-    cancel: 'bot:cancel'
+    cancel: 'bot:stop'
   };
   if (aliases[raw]) return aliases[raw];
   if (raw.startsWith('payment_app:') && !raw.startsWith('bot:')) {
@@ -171,19 +171,17 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const normalizedStep = normalizeStep(step, flow);
   const registrationInProgress = isRegistrationInProgress(flow, normalizedStep);
 
-  // Exact text commands work without inline buttons (Telethon user sessions).
-  if (!action && isStaffCommand(text)) {
+  // Stop commands interrupt before any registration step handling.
+  if (!action && isStopCommand(text)) {
+    action = 'bot:stop';
+  } else if (!action && isStaffCommand(text)) {
     action = 'staff:takeover';
-  } else if (!action && isRestartCommand(text) && isRegistrationFlow(flow)) {
-    action = 'bot:restart';
   } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(normalizedStep, flow, contact)) {
     action = 'bot:register';
   } else if (!action && isConfirmCommand(text) && normalizedStep === 'review' && isRegistrationFlow(flow)) {
     action = 'bot:confirm';
   } else if (!action && isEditCommand(text) && isRegistrationFlow(flow)) {
     action = 'bot:edit';
-  } else if (!action && isCancelCommand(text) && isRegistrationFlow(flow)) {
-    action = 'bot:cancel';
   }
 
   if (!registrationInProgress && detectInsult(text) && !action) {
@@ -215,12 +213,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return talkToStaffDecision();
   }
 
-  if (action === 'bot:cancel') {
-    return cancelRegistrationDecision(contact, info);
-  }
-
-  if (action === 'bot:restart') {
-    return await startRegistrationDecision(contact, info, store, { resumed: true });
+  if (action === 'bot:stop' || action === 'bot:cancel') {
+    return await stopRegistrationDecision({ store, contact, flow, step: normalizedStep, info });
   }
 
   if (!isUnregisteredStatus(contact.registration_status) && contact.registration_status === 'Registered') {
@@ -289,21 +283,64 @@ function talkToStaffDecision() {
   };
 }
 
-function cancelRegistrationDecision(contact, info) {
+function clearedRegistrationInfo(contact) {
   return {
-    kind: 'registration_cancelled',
-    replies: [{
-      text: welcomeMessage()
-    }],
+    telegram_display_name: contact.display_name,
+    telegram_username: contact.username || null,
+    telegram_user_id: contact.telegram_id
+  };
+}
+
+function registrationStoppedMessage() {
+  return [
+    'Registration has been stopped.',
+    'You can type Register anytime to start again, or Staff to talk with our team.'
+  ].join('\n');
+}
+
+function registrationStopIdleMessage() {
+  return [
+    'No active registration is running.',
+    'Type Register to start, or Staff to talk with our team.'
+  ].join('\n');
+}
+
+async function stopRegistrationDecision({ store, contact, flow, step, info }) {
+  const normalizedStep = normalizeStep(step, flow);
+  const active = isRegistrationInProgress(flow, normalizedStep);
+
+  if (!active) {
+    return {
+      kind: 'registration_stop_idle',
+      replies: [{ text: registrationStopIdleMessage() }],
+      statePatch: null,
+      escalate: false,
+      logEvent: { event: 'registration_stop_idle' }
+    };
+  }
+
+  const window = await store.getActiveRegistrationPaymentWindow(contact.id);
+  const logEvents = [
+    { event: 'registration_flow_stopped', step: normalizedStep }
+  ];
+  if (window?.id) {
+    logEvents.push({ event: 'active_payment_window_cancelled', windowId: window.id });
+  }
+  logEvents.push({ event: 'flow_reset_to_idle' });
+
+  return {
+    kind: 'registration_stopped',
+    replies: [{ text: registrationStoppedMessage() }],
     statePatch: {
       currentFlow: null,
       currentStep: null,
-      registrationInfo: info
+      registrationInfo: clearedRegistrationInfo(contact)
     },
+    replaceRegistrationInfo: true,
     setStatus: contact.registration_status === 'Collecting Info' ? 'New' : undefined,
-    markWelcomeSent: true,
+    expirePaymentWindowId: window?.id || null,
     escalate: false,
-    logEvent: { event: 'flow_cancelled' }
+    logEvents
   };
 }
 
@@ -881,8 +918,12 @@ function shouldStartRegistration(step, flow, contact) {
   return isUnregisteredStatus(contact.registration_status);
 }
 
+export function isStopCommand(text = '') {
+  return /^(stop|cancel|quit|restart|reset|start over)$/i.test(String(text || '').trim());
+}
+
 function isRestartCommand(text) {
-  return /^(restart|start over)$/i.test(String(text || '').trim());
+  return isStopCommand(text);
 }
 
 function isStartRegistrationCommand(text) {
@@ -907,10 +948,6 @@ function isConfirmCommand(text) {
 
 function isEditCommand(text) {
   return /^(edit|change|fix|no|n)$/i.test(String(text || '').trim());
-}
-
-function isCancelCommand(text) {
-  return /^(cancel|stop|quit)$/i.test(String(text || '').trim());
 }
 
 export {

@@ -10,6 +10,11 @@ function createFakeStore(initial = {}) {
   };
   const store = {
     state,
+    paymentWindow: initial.payment_window ?? {
+      id: 1,
+      status: 'active',
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+    },
     async ensureAutomationState() {
       return {
         ...state,
@@ -31,11 +36,7 @@ function createFakeStore(initial = {}) {
       return null;
     },
     async getActiveRegistrationPaymentWindow() {
-      return {
-        id: 1,
-        status: 'active',
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString()
-      };
+      return store.paymentWindow;
     }
   };
   return store;
@@ -156,9 +157,10 @@ async function run() {
     current_step: 'payment_app'
   });
   const cancelled = await decideBotReply({ store: cancelStore, contact, messageText: 'cancel' });
-  assertEqual(cancelled.kind, 'registration_cancelled');
-  assertEqual(cancelled.logEvent?.event, 'flow_cancelled');
+  assertEqual(cancelled.kind, 'registration_stopped');
+  assertIncludes(cancelled.replies[0].text, 'Registration has been stopped');
   assertEqual(cancelled.statePatch.currentFlow, null);
+  assertEvent(cancelled.logEvents, 'registration_flow_stopped');
   console.log('ok cancel interrupts flow');
 
   console.log('ALL AUTO-REPLY FIX CHECKS PASSED');
@@ -173,6 +175,12 @@ function assertEqual(actual, expected) {
 function assertIncludes(haystack, needle) {
   if (!String(haystack).includes(needle)) {
     throw new Error(`Expected text to include ${JSON.stringify(needle)}\nGot:\n${haystack}`);
+  }
+}
+
+function assertEvent(logEvents, eventName) {
+  if (!(logEvents || []).some((item) => item.event === eventName)) {
+    throw new Error(`Expected log event ${eventName} in ${JSON.stringify(logEvents)}`);
   }
 }
 

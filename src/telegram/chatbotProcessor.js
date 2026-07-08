@@ -197,8 +197,11 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
     });
 
     console.log(`[chatbot] bot reply generated id=${job.id} contact=${contact.id} kind=${decision.kind}`);
-    if (decision.logEvent?.event) {
-      console.log(`[chatbot] ${decision.logEvent.event} contact=${contact.id}${formatLogExtra(decision.logEvent)}`);
+    const logEvents = decision.logEvents || (decision.logEvent ? [decision.logEvent] : []);
+    for (const logEvent of logEvents) {
+      if (logEvent?.event) {
+        console.log(`[chatbot] ${logEvent.event} contact=${contact.id}${formatLogExtra(logEvent)}`);
+      }
     }
 
     if (decision.setStatus) {
@@ -207,7 +210,7 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
 
     if (decision.statePatch) {
       await store.updateAutomationState(contact.id, decision.statePatch);
-      if (decision.statePatch.registrationInfo) {
+      if (decision.statePatch.registrationInfo && !decision.replaceRegistrationInfo) {
         await store.updateRegistrationInfo(contact.id, decision.statePatch.registrationInfo, 'Chatbot');
       }
     }
