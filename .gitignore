@@ -1,4 +1,29 @@
-node_modules/
-data/
+# Environment
 .env
+.env.*
+
+# Dependencies
+node_modules/
+
+# Runtime data
+data/
+
+# Telegram sessions
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
 npm-debug.log*
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
