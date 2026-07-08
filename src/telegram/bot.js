@@ -3,7 +3,7 @@ import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
 import { handleMenuAction, initialScreenForUser, renderMenu } from './menuEngine.js';
 import { processAutomationActionForContact, processAutomationForContact } from './processAutomation.js';
 import { enqueueChatbotJob } from './chatbotProcessor.js';
-import { isBotActiveForContact } from './chatbotEngine.js';
+import { isBotActiveForContact, isChatbotButtonAction } from './chatbotEngine.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -25,7 +25,7 @@ export function startTelegramListener({ token, store, io }) {
 
       const action = ctx.callbackQuery.data;
       const fresh = await store.getUserProfile(user.id);
-      if (CHATBOT_ENABLED && isBotActiveForContact(fresh) && isChatbotAction(action)) {
+      if (CHATBOT_ENABLED && isBotActiveForContact(fresh) && isChatbotButtonAction(action)) {
         await enqueueChatbotJob(store, {
           contactId: user.id,
           telegramUserId: user.telegram_id,
@@ -151,12 +151,6 @@ export function startTelegramListener({ token, store, io }) {
   process.once('SIGTERM', () => stop('SIGTERM'));
 
   return bot;
-}
-
-function isChatbotAction(action) {
-  return String(action || '').startsWith('bot:')
-    || String(action || '').startsWith('staff:')
-    || action === 'flow:registration_info';
 }
 
 async function cacheProfilePhoto({ bot, store, user, io }) {

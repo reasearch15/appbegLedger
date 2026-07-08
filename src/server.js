@@ -13,7 +13,7 @@ import { renderMenu } from './telegram/menuEngine.js';
 import { startRegistrationFlow } from './telegram/automationEngine.js';
 import { processAutomationActionForContact, processAutomationForContact } from './telegram/processAutomation.js';
 import { enqueueChatbotJob } from './telegram/chatbotProcessor.js';
-import { isBotActiveForContact } from './telegram/chatbotEngine.js';
+import { isBotActiveForContact, isChatbotButtonAction } from './telegram/chatbotEngine.js';
 import { startChatbotWorker } from './telegram/chatbotWorker.js';
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
 import { startPaymentTelegramSync, stopPaymentTelegramSync } from './telegram/paymentSyncProcess.js';
@@ -470,10 +470,8 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
         const action = payload.action;
-        const isChatbotAction = String(action).startsWith('bot:')
-          || String(action).startsWith('staff:')
-          || action === 'flow:registration_info';
-        if (CHATBOT_ENABLED && isBotActiveForContact(user) && isChatbotAction) {
+        if (CHATBOT_ENABLED && isBotActiveForContact(user) && isChatbotButtonAction(action)) {
+          console.log(`[chatbot] callback received contact=${user.id} action=${action}`);
           await enqueueChatbotJob(store, {
             contactId: user.id,
             telegramUserId: user.telegram_id,
@@ -481,7 +479,7 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
             inputText: '',
             action
           });
-        } else {
+        } else if (!user.bot_paused && !user.needs_staff_review) {
           await processAutomationActionForContact({
             store,
             user,

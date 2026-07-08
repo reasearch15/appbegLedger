@@ -1204,18 +1204,46 @@ async def sync_forever():
             if not isinstance(entity, User) or entity.bot or entity.deleted:
                 return
             contact = upsert_contact(db, entity, now_iso())
-            await event.answer()
             action = event.data.decode("utf-8") if event.data else ""
+            try:
+                await event.answer()
+            except Exception as answer_exc:
+                # Answering is best-effort; registration must still proceed.
+                if DEBUG:
+                    log_sync(
+                        db,
+                        "callback_answer_failed",
+                        f"Callback answer failed: {answer_exc}",
+                        level="warning",
+                        metadata={"contact_id": contact["id"], "action": action},
+                    )
+            log_sync(
+                db,
+                "button_clicked",
+                f"Inline button clicked by contact {contact['id']}: {action}",
+                metadata={
+                    "contact_id": contact["id"],
+                    "telegram_id": entity.id,
+                    "action": action,
+                    "message_id": getattr(event, "message_id", None),
+                },
+            )
+            print(
+                f"[telegram-callback] button_clicked contact={contact['id']} telegram={entity.id} action={action}",
+                flush=True,
+            )
             notify_node(
                 "callback",
                 {
                     "contactId": contact["id"],
                     "telegramId": entity.id,
                     "action": action,
+                    "messageId": getattr(event, "message_id", None),
                 },
             )
         except Exception as exc:
             log_sync(db, "error", f"Callback handler failed: {exc}", level="error")
+            print(f"[telegram-callback] failed: {exc}", flush=True)
 
     outbound_task = None
     import_task = None

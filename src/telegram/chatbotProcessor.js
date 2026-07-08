@@ -1,7 +1,8 @@
 import { createAccountReplySender } from './messageDelivery.js';
 import {
   decideBotReply,
-  isBotActiveForContact
+  isBotActiveForContact,
+  isChatbotButtonAction
 } from './chatbotEngine.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 
@@ -12,7 +13,7 @@ import { registrationCompletionStatus } from '../registration/utils.js';
 export async function queueBotReply({ store, user, text, buttons = [] }) {
   const sendReply = createAccountReplySender({ store });
   const result = await sendReply({ user, text, buttons, messageType: buttons.length ? 'buttons' : 'text' });
-  console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'}`);
+  console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'} buttons=${(buttons || []).flat().length}`);
   return result;
 }
 
@@ -32,6 +33,15 @@ export async function enqueueChatbotJob(store, {
     return null;
   }
 
+  if (action && !isChatbotButtonAction(action) && jobType === 'callback_action') {
+    console.log(`[chatbot] skip unknown callback action=${action} contact=${contactId}`);
+    return null;
+  }
+
+  if (action) {
+    console.log(`[chatbot] button clicked contact=${contactId} action=${action}`);
+  }
+
   const job = await store.createBotJob({
     contactId,
     telegramUserId: telegramUserId || contact.telegram_id,
@@ -41,7 +51,7 @@ export async function enqueueChatbotJob(store, {
     inputText,
     action
   });
-  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}`);
+  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}`);
   await store.nudgeBotQueue(job.id);
   return job;
 }
@@ -68,6 +78,9 @@ export async function processBotJob(store, job, { io = null } = {}) {
     });
 
     console.log(`[chatbot] bot reply generated id=${job.id} contact=${contact.id} kind=${decision.kind}`);
+    if (decision.logEvent?.event) {
+      console.log(`[chatbot] ${decision.logEvent.event} contact=${contact.id}${formatLogExtra(decision.logEvent)}`);
+    }
 
     if (decision.setStatus) {
       await store.updateRegistrationStatus(contact.id, decision.setStatus, 'Chatbot');
@@ -91,6 +104,7 @@ export async function processBotJob(store, job, { io = null } = {}) {
         registrationMethod: 'chatbot',
         actorName: 'Chatbot'
       });
+      console.log(`[chatbot] registration completed contact=${contact.id}`);
     }
 
     for (const reply of decision.replies || []) {
@@ -116,7 +130,10 @@ export async function processBotJob(store, job, { io = null } = {}) {
       metadata: {
         jobId: job.id,
         escalate: Boolean(decision.escalate),
-        kind: decision.kind
+        kind: decision.kind,
+        action: job.action || null,
+        logEvent: decision.logEvent || null,
+        buttons: (decision.replies || []).flatMap((reply) => reply.buttons || [])
       }
     });
 
@@ -131,6 +148,13 @@ export async function processBotJob(store, job, { io = null } = {}) {
     });
     return { ok: false, error };
   }
+}
+
+function formatLogExtra(logEvent = {}) {
+  return Object.entries(logEvent)
+    .filter(([key]) => key !== 'event')
+    .map(([key, value]) => ` ${key}=${value}`)
+    .join('');
 }
 
 function emitUpdates(io, contact) {

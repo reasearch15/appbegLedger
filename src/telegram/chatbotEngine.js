@@ -1,7 +1,6 @@
 import {
   normalizeAppBegUsername,
   normalizePaymentTag,
-  registrationCompletionStatus,
   isUnregisteredStatus
 } from '../registration/utils.js';
 
@@ -9,9 +8,28 @@ export const BOT_REGISTRATION_STEPS = [
   'welcome',
   'username',
   'payment_app',
+  'payment_app_other',
   'payment_tag',
   'review',
   'complete'
+];
+
+export const PAYMENT_APP_OPTIONS = [
+  { label: 'Cash App', action: 'bot:payment_app:Cash App', value: 'Cash App' },
+  { label: 'Chime', action: 'bot:payment_app:Chime', value: 'Chime' },
+  { label: 'Zelle', action: 'bot:payment_app:Zelle', value: 'Zelle' },
+  { label: 'Apple Pay', action: 'bot:payment_app:Apple Pay', value: 'Apple Pay' },
+  { label: 'Other', action: 'bot:payment_app:Other', value: 'Other' }
+];
+
+export const WELCOME_BUTTONS = [
+  [{ label: '📝 Register', action: 'bot:register' }],
+  [{ label: '💬 Talk to Staff', action: 'staff:takeover' }]
+];
+
+export const REVIEW_BUTTONS = [
+  [{ label: 'Confirm', action: 'bot:confirm' }, { label: 'Edit', action: 'bot:edit' }],
+  [{ label: 'Cancel', action: 'bot:cancel' }]
 ];
 
 const INSULT_PATTERNS = [
@@ -49,6 +67,21 @@ export function isBotActiveForContact(contact) {
   return true;
 }
 
+export function isChatbotButtonAction(action) {
+  const value = String(action || '');
+  return value.startsWith('bot:')
+    || value.startsWith('staff:')
+    || value === 'flow:registration_info';
+}
+
+export function paymentAppButtons() {
+  return [
+    PAYMENT_APP_OPTIONS.slice(0, 2).map((item) => ({ label: item.label, action: item.action })),
+    PAYMENT_APP_OPTIONS.slice(2, 4).map((item) => ({ label: item.label, action: item.action })),
+    [PAYMENT_APP_OPTIONS[4]].map((item) => ({ label: item.label, action: item.action }))
+  ];
+}
+
 export async function decideBotReply({ store, contact, messageText = '', action = null }) {
   const text = String(messageText || '').trim();
   const automationState = await store.ensureAutomationState(contact.id);
@@ -56,18 +89,19 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const flow = automationState.current_flow;
   const step = automationState.current_step || 'welcome';
 
-  if (detectInsult(text)) {
+  if (detectInsult(text) && !action) {
     return {
       kind: 'insult_soft',
       replies: [{
         text: 'Haha, my digital heart is a little fragile 😅 What went wrong? I’ll try to help.'
       }],
       statePatch: null,
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'insult_soft_reply' }
     };
   }
 
-  if (detectStaffEscalation(text)) {
+  if (detectStaffEscalation(text) && !action) {
     return {
       kind: 'escalate',
       replies: [{
@@ -75,18 +109,17 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       }],
       statePatch: null,
       escalate: true,
-      escalateReason: 'risky_or_financial_request'
+      escalateReason: 'risky_or_financial_request',
+      logEvent: { event: 'handoff_required', reason: 'risky_or_financial_request' }
     };
   }
 
-  if (action === 'staff:takeover' || /^\/staff\b/i.test(text)) {
-    return {
-      kind: 'escalate',
-      replies: [{ text: 'Got it — transferring you to a teammate. Someone will jump in shortly.' }],
-      statePatch: null,
-      escalate: true,
-      escalateReason: 'user_requested_staff'
-    };
+  if (action === 'staff:takeover' || action === 'bot:talk_to_staff' || /^\/staff\b/i.test(text)) {
+    return talkToStaffDecision();
+  }
+
+  if (action === 'bot:cancel') {
+    return cancelRegistrationDecision(contact, info);
   }
 
   if (!isUnregisteredStatus(contact.registration_status) && contact.registration_status === 'Registered') {
@@ -97,60 +130,111 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return startRegistrationDecision(contact, info);
   }
 
+  if (String(action || '').startsWith('bot:payment_app:')) {
+    return selectPaymentAppDecision({
+      contact,
+      info,
+      selected: String(action).slice('bot:payment_app:'.length)
+    });
+  }
+
   if (flow === 'bot_registration' || flow === 'registration_info') {
     return continueRegistrationDecision({ contact, text, action, step, info, flow });
   }
 
   if (isUnregisteredStatus(contact.registration_status)) {
-    return {
-      kind: 'welcome',
-      replies: [{
-        text: welcomeCopy(contact),
-        buttons: [[{ label: 'Register', action: 'bot:register' }], [{ label: 'Talk to staff', action: 'staff:takeover' }]]
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'welcome',
-        registrationInfo: {
-          ...info,
-          telegram_display_name: contact.display_name,
-          telegram_username: contact.username || null,
-          telegram_user_id: contact.telegram_id
-        }
-      },
-      escalate: false
-    };
+    return welcomeDecision(contact, info);
   }
 
   return {
     kind: 'fallback_support',
     replies: [{
       text: 'I’m here and ready — tell me what you need, or tap below if you’d rather chat with a human.',
-      buttons: [[{ label: 'Talk to staff', action: 'staff:takeover' }]]
+      buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
     }],
     statePatch: null,
     escalate: false
   };
 }
 
+function talkToStaffDecision() {
+  return {
+    kind: 'talk_to_staff',
+    replies: [{
+      text: 'No problem. A staff member will assist you shortly.'
+    }],
+    statePatch: {
+      currentFlow: null,
+      currentStep: null
+    },
+    escalate: true,
+    escalateReason: 'manual_support',
+    logEvent: { event: 'button_clicked', action: 'staff:takeover' }
+  };
+}
+
+function cancelRegistrationDecision(contact, info) {
+  return {
+    kind: 'registration_cancelled',
+    replies: [{
+      text: welcomeMessage(),
+      buttons: WELCOME_BUTTONS
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: 'welcome',
+      registrationInfo: info
+    },
+    setStatus: contact.registration_status === 'Collecting Info' ? 'New' : undefined,
+    escalate: false,
+    logEvent: { event: 'registration_cancelled' }
+  };
+}
+
+function welcomeDecision(contact, info) {
+  return {
+    kind: 'welcome',
+    replies: [{
+      text: welcomeMessage(),
+      buttons: WELCOME_BUTTONS
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: 'welcome',
+      registrationInfo: {
+        ...info,
+        telegram_display_name: contact.display_name,
+        telegram_username: contact.username || null,
+        telegram_user_id: contact.telegram_id
+      }
+    },
+    escalate: false,
+    logEvent: { event: 'welcome_shown' }
+  };
+}
+
 function decideRegisteredSupport({ text, action }) {
-  if (action === 'staff:takeover' || SUPPORT_PATTERNS.test(text) || !text) {
-    if (action === 'staff:takeover' || /\b(human|agent|staff)\b/i.test(text)) {
-      return {
-        kind: 'escalate',
-        replies: [{ text: 'Absolutely — looping in staff for you. Thanks for your patience!' }],
-        statePatch: null,
-        escalate: true,
-        escalateReason: 'registered_support_handoff'
-      };
-    }
+  if (action === 'staff:takeover' || /\b(human|agent|staff)\b/i.test(text)) {
+    return talkToStaffDecision();
+  }
+
+  if (SUPPORT_PATTERNS.test(text)) {
+    return {
+      kind: 'registered_support',
+      replies: [{
+        text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever), or I can grab a human teammate.',
+        buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
+      }],
+      statePatch: null,
+      escalate: false
+    };
   }
 
   return {
     kind: 'registered_support',
     replies: [{
-      text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever), or I can grab a human teammate.',
-      buttons: [[{ label: 'Talk to staff', action: 'staff:takeover' }]]
+      text: 'You’re all set on registration. Tell me what you need help with, or tap below for a human teammate.',
+      buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
     }],
     statePatch: null,
     escalate: false
@@ -161,7 +245,7 @@ function startRegistrationDecision(contact, info) {
   return {
     kind: 'registration_ask_username',
     replies: [{
-      text: `Awesome${contact.display_name ? `, ${firstName(contact)}` : ''}! Let’s get you registered.\n\nWhat AppBeg username would you like?`
+      text: 'Great! Let’s get you registered. What username would you like?'
     }],
     statePatch: {
       currentFlow: 'bot_registration',
@@ -175,7 +259,45 @@ function startRegistrationDecision(contact, info) {
       }
     },
     setStatus: 'Collecting Info',
-    escalate: false
+    escalate: false,
+    logEvent: { event: 'registration_started' }
+  };
+}
+
+function selectPaymentAppDecision({ info, selected }) {
+  if (selected === 'Other') {
+    return {
+      kind: 'registration_ask_payment_app_other',
+      replies: [{
+        text: 'Got it — which payment app should we list as Other?'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'payment_app_other',
+        registrationInfo: info
+      },
+      escalate: false,
+      logEvent: { event: 'payment_app_selected', paymentApp: 'Other' }
+    };
+  }
+
+  const nextInfo = {
+    ...info,
+    preferred_game: selected,
+    payment_app: selected
+  };
+  return {
+    kind: 'registration_ask_payment_tag',
+    replies: [{
+      text: `Perfect — ${selected}. What’s your payment name/tag for deposits?`
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: 'payment_tag',
+      registrationInfo: nextInfo
+    },
+    escalate: false,
+    logEvent: { event: 'payment_app_selected', paymentApp: selected }
   };
 }
 
@@ -186,7 +308,7 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
     return {
       kind: 'registration_complete',
       replies: [{
-        text: "Perfect — I've packed up your details and sent them for a quick staff check. You're almost in the club! 🎉"
+        text: "Perfect — I've saved your details for a quick staff check. You're almost in! 🎉"
       }],
       statePatch: {
         currentFlow: null,
@@ -194,24 +316,29 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
         registrationInfo: { ...info, registration_method: 'chatbot' }
       },
       completeRegistration: true,
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'registration_completed' }
     };
   }
 
   if (action === 'bot:edit' || (normalizedStep === 'review' && NEGATE_PATTERNS.test(text))) {
     return {
       kind: 'registration_ask_username',
-      replies: [{ text: 'No problem — let’s tweak it. What AppBeg username should we use?' }],
+      replies: [{ text: 'No problem — let’s tweak it. What username would you like?' }],
       statePatch: {
         currentFlow: 'bot_registration',
         currentStep: 'username',
         registrationInfo: info
       },
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'registration_edit_started' }
     };
   }
 
   if (normalizedStep === 'welcome') {
+    if (!text && !action) {
+      return welcomeDecision(contact, info);
+    }
     return startRegistrationDecision(contact, info);
   }
 
@@ -219,7 +346,7 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
     if (!text || text.length < 2) {
       return {
         kind: 'registration_ask_username',
-        replies: [{ text: 'I need a username with at least a couple of characters. What AppBeg username would you like?' }],
+        replies: [{ text: 'I need a username with at least a couple of characters. What username would you like?' }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'username', registrationInfo: info },
         escalate: false
       };
@@ -231,18 +358,38 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
     };
     return {
       kind: 'registration_ask_payment_app',
-      replies: [{ text: `Nice pick: ${text}. Which payment app do you use? (Cash App, Venmo, etc.)` }],
+      replies: [{
+        text: `Nice pick: ${text}.\n\nWhich payment app do you use?`,
+        buttons: paymentAppButtons()
+      }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: nextInfo },
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'username_collected', username: text }
     };
   }
 
   if (normalizedStep === 'payment_app') {
+    // Prefer buttons; typed text is accepted as a fallback.
     if (!text) {
       return {
         kind: 'registration_ask_payment_app',
-        replies: [{ text: 'Which payment app should we note for you?' }],
+        replies: [{
+          text: 'Please choose a payment app below.',
+          buttons: paymentAppButtons()
+        }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false
+      };
+    }
+    return selectPaymentAppDecision({ info, selected: text });
+  }
+
+  if (normalizedStep === 'payment_app_other') {
+    if (!text) {
+      return {
+        kind: 'registration_ask_payment_app_other',
+        replies: [{ text: 'Which payment app should we list as Other?' }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app_other', registrationInfo: info },
         escalate: false
       };
     }
@@ -251,7 +398,8 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
       kind: 'registration_ask_payment_tag',
       replies: [{ text: `Got it — ${text}. What’s your payment name/tag for deposits?` }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_tag', registrationInfo: nextInfo },
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'payment_app_selected', paymentApp: text }
     };
   }
 
@@ -282,7 +430,7 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
 function reviewDecision(info) {
   const summary = [
     'Please confirm these details:',
-    `• AppBeg username: ${info.preferred_appbeg_username || '—'}`,
+    `• Username: ${info.preferred_appbeg_username || '—'}`,
     `• Payment app: ${info.payment_app || info.preferred_game || '—'}`,
     `• Payment tag: ${info.payment_tag || '—'}`
   ].join('\n');
@@ -291,17 +439,15 @@ function reviewDecision(info) {
     kind: 'registration_review',
     replies: [{
       text: `${summary}\n\nLooks good?`,
-      buttons: [
-        [{ label: 'Confirm', action: 'bot:confirm' }],
-        [{ label: 'Edit', action: 'bot:edit' }]
-      ]
+      buttons: REVIEW_BUTTONS
     }],
     statePatch: {
       currentFlow: 'bot_registration',
       currentStep: 'review',
       registrationInfo: info
     },
-    escalate: false
+    escalate: false,
+    logEvent: { event: 'registration_review_shown' }
   };
 }
 
@@ -314,16 +460,12 @@ function normalizeStep(step, flow) {
   return 'welcome';
 }
 
-function welcomeCopy(contact) {
-  const name = firstName(contact);
-  return `Hey${name ? ` ${name}` : ''}! Welcome to Royal VIP 👋\n\nIt looks like you’re not registered with us yet.\nTap Register and I’ll walk you through it — one fun step at a time.`;
-}
+function welcomeMessage() {
+  return `👋 Hey! Welcome to Royal VIP.
 
-function firstName(contact) {
-  return String(contact.first_name || contact.display_name || '')
-    .split(/\s+/)[0]
-    .replace(/[^\w.-]/g, '')
-    .slice(0, 24);
+It looks like you're not registered with us yet.
+
+Choose an option below.`;
 }
 
 export function registrationStatusLabel(contact) {
