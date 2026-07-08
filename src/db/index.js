@@ -15,9 +15,11 @@ import {
 import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
 import { depositWindowMinutes } from '../payments/constants.js';
 import {
+  CONVERSATION_STATUSES,
   DEFAULT_AUTOMATION_RULES,
   DEFAULT_QUICK_REPLIES,
-  DEFAULT_TAGS
+  DEFAULT_TAGS,
+  REGISTRATION_STATUSES
 } from './defaults.js';
 import { createQueryHelpers } from './query-helpers.js';
 import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '../payments/methodUtils.js';
