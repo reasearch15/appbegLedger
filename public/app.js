@@ -16,6 +16,7 @@ let state = {
   mobileContactsPane: 'list',
   mobilePaymentsPane: 'list',
   mobilePlayersPane: 'list',
+  navOpen: false,
   contacts: [],
   stats: {},
   sync: {},
@@ -1410,13 +1411,19 @@ function render() {
       <span class="nav-label">${item.label}</span>
     </button>
   `).join('');
+  const sectionTitle = items.find((item) => item.id === state.section)?.label || 'Operations';
 
   app.innerHTML = `
-    <div class="ops-shell section-${escapeHtml(state.section)}">
-      <aside class="sidebar desktop-nav">
+    <div class="ops-shell section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
+      <button type="button" class="nav-drawer-backdrop" data-nav-close aria-label="Close menu"></button>
+      <aside class="sidebar" id="appSidebar">
         <div class="brand">Royal VIP Coadmin</div>
         ${navHtml}
       </aside>
+      <div class="mobile-topbar mobile-only">
+        <button type="button" class="menu-toggle" data-nav-toggle aria-label="Open menu">☰</button>
+        <div class="brand-inline">${escapeHtml(sectionTitle)}</div>
+      </div>
       ${state.section === 'payments'
     ? paymentsWorkspace()
     : state.section === 'players'
@@ -1424,9 +1431,6 @@ function render() {
       : state.section === 'settings'
         ? settingsWorkspace()
         : contactsWorkspace()}
-      <nav class="bottom-nav mobile-only" aria-label="Primary">
-        ${navHtml}
-      </nav>
     </div>
     ${renderRegistrationModal(state)}
   `;
@@ -1555,6 +1559,7 @@ function bindEvents() {
   document.querySelectorAll('[data-section]').forEach((button) => {
     button.addEventListener('click', async () => {
       state.section = button.dataset.section;
+      state.navOpen = false;
       if (state.section === 'contacts') state.mobileContactsPane = 'list';
       if (state.section === 'payments') state.mobilePaymentsPane = 'list';
       if (state.section === 'players') state.mobilePlayersPane = 'list';
@@ -1566,6 +1571,22 @@ function bindEvents() {
         await refreshPlayers({ keepSelection: true });
       }
       render();
+    });
+  });
+
+  document.querySelectorAll('[data-nav-toggle]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      state.navOpen = !state.navOpen;
+      document.querySelector('.ops-shell')?.classList.toggle('nav-open', state.navOpen);
+    });
+  });
+
+  document.querySelectorAll('[data-nav-close]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      state.navOpen = false;
+      document.querySelector('.ops-shell')?.classList.remove('nav-open');
     });
   });
 
