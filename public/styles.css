@@ -209,6 +209,248 @@ h2 {
   gap: 12px;
 }
 
+.overview-panel,
+.chat-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.workspace-main > .overview-panel,
+.workspace-main > .chat-panel {
+  grid-area: 1 / 1;
+  min-height: 0;
+}
+
+.contacts-workspace .chat-panel {
+  display: none;
+}
+
+.contacts-workspace .overview-panel {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: auto;
+}
+
+.contacts-workspace.mobile-pane-chat .overview-panel {
+  display: none;
+}
+
+.contacts-workspace.mobile-pane-chat .chat-panel {
+  display: grid;
+}
+
+.contacts-workspace.mobile-pane-details .overview-panel,
+.contacts-workspace.mobile-pane-details .chat-panel {
+  display: none;
+}
+
+.contacts-workspace.wizard-active .details-panel-wrap {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.desktop-only {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .desktop-only {
+    display: inline-flex;
+  }
+}
+
+/* Contact overview + registration wizard */
+.contact-overview-panel {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  align-content: start;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 420px at 10% -10%, rgba(15, 118, 110, 0.08), transparent 55%),
+    radial-gradient(900px 360px at 100% 0%, rgba(217, 119, 6, 0.07), transparent 50%),
+    var(--panel);
+}
+
+.contact-overview-empty {
+  display: grid;
+  place-content: center;
+  min-height: 280px;
+  text-align: center;
+  gap: 8px;
+  padding: 24px;
+}
+
+.overview-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.overview-name {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.status-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+}
+
+.status-card-success {
+  background: linear-gradient(160deg, #ecfdf5 0%, #f0fdfa 55%, #ffffff 100%);
+  border-color: #99f6e4;
+}
+
+.status-card-warning {
+  background: linear-gradient(160deg, #fffbeb 0%, #fef3c7 40%, #ffffff 100%);
+  border-color: #fcd34d;
+}
+
+.status-card-icon {
+  font-size: 28px;
+  line-height: 1;
+  margin-top: 2px;
+}
+
+.status-card-body h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.status-card-body p {
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+.status-card-lead {
+  color: var(--muted) !important;
+}
+
+.status-card-meta {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0 16px;
+}
+
+.status-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.overview-meta-card {
+  margin: 0;
+}
+
+.wizard-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.wizard-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #0f766e, #14b8a6);
+  border-radius: inherit;
+  transition: width 180ms ease;
+}
+
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wizard-step-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: var(--muted);
+}
+
+.wizard-step-pill.done {
+  background: #ccfbf1;
+  color: var(--registered);
+}
+
+.wizard-step-pill.current {
+  background: #0f766e;
+  color: #fff;
+}
+
+.wizard-step-card {
+  margin: 0;
+}
+
+.wizard-step-copy {
+  margin: 0 0 14px;
+}
+
+.wizard-welcome,
+.wizard-review {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.overview-back-btn {
+  flex-shrink: 0;
+}
+
+.registration-wizard-panel .card-title {
+  font-size: 16px;
+}
+
+.bot-status-chip {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.bot-status-chip.active {
+  color: #0f766e;
+  background: #ccfbf1;
+}
+
+.bot-status-chip.paused {
+  color: #92400e;
+  background: #fde68a;
+}
+
+.bot-status-chip.review {
+  color: #9f1239;
+  background: #fecdd3;
+}
+
 .payments-layout,
 .players-layout {
   min-height: 0;
@@ -1264,6 +1506,16 @@ textarea {
     display: none;
   }
 
+  .contacts-workspace.mobile-pane-overview .overview-panel,
+  .contacts-workspace.mobile-pane-list .overview-panel {
+    display: block;
+  }
+
+  .contacts-workspace.mobile-pane-overview .chat-panel,
+  .contacts-workspace.mobile-pane-list .chat-panel {
+    display: none;
+  }
+
   .payments-layout,
   .players-layout,
   .settings-layout {
@@ -1471,6 +1723,8 @@ textarea {
 
   .contacts-panel,
   .chat-panel,
+  .overview-panel,
+  .workspace-main,
   .details-panel,
   .payments-feed,
   .payment-detail,
@@ -1485,6 +1739,8 @@ textarea {
     min-width: 0;
   }
 
+  .contacts-workspace .workspace-main,
+  .contacts-workspace .overview-panel,
   .contacts-workspace .chat-panel,
   .contacts-workspace .details-panel-wrap {
     display: none;
@@ -1497,8 +1753,30 @@ textarea {
     max-height: calc(var(--app-vh, 100dvh) - 56px - env(safe-area-inset-bottom, 0px));
   }
 
-  .contacts-workspace.mobile-pane-chat .contacts-panel {
+  .contacts-workspace.mobile-pane-overview .contacts-panel,
+  .contacts-workspace.mobile-pane-chat .contacts-panel,
+  .contacts-workspace.mobile-pane-details .contacts-panel {
     display: none;
+  }
+
+  .contacts-workspace.mobile-pane-overview .workspace-main {
+    display: grid;
+    min-height: calc(var(--app-vh, 100dvh) - 56px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(var(--app-vh, 100dvh) - 56px - env(safe-area-inset-bottom, 0px));
+  }
+
+  .contacts-workspace.mobile-pane-overview .overview-panel {
+    display: block;
+    overflow: auto;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  .contacts-workspace.mobile-pane-chat .workspace-main {
+    display: grid;
+    min-height: calc(var(--app-vh, 100dvh) - 56px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(var(--app-vh, 100dvh) - 56px - env(safe-area-inset-bottom, 0px));
   }
 
   .contacts-workspace.mobile-pane-chat .chat-panel {
@@ -1512,13 +1790,15 @@ textarea {
     display: none !important;
   }
 
-  .ops-shell.section-contacts.chat-focused .contacts-workspace.mobile-pane-chat .chat-panel {
+  .ops-shell.section-contacts.chat-focused .contacts-workspace.mobile-pane-chat .workspace-main,
+  .ops-shell.section-contacts.chat-focused .contacts-workspace.mobile-pane-overview .workspace-main {
     min-height: calc(var(--app-vh, 100dvh) - env(safe-area-inset-bottom, 0px));
     max-height: calc(var(--app-vh, 100dvh) - env(safe-area-inset-bottom, 0px));
   }
 
-  .contacts-workspace.mobile-pane-details .contacts-panel,
-  .contacts-workspace.mobile-pane-details .chat-panel {
+  .contacts-workspace.mobile-pane-details .overview-panel,
+  .contacts-workspace.mobile-pane-details .chat-panel,
+  .contacts-workspace.mobile-pane-details .workspace-main {
     display: none;
   }
 

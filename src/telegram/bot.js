@@ -2,6 +2,10 @@ import { Telegraf } from 'telegraf';
 import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
 import { handleMenuAction, initialScreenForUser, renderMenu } from './menuEngine.js';
 import { processAutomationActionForContact, processAutomationForContact } from './processAutomation.js';
+import { enqueueChatbotJob } from './chatbotProcessor.js';
+import { isBotActiveForContact } from './chatbotEngine.js';
+
+const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
 export function startTelegramListener({ token, store, io }) {
   if (!token) {
@@ -18,8 +22,24 @@ export function startTelegramListener({ token, store, io }) {
       const user = await store.upsertTelegramUser(ctx.from);
       await store.ensureConversation(user.id);
       await ctx.answerCbQuery();
+
+      const action = ctx.callbackQuery.data;
+      const fresh = await store.getUserProfile(user.id);
+      if (CHATBOT_ENABLED && isBotActiveForContact(fresh) && isChatbotAction(action)) {
+        await enqueueChatbotJob(store, {
+          contactId: user.id,
+          telegramUserId: user.telegram_id,
+          jobType: 'callback_action',
+          inputText: '',
+          action
+        });
+        io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
+        io.emit('contacts:changed');
+        return;
+      }
+
       const automationResult = await processAutomationActionForContact({
-        action: ctx.callbackQuery.data,
+        action,
         store,
         user,
         bot,
@@ -27,7 +47,7 @@ export function startTelegramListener({ token, store, io }) {
       });
       if (!automationResult?.handled) {
         await handleMenuAction({
-          action: ctx.callbackQuery.data,
+          action,
           bot,
           store,
           user
@@ -59,6 +79,25 @@ export function startTelegramListener({ token, store, io }) {
       io.emit('users:changed');
       if (PROFILE_PHOTOS_ENABLED) {
         cacheProfilePhoto({ bot, store, user: result.user, io });
+      }
+
+      const fresh = await store.getUserProfile(result.user.id);
+      if (CHATBOT_ENABLED && result.inserted && isBotActiveForContact(fresh)) {
+        const messageId = await store.findLatestIncomingMessageId(result.user.id, ctx.message.message_id);
+        await enqueueChatbotJob(store, {
+          contactId: result.user.id,
+          telegramUserId: result.user.telegram_id,
+          messageId,
+          incomingTelegramMessageId: ctx.message.message_id,
+          jobType: 'inbound_message',
+          inputText: ctx.message.text || ctx.message.caption || ''
+        });
+        return;
+      }
+
+      // Staff override / handoff: do not auto-reply while bot is paused.
+      if (fresh?.bot_paused || fresh?.needs_staff_review) {
+        return;
       }
 
       const automationResult = await processAutomationForContact({
@@ -112,6 +151,12 @@ export function startTelegramListener({ token, store, io }) {
   process.once('SIGTERM', () => stop('SIGTERM'));
 
   return bot;
+}
+
+function isChatbotAction(action) {
+  return String(action || '').startsWith('bot:')
+    || String(action || '').startsWith('staff:')
+    || action === 'flow:registration_info';
 }
 
 async function cacheProfilePhoto({ bot, store, user, io }) {

@@ -17,6 +17,38 @@ export async function migratePostgres(driver) {
     ALTER TABLE telegram_outbound_messages
       ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]';
   `);
+  await driver.exec(`
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS needs_staff_review BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused_at TEXT;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused_by TEXT;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_reason TEXT;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_at TEXT;
+  `);
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS bot_jobs (
+      id BIGSERIAL PRIMARY KEY,
+      contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+      telegram_user_id TEXT NOT NULL,
+      message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+      incoming_telegram_message_id BIGINT,
+      job_type TEXT NOT NULL DEFAULT 'inbound_message',
+      input_text TEXT,
+      action TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      worker_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      error_text TEXT,
+      claimed_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC);
+  `);
 
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);
   if (applied?.ok) {

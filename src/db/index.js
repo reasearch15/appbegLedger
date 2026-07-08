@@ -281,6 +281,206 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(localMessageId, nowIso(), outboundId);
   }
 
+  async function createBotJob({
+    contactId,
+    telegramUserId,
+    messageId = null,
+    incomingTelegramMessageId = null,
+    jobType = 'inbound_message',
+    inputText = '',
+    action = null
+  }) {
+    const now = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO bot_jobs (
+        contact_id, telegram_user_id, message_id, incoming_telegram_message_id,
+        job_type, input_text, action, status, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      contactId,
+      String(telegramUserId),
+      messageId,
+      incomingTelegramMessageId,
+      jobType,
+      inputText || null,
+      action || null,
+      now,
+      now
+    );
+    return await db.prepare('SELECT * FROM bot_jobs WHERE id = ?').get(result.lastInsertRowid);
+  }
+
+  async function nudgeBotQueue(jobId) {
+    await db.prepare(`
+      INSERT INTO sync_state (key, value, updated_at)
+      VALUES ('bot_jobs:nudge', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(String(jobId || Date.now()), nowIso());
+  }
+
+  async function claimNextBotJob(workerId) {
+    const now = nowIso();
+    const candidate = await db.prepare(`
+      SELECT id
+      FROM bot_jobs
+      WHERE status = 'pending'
+        AND contact_id NOT IN (
+          SELECT contact_id FROM bot_jobs WHERE status = 'processing'
+        )
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+    `).get();
+    if (!candidate?.id) return null;
+
+    const updated = await db.prepare(`
+      UPDATE bot_jobs
+      SET status = 'processing',
+          worker_id = ?,
+          claimed_at = ?,
+          attempts = attempts + 1,
+          updated_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(workerId, now, now, candidate.id);
+
+    if (!updated.changes) return null;
+    return await db.prepare('SELECT * FROM bot_jobs WHERE id = ?').get(candidate.id);
+  }
+
+  async function completeBotJob(jobId, { status = 'completed', errorText = null } = {}) {
+    await db.prepare(`
+      UPDATE bot_jobs
+      SET status = ?,
+          error_text = ?,
+          completed_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(status, errorText, nowIso(), nowIso(), jobId);
+  }
+
+  async function resetStuckBotJobs(reason = 'Worker restart') {
+    await db.prepare(`
+      UPDATE bot_jobs
+      SET status = 'failed',
+          error_text = COALESCE(error_text, ?),
+          completed_at = ?,
+          updated_at = ?
+      WHERE status = 'processing'
+    `).run(reason, nowIso(), nowIso());
+  }
+
+  async function setBotControl(contactId, {
+    botEnabled = null,
+    botPaused = null,
+    needsStaffReview = null,
+    staffReviewReason = null,
+    actorName = 'Staff'
+  } = {}) {
+    const current = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
+    if (!current) throw new Error('Contact not found.');
+    const now = nowIso();
+    const nextEnabled = botEnabled == null ? Boolean(current.bot_enabled ?? true) : Boolean(botEnabled);
+    const nextPaused = botPaused == null ? Boolean(current.bot_paused) : Boolean(botPaused);
+    const nextReview = needsStaffReview == null ? Boolean(current.needs_staff_review) : Boolean(needsStaffReview);
+    await db.prepare(`
+      UPDATE telegram_users
+      SET bot_enabled = ?,
+          bot_paused = ?,
+          needs_staff_review = ?,
+          bot_paused_at = ?,
+          bot_paused_by = ?,
+          staff_review_reason = ?,
+          staff_review_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      nextEnabled,
+      nextPaused,
+      nextReview,
+      nextPaused ? (current.bot_paused_at || now) : null,
+      nextPaused ? (current.bot_paused_by || actorName) : null,
+      nextReview ? (staffReviewReason || current.staff_review_reason || 'staff_review') : null,
+      nextReview ? (current.staff_review_at || now) : null,
+      now,
+      contactId
+    );
+
+    if (botPaused === true) {
+      await logEvent({
+        telegramUserId: contactId,
+        eventType: 'bot_paused',
+        title: 'Bot Paused',
+        body: 'Staff paused automated replies.',
+        actorName,
+        metadata: { botPaused: true }
+      });
+    }
+    if (botPaused === false && current.bot_paused) {
+      await logEvent({
+        telegramUserId: contactId,
+        eventType: 'bot_resumed',
+        title: 'Bot Resumed',
+        body: 'Automated replies resumed.',
+        actorName,
+        metadata: { botPaused: false }
+      });
+    }
+    return await getUserProfile(contactId);
+  }
+
+  async function markBotNeedsStaffReview(contactId, reason = 'handoff', actorName = 'Chatbot') {
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE telegram_users
+      SET needs_staff_review = ?,
+          bot_paused = ?,
+          bot_paused_at = COALESCE(bot_paused_at, ?),
+          bot_paused_by = COALESCE(bot_paused_by, ?),
+          staff_review_reason = ?,
+          staff_review_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(true, true, now, actorName, reason, now, now, contactId);
+
+    await db.prepare(`
+      UPDATE conversations
+      SET status = 'Waiting', updated_at = ?
+      WHERE telegram_user_id = ? AND channel = 'telegram_private'
+    `).run(nowIso(), contactId);
+
+    await logEvent({
+      telegramUserId: contactId,
+      eventType: 'bot_handoff',
+      title: 'Bot Handoff Required',
+      body: reason,
+      actorName,
+      metadata: { reason }
+    });
+
+    return await getUserProfile(contactId);
+  }
+
+  async function findLatestIncomingMessageId(contactId, telegramMessageId = null) {
+    if (telegramMessageId != null) {
+      const byTelegram = await db.prepare(`
+        SELECT id FROM messages
+        WHERE telegram_user_id = ?
+          AND telegram_message_id = ?
+          AND direction = 'incoming'
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(contactId, telegramMessageId);
+      if (byTelegram?.id) return byTelegram.id;
+    }
+    const latest = await db.prepare(`
+      SELECT id FROM messages
+      WHERE telegram_user_id = ? AND direction = 'incoming'
+      ORDER BY sent_at DESC, id DESC
+      LIMIT 1
+    `).get(contactId);
+    return latest?.id || null;
+  }
+
   async function listUsers() {
     return (await db.prepare(`
       SELECT
@@ -1946,13 +2146,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getPaymentSyncState,
     updatePaymentSyncState,
     logPaymentListener,
-    listPaymentListenerLogs
+    listPaymentListenerLogs,
+    createBotJob,
+    nudgeBotQueue,
+    claimNextBotJob,
+    completeBotJob,
+    resetStuckBotJobs,
+    setBotControl,
+    markBotNeedsStaffReview,
+    findLatestIncomingMessageId
   };
 }
 
 function hydrateUser(user) {
   return {
     ...user,
+    bot_enabled: user.bot_enabled === undefined || user.bot_enabled === null ? true : Boolean(user.bot_enabled),
+    bot_paused: Boolean(user.bot_paused),
+    needs_staff_review: Boolean(user.needs_staff_review),
     tags: parseJsonField(user.tags_json, []).filter((tag) => tag && tag.id),
     tags_json: undefined
   };
@@ -2079,7 +2290,14 @@ async function migrate(db) {
     ['telegram_sync_source', 'TEXT'],
     ['telegram_source_account_id', 'TEXT'],
     ['telegram_source_account_username', 'TEXT'],
-    ['registration_method', 'TEXT']
+    ['registration_method', 'TEXT'],
+    ['bot_enabled', 'INTEGER NOT NULL DEFAULT 1'],
+    ['bot_paused', 'INTEGER NOT NULL DEFAULT 0'],
+    ['needs_staff_review', 'INTEGER NOT NULL DEFAULT 0'],
+    ['bot_paused_at', 'TEXT'],
+    ['bot_paused_by', 'TEXT'],
+    ['staff_review_reason', 'TEXT'],
+    ['staff_review_at', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'telegram_users', column[0], column[1]);
   }
@@ -2211,6 +2429,32 @@ async function migrate(db) {
   await db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_outbound_contact_created ON telegram_outbound_messages(contact_id, created_at DESC)');
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request ON telegram_outbound_messages(client_request_id, contact_id) WHERE client_request_id IS NOT NULL');
   await addColumnIfMissing(db, 'telegram_outbound_messages', 'buttons_json', "TEXT NOT NULL DEFAULT '[]'");
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS bot_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      telegram_user_id TEXT NOT NULL,
+      message_id INTEGER,
+      incoming_telegram_message_id INTEGER,
+      job_type TEXT NOT NULL DEFAULT 'inbound_message',
+      input_text TEXT,
+      action TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      worker_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      error_text TEXT,
+      claimed_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS coadmin_settings (

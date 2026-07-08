@@ -2,6 +2,13 @@ import { statusBadge, progressBar, progressChecklist } from './playerUtils.js';
 import { renderAvatar as avatar } from './avatarUtils.js';
 import { renderRegistrationModal, readRegistrationModalForm } from './registrationModal.js';
 import { createPlayersController } from './playersRegistry.js';
+import {
+  renderContactOverview,
+  createEmptyWizardForm,
+  registrationWizardIndex,
+  REGISTRATION_WIZARD_STEPS,
+  isRegistrationComplete
+} from './contactOverview.js';
 
 const app = document.querySelector('#app');
 const socket = io();
@@ -66,7 +73,8 @@ let state = {
   coadminApplying: false,
   settingsSuccess: null,
   settingsError: null,
-  registrationModal: null
+  registrationModal: null,
+  registrationWizard: null
 };
 
 let playersController;
@@ -262,16 +270,19 @@ playersController = createPlayersController({
   render
 });
 
-async function openContactById(contactId) {
+async function openContactById(contactId, { pane = 'overview' } = {}) {
   const id = normalizeContactId(contactId);
   if (!id) return;
   const changed = state.selectedContactId !== id;
   const requestId = ++selectedContactRequestId;
   const cached = getCachedContactDetail(id);
   state.section = 'contacts';
-  state.mobileContactsPane = 'chat';
+  state.mobileContactsPane = pane === 'chat' ? 'chat' : pane === 'details' ? 'details' : 'overview';
   state.selectedContactId = id;
   state.draft = '';
+  if (changed) {
+    state.registrationWizard = null;
+  }
   if (!changed && state.contact?.id === id) {
     render();
     return;
@@ -307,6 +318,198 @@ async function openContactById(contactId) {
         state.selectedContactId = id;
         render();
       });
+  }
+}
+
+function openContactConversation(contactId) {
+  return openContactById(contactId, { pane: 'chat' });
+}
+
+function startRegistrationWizard(contactId) {
+  const id = Number(contactId || state.selectedContactId);
+  if (!id) return;
+  const contact = state.contact?.id === id ? state.contact : state.contacts.find((item) => item.id === id);
+  state.registrationWizard = {
+    active: true,
+    contactId: id,
+    step: 'welcome',
+    form: createEmptyWizardForm(contact, state.automationState),
+    error: null,
+    saving: false
+  };
+  state.mobileContactsPane = 'overview';
+  render();
+}
+
+function exitRegistrationWizard() {
+  state.registrationWizard = null;
+  state.mobileContactsPane = 'overview';
+  render();
+}
+
+function syncWizardFieldFromDom() {
+  const wizard = state.registrationWizard;
+  if (!wizard?.active) return;
+  const input = document.querySelector('#wizardFieldInput');
+  if (!input) return;
+  const field = input.dataset.wizardField;
+  if (!field) return;
+  state.registrationWizard = {
+    ...wizard,
+    form: { ...wizard.form, [field]: input.value }
+  };
+}
+
+function wizardNextStep() {
+  const wizard = state.registrationWizard;
+  if (!wizard?.active || wizard.saving) return;
+  syncWizardFieldFromDom();
+  const stepIndex = registrationWizardIndex(wizard.step);
+  const step = REGISTRATION_WIZARD_STEPS[stepIndex];
+  const form = { ...state.registrationWizard.form };
+
+  if (step?.field && step.required && !String(form[step.field] || '').trim()) {
+    state.registrationWizard = { ...wizard, form, error: `${step.title} is required.` };
+    render();
+    return;
+  }
+
+  const next = REGISTRATION_WIZARD_STEPS[stepIndex + 1];
+  if (!next) return;
+  state.registrationWizard = {
+    ...wizard,
+    form,
+    step: next.key,
+    error: null
+  };
+  render();
+}
+
+function wizardBackStep() {
+  const wizard = state.registrationWizard;
+  if (!wizard?.active || wizard.saving) return;
+  syncWizardFieldFromDom();
+  const stepIndex = registrationWizardIndex(wizard.step);
+  const prev = REGISTRATION_WIZARD_STEPS[stepIndex - 1];
+  if (!prev) return;
+  state.registrationWizard = {
+    ...wizard,
+    form: { ...state.registrationWizard.form },
+    step: prev.key,
+    error: null
+  };
+  render();
+}
+
+async function completeRegistrationWizard() {
+  const wizard = state.registrationWizard;
+  if (!wizard?.active || wizard.saving) return;
+
+  syncWizardFieldFromDom();
+  const form = { ...state.registrationWizard.form };
+  const appbegUsername = String(form.appbegUsername || '').trim();
+  const paymentTag = String(form.paymentTag || '').trim();
+  const paymentApp = String(form.paymentApp || '').trim();
+
+  if (!appbegUsername) {
+    state.registrationWizard = { ...wizard, form, step: 'username', error: 'AppBeg username is required.' };
+    render();
+    return;
+  }
+  if (!paymentTag) {
+    state.registrationWizard = { ...wizard, form, step: 'payment_tag', error: 'Payment tag is required.' };
+    render();
+    return;
+  }
+
+  state.registrationWizard = { ...wizard, form, error: null, saving: true };
+  render();
+
+  try {
+    if (paymentApp) {
+      await api(`/api/contacts/${wizard.contactId}/registration-info`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          registrationInfo: { preferred_game: paymentApp },
+          staffName: state.staffName
+        })
+      });
+    }
+
+    await api(`/api/contacts/${wizard.contactId}/registration/manual`, {
+      method: 'POST',
+      body: JSON.stringify({
+        appbegUsername,
+        paymentTag,
+        registrationStatus: 'Registered',
+        notes: paymentApp ? `Payment app: ${paymentApp}` : '',
+        staffName: state.staffName,
+        allowDuplicate: false
+      })
+    });
+
+    const savedContactId = wizard.contactId;
+    contactDetailCache.delete(Number(savedContactId));
+    state.registrationWizard = null;
+    await Promise.all([
+      refreshContacts({ force: true, reason: 'registration wizard saved' }),
+      refreshStats({ force: true, reason: 'registration wizard saved' })
+    ]);
+    if (state.selectedContactId === savedContactId) {
+      await refreshSelectedContact({ force: true, reason: 'registration wizard saved' });
+      state.mobileContactsPane = 'overview';
+    }
+    await refreshPlayers({ keepSelection: true, silent: true });
+    render();
+  } catch (error) {
+    console.error('[registration-wizard] complete failed:', error);
+    state.registrationWizard = {
+      ...state.registrationWizard,
+      error: error.message || 'Failed to complete registration.',
+      saving: false
+    };
+    render();
+  }
+}
+
+async function handleOverviewAction(action) {
+  if (!action) return;
+  if (action === 'open-chat') {
+    state.registrationWizard = null;
+    state.mobileContactsPane = 'chat';
+    render();
+    return;
+  }
+  if (action === 'view-profile') {
+    const id = state.selectedContactId;
+    if (!id) return;
+    state.section = 'players';
+    state.selectedPlayerId = id;
+    state.mobilePlayersPane = 'detail';
+    state.registrationWizard = null;
+    await refreshPlayers({ keepSelection: true, silent: true });
+    await playersController.refreshSelectedPlayer({ silent: true });
+    render();
+    return;
+  }
+  if (action === 'start-register') {
+    startRegistrationWizard(state.selectedContactId);
+    return;
+  }
+  if (action === 'exit-wizard') {
+    exitRegistrationWizard();
+    return;
+  }
+  if (action === 'wizard-next') {
+    wizardNextStep();
+    return;
+  }
+  if (action === 'wizard-back') {
+    wizardBackStep();
+    return;
+  }
+  if (action === 'wizard-complete') {
+    await completeRegistrationWizard();
   }
 }
 
@@ -397,12 +600,15 @@ async function handlePlayerQuickAction(action, playerId) {
   if (!id || !action) return;
 
   if (action === 'open-chat') {
-    await openContactById(id);
+    await openContactById(id, { pane: 'chat' });
     return;
   }
 
   if (REGISTRATION_MODAL_ACTIONS.has(action)) {
-    await openRegistrationModal(id);
+    await openContactById(id, { pane: 'overview' });
+    if (!isRegistrationComplete(state.contact) || action === 'edit' || action === 'continue' || action === 'review') {
+      startRegistrationWizard(id);
+    }
     return;
   }
 
@@ -485,7 +691,9 @@ async function saveRegistrationModal() {
       refreshStats({ force: true, reason: 'registration saved' })
     ]);
     if (state.selectedContactId === savedContactId) {
-      console.log('[refresh] selected contact not refreshed after registration saved; click contact to reload detail');
+      await refreshSelectedContact({ force: true, reason: 'registration saved' });
+      state.mobileContactsPane = 'overview';
+      state.registrationWizard = null;
     }
     await refreshPlayers({ keepSelection: true, silent: true });
     if (state.section === 'players' && state.selectedPlayerId === savedContactId) {
@@ -766,6 +974,7 @@ function contactRows() {
           <div class="contact-preview truncate">${escapeHtml(previewPrefix + (contact.last_message || 'No messages yet'))}</div>
           <div class="contact-meta">
             <span class="badge-wrap">${statusBadge(contact.registration_status)}</span>
+            <span class="bot-status-chip ${contact.needs_staff_review ? 'review' : contact.bot_paused ? 'paused' : 'active'}">${chatbotStatusLabel(contact)}</span>
             <span>${escapeHtml(contact.assigned_staff_name || 'Unassigned')}</span>
           </div>
         </div>
@@ -786,7 +995,7 @@ function conversationHeader() {
     return `
       <header class="chat-header">
         <div class="chat-person">
-          <button type="button" class="icon-back mobile-only" data-mobile-back="contacts" aria-label="Back to contacts">←</button>
+          <button type="button" class="icon-back mobile-only" data-mobile-panel="overview" aria-label="Back to overview">←</button>
           ${selected ? avatar(selected, 'md') : ''}
           <div>
             <h2>${escapeHtml(selected?.display_name || 'Loading contact')}</h2>
@@ -801,7 +1010,8 @@ function conversationHeader() {
   return `
     <header class="chat-header">
       <div class="chat-person">
-        <button type="button" class="icon-back mobile-only" data-mobile-back="contacts" aria-label="Back to contacts">←</button>
+        <button type="button" class="icon-back mobile-only" data-mobile-panel="overview" aria-label="Back to overview">←</button>
+        <button type="button" class="button secondary desktop-only overview-back-btn" data-mobile-panel="overview">Overview</button>
         ${avatar(contact, 'md')}
         <div class="chat-person-text">
           <h2>${escapeHtml(contact.display_name)}</h2>
@@ -927,6 +1137,19 @@ function detailsPanel() {
       </section>
 
       <section class="card">
+        <div class="card-title">AI Chatbot</div>
+        ${infoRow('Status', chatbotStatusLabel(contact))}
+        ${infoRow('Paused', contact.bot_paused ? 'Yes' : 'No')}
+        ${infoRow('Needs staff review', contact.needs_staff_review ? 'Yes' : 'No')}
+        ${contact.staff_review_reason ? infoRow('Review reason', contact.staff_review_reason) : ''}
+        <div class="control-grid">
+          <button class="button secondary" data-bot-control="pause" ${contact.bot_paused ? 'disabled' : ''}>Pause Bot</button>
+          <button class="button secondary" data-bot-control="resume" ${!contact.bot_paused && !contact.needs_staff_review ? 'disabled' : ''}>Resume Bot</button>
+          <button class="button" data-bot-control="takeover">Take Over Manually</button>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-title">Bot State</div>
         ${infoRow('Current Screen', contact.bot_current_screen || 'Home')}
         ${infoRow('Workflow', contact.bot_workflow_key || 'None')}
@@ -1004,7 +1227,8 @@ function registrationPanel() {
     ${infoRow('Reviewed By', state.automationState?.info_reviewed_by || '-')}
     ${progressChecklist(computeLocalProgress(contact, info))}
     <div class="registration-actions">
-      <button type="button" class="button secondary" id="openRegistrationModalBtn">Register</button>
+      <button type="button" class="button secondary" data-overview-action="start-register">Register</button>
+      <button type="button" class="button secondary" id="openRegistrationModalBtn">Quick form</button>
     </div>
   `;
 }
@@ -1048,6 +1272,14 @@ function intentPill(label, active) {
 function infoRow(label, value) {
   const isHtml = typeof value === 'string' && (value.includes('status-badge') || value.includes('progress-'));
   return `<div class="info-row"><span>${label}</span><strong>${isHtml ? value : escapeHtml(value)}</strong></div>`;
+}
+
+function chatbotStatusLabel(contact) {
+  if (!contact) return '—';
+  if (contact.needs_staff_review) return 'Needs staff review';
+  if (contact.bot_paused) return 'Paused';
+  if (contact.bot_enabled === false) return 'Disabled';
+  return 'Active';
 }
 
 function noteItems() {
@@ -1216,8 +1448,16 @@ function paymentLogItems() {
 
 function contactsWorkspace() {
   const pane = state.mobileContactsPane || 'list';
+  const overviewHtml = renderContactOverview({
+    contact: state.contact,
+    automationState: state.automationState,
+    wizard: state.registrationWizard,
+    coadminSettings: state.coadminSettings,
+    loading: state.contactLoading
+  });
+  const wizardActive = Boolean(state.registrationWizard?.active);
   return `
-    <main class="ops-main contacts-workspace mobile-pane-${escapeHtml(pane)}">
+    <main class="ops-main contacts-workspace mobile-pane-${escapeHtml(pane)}${wizardActive ? ' wizard-active' : ''}">
       <header class="topbar desktop-topbar">
         <div>
           <div class="eyebrow">Telegram Operations</div>
@@ -1251,16 +1491,21 @@ function contactsWorkspace() {
           <div class="contacts-list">${contactRows()}</div>
         </aside>
 
-        <section class="chat-panel">
-          ${conversationHeader()}
-          <div id="chatLog" class="chat-log">${messageList()}</div>
-          ${composer()}
-        </section>
+        <div class="workspace-main">
+          <section class="overview-panel ${pane !== 'chat' ? 'is-primary' : ''}">
+            ${overviewHtml}
+          </section>
+          <section class="chat-panel ${pane === 'chat' ? 'is-primary' : ''}">
+            ${conversationHeader()}
+            <div id="chatLog" class="chat-log">${messageList()}</div>
+            ${composer()}
+          </section>
+        </div>
 
         <div class="details-panel-wrap ${pane === 'details' ? 'is-open' : ''}">
           <div class="details-sheet-bar mobile-only">
             <strong>Contact profile</strong>
-            <button type="button" class="button secondary" data-mobile-panel="chat">Done</button>
+            <button type="button" class="button secondary" data-mobile-panel="overview">Done</button>
           </div>
           ${detailsPanel()}
         </div>
@@ -1477,6 +1722,14 @@ function bindPersistentEvents() {
   });
 
   app.addEventListener('click', (event) => {
+    const overviewBtn = event.target.closest('[data-overview-action]');
+    if (overviewBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleOverviewAction(overviewBtn.dataset.overviewAction);
+      return;
+    }
+
     const playerBtn = event.target.closest('[data-player-action]');
     if (playerBtn) {
       event.preventDefault();
@@ -1512,6 +1765,24 @@ function bindPersistentEvents() {
     if (event.target.closest('[data-modal-backdrop]') && event.target.id === 'registrationModalBackdrop') {
       closeRegistrationModal();
     }
+  });
+
+  app.addEventListener('input', (event) => {
+    if (event.target.id !== 'wizardFieldInput') return;
+    const field = event.target.dataset.wizardField;
+    if (!field || !state.registrationWizard?.active) return;
+    state.registrationWizard = {
+      ...state.registrationWizard,
+      form: { ...state.registrationWizard.form, [field]: event.target.value },
+      error: null
+    };
+  });
+
+  app.addEventListener('keydown', (event) => {
+    if (event.target.id !== 'wizardFieldInput') return;
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    wizardNextStep();
   });
 
   app.addEventListener('submit', (event) => {
@@ -1697,6 +1968,12 @@ function bindEvents() {
   document.querySelectorAll('[data-bot-action]').forEach((button) => {
     button.addEventListener('click', () => controlBotState(button.dataset.botAction));
   });
+  document.querySelectorAll('[data-bot-control]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      void controlChatbot(button.dataset.botControl);
+    });
+  });
   document.querySelectorAll('[data-automation-action]').forEach((button) => {
     button.addEventListener('click', () => controlAutomation(button.dataset.automationAction));
   });
@@ -1751,6 +2028,22 @@ async function controlBotState(action) {
   });
   contactDetailCache.delete(contactId);
   await refreshContacts({ force: true, reason: 'bot state changed' });
+  render();
+}
+
+async function controlChatbot(action) {
+  const contactId = Number(state.selectedContactId);
+  if (!contactId || !action) return;
+  await api(`/api/contacts/${contactId}/bot-control`, {
+    method: 'POST',
+    body: JSON.stringify({ action, staffName: state.staffName })
+  });
+  contactDetailCache.delete(contactId);
+  await refreshSelectedContact({ force: true, reason: 'chatbot control' });
+  await refreshContacts({ force: true, reason: 'chatbot control' });
+  if (action === 'takeover' || action === 'pause') {
+    state.mobileContactsPane = 'chat';
+  }
   render();
 }
 

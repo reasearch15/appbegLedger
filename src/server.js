@@ -12,6 +12,9 @@ import { startTelegramListener } from './telegram/bot.js';
 import { renderMenu } from './telegram/menuEngine.js';
 import { startRegistrationFlow } from './telegram/automationEngine.js';
 import { processAutomationActionForContact, processAutomationForContact } from './telegram/processAutomation.js';
+import { enqueueChatbotJob } from './telegram/chatbotProcessor.js';
+import { isBotActiveForContact } from './telegram/chatbotEngine.js';
+import { startChatbotWorker } from './telegram/chatbotWorker.js';
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
 import { startPaymentTelegramSync, stopPaymentTelegramSync } from './telegram/paymentSyncProcess.js';
 import { listenerRoles } from './config/listeners.js';
@@ -434,32 +437,60 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
   const notifyType = req.body?.type || 'unknown';
 
   try {
+    const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
+
     if (req.body?.type === 'message' && payload.contactId && payload.direction === 'incoming' && payload.text) {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
-        await processAutomationForContact({
-          store,
-          user,
-          message: { text: payload.text, message_id: payload.telegramMessageId },
-          inserted: true,
-          rootDir,
-          bot: globalThis.telegramBot,
-          io
-        });
+        if (CHATBOT_ENABLED && isBotActiveForContact(user)) {
+          const messageId = await store.findLatestIncomingMessageId(user.id, payload.telegramMessageId || null);
+          await enqueueChatbotJob(store, {
+            contactId: user.id,
+            telegramUserId: user.telegram_id,
+            messageId,
+            incomingTelegramMessageId: payload.telegramMessageId || null,
+            jobType: 'inbound_message',
+            inputText: payload.text
+          });
+        } else if (!user.bot_paused && !user.needs_staff_review) {
+          await processAutomationForContact({
+            store,
+            user,
+            message: { text: payload.text, message_id: payload.telegramMessageId },
+            inserted: true,
+            rootDir,
+            bot: globalThis.telegramBot,
+            io
+          });
+        }
       }
     }
 
     if (req.body?.type === 'callback' && payload.contactId && payload.action) {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
-        await processAutomationActionForContact({
-          store,
-          user,
-          action: payload.action,
-          rootDir,
-          bot: globalThis.telegramBot,
-          io
-        });
+        const action = payload.action;
+        const isChatbotAction = String(action).startsWith('bot:')
+          || String(action).startsWith('staff:')
+          || action === 'flow:registration_info';
+        if (CHATBOT_ENABLED && isBotActiveForContact(user) && isChatbotAction) {
+          await enqueueChatbotJob(store, {
+            contactId: user.id,
+            telegramUserId: user.telegram_id,
+            jobType: 'callback_action',
+            inputText: '',
+            action
+          });
+        } else {
+          await processAutomationActionForContact({
+            store,
+            user,
+            action,
+            rootDir,
+            bot: globalThis.telegramBot,
+            io
+          });
+        }
       }
     }
   } catch (error) {
@@ -628,6 +659,47 @@ app.post('/api/contacts/:id/bot-state', async (req, res) => {
   res.json({ session, menuSent, menuError });
 });
 
+app.post('/api/contacts/:id/bot-control', async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const action = String(req.body.action || '').toLowerCase();
+    const staffName = req.body.staffName || 'Staff';
+    const existing = await store.getUserProfile(contactId);
+    if (!existing) return res.status(404).json({ error: 'Contact not found.' });
+
+    let contact;
+    if (action === 'pause') {
+      contact = await store.setBotControl(contactId, {
+        botPaused: true,
+        actorName: staffName
+      });
+    } else if (action === 'resume') {
+      contact = await store.setBotControl(contactId, {
+        botPaused: false,
+        needsStaffReview: false,
+        actorName: staffName
+      });
+    } else if (action === 'takeover') {
+      contact = await store.setBotControl(contactId, {
+        botPaused: true,
+        needsStaffReview: true,
+        staffReviewReason: 'staff_takeover',
+        actorName: staffName
+      });
+      await store.cancelAutomationFlow(contactId, staffName).catch(() => null);
+    } else {
+      return res.status(400).json({ error: 'Invalid action. Use pause, resume, or takeover.' });
+    }
+
+    io.emit('contacts:changed');
+    io.emit('users:changed');
+    io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+    res.json({ contact, action });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/contacts/:id/automation/start-flow', async (req, res) => {
   const contact = await store.getUserProfile(Number(req.params.id));
   if (!contact) return res.status(404).json({ error: 'Contact not found.' });
@@ -750,6 +822,18 @@ async function sendTelegramMessage(req, res) {
 
   const text = String(req.body.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Message text is required.' });
+
+  // Staff override: pause bot for this contact so automations don't collide.
+  if (!user.bot_paused) {
+    try {
+      await store.setBotControl(user.id, {
+        botPaused: true,
+        actorName: req.body.staffName || 'Staff'
+      });
+    } catch (error) {
+      console.warn('[chatbot] auto-pause on staff send failed:', error.message);
+    }
+  }
 
   const clientRequestId = String(req.body.client_request_id || req.body.clientRequestId || '').trim();
   const claim = await store.claimOutgoingMessageRequest({
@@ -882,12 +966,15 @@ globalThis.paymentTelegramSync = await startPaymentTelegramSync({
   io
 });
 
+globalThis.chatbotWorker = startChatbotWorker({ store, io });
+
 async function shutdownWorkers(signal = 'shutdown') {
   console.log(`Stopping background workers (${signal})...`);
   await Promise.all([
     stopTelegramAccountSync(),
     stopPaymentTelegramSync(),
-    Promise.resolve(globalThis.telegramBot?.stop?.('SIGTERM'))
+    globalThis.chatbotWorker?.stop?.(),
+    Promise.resolve(globalThis.telegramBot?.stop?.(signal))
   ]);
 }
 

@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS telegram_users (
   telegram_source_account_id TEXT,
   telegram_source_account_username TEXT,
   registration_method TEXT,
+  bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  bot_paused BOOLEAN NOT NULL DEFAULT FALSE,
+  needs_staff_review BOOLEAN NOT NULL DEFAULT FALSE,
+  bot_paused_at TEXT,
+  bot_paused_by TEXT,
+  staff_review_reason TEXT,
+  staff_review_at TEXT,
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
@@ -339,6 +346,26 @@ CREATE TABLE IF NOT EXISTS telegram_outbound_messages (
   sent_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS bot_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+  telegram_user_id TEXT NOT NULL,
+  message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+  incoming_telegram_message_id BIGINT,
+  job_type TEXT NOT NULL DEFAULT 'inbound_message',
+  input_text TEXT,
+  action TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+  worker_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error_text TEXT,
+  claimed_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
 CREATE TABLE IF NOT EXISTS coadmin_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   coadmin_name TEXT,
@@ -397,6 +424,8 @@ CREATE INDEX IF NOT EXISTS idx_telegram_outbound_contact_created ON telegram_out
 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request
   ON telegram_outbound_messages(client_request_id, contact_id)
   WHERE client_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC);
 
 INSERT INTO telegram_account_sync_state (id, status, updated_at)
 VALUES (1, 'disabled', NOW()::TEXT)
