@@ -2549,12 +2549,57 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function expireRegistrationPaymentWindow(windowId) {
     const now = nowIso();
-    await db.prepare(`
+    const result = await db.prepare(`
       UPDATE registration_payment_windows
       SET status = 'expired', updated_at = ?
       WHERE id = ? AND status = 'active'
     `).run(now, windowId);
+    if (!result.changes) {
+      return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    }
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
+  async function listDueRegistrationPaymentWindows(limit = 100) {
+    const now = nowIso();
+    return await db.prepare(`
+      SELECT *
+      FROM registration_payment_windows
+      WHERE status = 'active'
+        AND expires_at <= ?
+      ORDER BY expires_at ASC, id ASC
+      LIMIT ?
+    `).all(now, limit);
+  }
+
+  async function expireRegistrationPaymentWindowIfDue(windowId) {
+    const now = nowIso();
+    const result = await db.prepare(`
+      UPDATE registration_payment_windows
+      SET status = 'expired', updated_at = ?
+      WHERE id = ?
+        AND status = 'active'
+        AND expires_at <= ?
+    `).run(now, windowId, now);
+    if (!result.changes) return null;
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
+  async function resetRegistrationFlowToIdle(userId, actorName = 'System') {
+    const user = await getUserProfile(userId);
+    if (!user) return null;
+    if (user.registration_status === 'Collecting Info') {
+      await updateRegistrationStatus(userId, 'New', actorName);
+    }
+    return await updateAutomationState(userId, {
+      currentFlow: null,
+      currentStep: null,
+      registrationInfo: {
+        telegram_display_name: user.display_name,
+        telegram_username: user.username || null,
+        telegram_user_id: user.telegram_id
+      }
+    });
   }
 
   return {
@@ -2676,7 +2721,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
     completeRegistrationPaymentWindow,
-    expireRegistrationPaymentWindow
+    expireRegistrationPaymentWindow,
+    listDueRegistrationPaymentWindows,
+    expireRegistrationPaymentWindowIfDue,
+    resetRegistrationFlowToIdle
   };
 }
 
