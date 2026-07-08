@@ -66,6 +66,28 @@ const SUPPORT_PATTERNS = [
 
 const AFFIRM_PATTERNS = /^(yes|y|ok|okay|confirm|correct|looks good|sure|yea|yeah|yep|approve)\b/i;
 const NEGATE_PATTERNS = /^(no|n|edit|wrong|change|fix|back)\b/i;
+const GREETING_PATTERNS = /^(hi|hello|hey|yo|hola|howdy|sup|what'?s up|good morning|good afternoon|good evening)\b/i;
+const CASUAL_OFF_TOPIC_PATTERNS = /^(thanks|thank you|thx|haha|lol|hehe|hihi|ok|okay|cool|nice|great|awesome)\b[!.?\s]*$/i;
+
+export function isGreetingMessage(text = '') {
+  return GREETING_PATTERNS.test(String(text || '').trim());
+}
+
+export function isCasualOffTopicMessage(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (isGreetingMessage(value)) return true;
+  return CASUAL_OFF_TOPIC_PATTERNS.test(value);
+}
+
+export function isRegistrationFlow(flow) {
+  return flow === 'bot_registration' || flow === 'registration_info';
+}
+
+export function isRegistrationInProgress(flow, step) {
+  if (!isRegistrationFlow(flow)) return false;
+  return normalizeStep(step, flow) !== 'welcome';
+}
 
 export function detectInsult(text = '') {
   return INSULT_PATTERNS.some((pattern) => pattern.test(text));
@@ -146,21 +168,25 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const info = { ...(automationState.registration_info || {}) };
   const flow = automationState.current_flow;
   const step = automationState.current_step || 'welcome';
+  const normalizedStep = normalizeStep(step, flow);
+  const registrationInProgress = isRegistrationInProgress(flow, normalizedStep);
 
   // Exact text commands work without inline buttons (Telethon user sessions).
   if (!action && isStaffCommand(text)) {
     action = 'staff:takeover';
-  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(step, flow, contact)) {
+  } else if (!action && isRestartCommand(text) && isRegistrationFlow(flow)) {
+    action = 'bot:restart';
+  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(normalizedStep, flow, contact)) {
     action = 'bot:register';
-  } else if (!action && isConfirmCommand(text) && step === 'review' && (flow === 'bot_registration' || flow === 'registration_info')) {
+  } else if (!action && isConfirmCommand(text) && normalizedStep === 'review' && isRegistrationFlow(flow)) {
     action = 'bot:confirm';
-  } else if (!action && isEditCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+  } else if (!action && isEditCommand(text) && isRegistrationFlow(flow)) {
     action = 'bot:edit';
-  } else if (!action && isCancelCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+  } else if (!action && isCancelCommand(text) && isRegistrationFlow(flow)) {
     action = 'bot:cancel';
   }
 
-  if (detectInsult(text) && !action) {
+  if (!registrationInProgress && detectInsult(text) && !action) {
     return {
       kind: 'insult_soft',
       replies: [{
@@ -172,7 +198,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     };
   }
 
-  if (detectStaffEscalation(text) && !action) {
+  if (!registrationInProgress && detectStaffEscalation(text) && !action) {
     return {
       kind: 'escalate',
       replies: [{
@@ -193,6 +219,10 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return cancelRegistrationDecision(contact, info);
   }
 
+  if (action === 'bot:restart') {
+    return await startRegistrationDecision(contact, info, store, { resumed: true });
+  }
+
   if (!isUnregisteredStatus(contact.registration_status) && contact.registration_status === 'Registered') {
     return decideRegisteredSupport({ text, action });
   }
@@ -209,13 +239,14 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     });
   }
 
-  if (flow === 'bot_registration' || flow === 'registration_info') {
+  // Active registration flow always takes priority over greeting/welcome detection.
+  if (isRegistrationFlow(flow)) {
     return await continueRegistrationDecision({
       store,
       contact,
       text,
       action,
-      step,
+      step: normalizedStep,
       info,
       flow,
       automationState
@@ -223,6 +254,12 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (isUnregisteredStatus(contact.registration_status)) {
+    if (isGreetingMessage(text) || !text) {
+      return welcomeDecision(contact, info, automationState);
+    }
+    if (isStartRegistrationCommand(text)) {
+      return await startRegistrationDecision(contact, info, store);
+    }
     return welcomeDecision(contact, info, automationState);
   }
 
@@ -259,14 +296,14 @@ function cancelRegistrationDecision(contact, info) {
       text: welcomeMessage()
     }],
     statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'welcome',
+      currentFlow: null,
+      currentStep: null,
       registrationInfo: info
     },
     setStatus: contact.registration_status === 'Collecting Info' ? 'New' : undefined,
     markWelcomeSent: true,
     escalate: false,
-    logEvent: { event: 'registration_cancelled' }
+    logEvent: { event: 'flow_cancelled' }
   };
 }
 
@@ -340,7 +377,7 @@ function decideRegisteredSupport({ text, action }) {
   };
 }
 
-async function startRegistrationDecision(contact, info, store) {
+async function startRegistrationDecision(contact, info, store, { resumed = false } = {}) {
   const methods = await store.listActivePaymentMethodsForRegistration();
   const prompt = methods.length
     ? registrationPaymentAppPrompt(methods)
@@ -361,7 +398,37 @@ async function startRegistrationDecision(contact, info, store) {
     },
     setStatus: 'Collecting Info',
     escalate: false,
-    logEvent: { event: 'registration_started', paymentMethodCount: methods.length }
+    logEvent: {
+      event: resumed ? 'flow_resumed' : 'flow_started',
+      step: 'payment_app',
+      paymentMethodCount: methods.length
+    }
+  };
+}
+
+function flowInterruptedReminder(promptText, info, step, extra = {}) {
+  return {
+    kind: 'registration_flow_reminder',
+    replies: [{
+      text: [
+        "We're currently registering your account.",
+        '',
+        'Please complete the current step first.',
+        '',
+        promptText
+      ].join('\n')
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: step,
+      registrationInfo: info
+    },
+    escalate: false,
+    logEvent: {
+      event: 'flow_ignored_greeting',
+      step,
+      ...extra
+    }
   };
 }
 
@@ -402,6 +469,11 @@ function selectPaymentAppDecision({ info, selected }) {
   };
 }
 
+function registrationOffTopicGuard(text, promptText, info, step) {
+  if (!isCasualOffTopicMessage(text)) return null;
+  return flowInterruptedReminder(promptText, info, step);
+}
+
 async function continueRegistrationDecision({ store, contact, text, action, step, info, flow, automationState = null }) {
   const normalizedStep = normalizeStep(step, flow);
   const activePaymentMethods = await store.listActivePaymentMethodsForRegistration();
@@ -420,7 +492,7 @@ async function continueRegistrationDecision({ store, contact, text, action, step
       },
       completeRegistration: true,
       escalate: false,
-      logEvent: { event: 'registration_completed' }
+      logEvent: { event: 'flow_completed' }
     };
   }
 
@@ -434,7 +506,7 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         registrationInfo: info
       },
       escalate: false,
-      logEvent: { event: 'registration_edit_started' }
+      logEvent: { event: 'flow_step', step: 'username', reason: 'edit' }
     };
   }
 
@@ -446,6 +518,9 @@ async function continueRegistrationDecision({ store, contact, text, action, step
   }
 
   if (normalizedStep === 'payment_app') {
+    const offTopic = registrationOffTopicGuard(text, paymentPrompt, info, 'payment_app');
+    if (offTopic) return offTopic;
+
     if (!activePaymentMethods.length) {
       return {
         kind: 'registration_no_payment_methods',
@@ -461,7 +536,8 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         kind: 'registration_ask_payment_app',
         replies: [{ text: paymentPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false
+        escalate: false,
+        logEvent: { event: 'flow_step', step: 'payment_app' }
       };
     }
     const method = parsePaymentMethodSelection(text, activePaymentMethods);
@@ -498,18 +574,23 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         }
       },
       escalate: false,
-      logEvent: { event: 'payment_method_selected', paymentMethod: method.key }
+      logEvent: { event: 'flow_step', step: 'payment_display_name', paymentMethod: method.key }
     };
   }
 
   if (normalizedStep === 'payment_display_name') {
     const methodName = info.payment_method_name || 'payment app';
+    const namePrompt = paymentDisplayNamePrompt(methodName);
+    const offTopic = registrationOffTopicGuard(text, namePrompt, info, 'payment_display_name');
+    if (offTopic) return offTopic;
+
     if (!text || text.length < 2) {
       return {
         kind: 'registration_ask_payment_display_name',
-        replies: [{ text: paymentDisplayNamePrompt(methodName) }],
+        replies: [{ text: namePrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_display_name', registrationInfo: info },
-        escalate: false
+        escalate: false,
+        logEvent: { event: 'flow_step', step: 'payment_display_name' }
       };
     }
     const nextInfo = { ...info, payment_display_name: text.trim() };
@@ -524,11 +605,15 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         registrationInfo: nextInfo
       },
       escalate: false,
-      logEvent: { event: 'payment_display_name_collected', paymentDisplayName: text.trim() }
+      logEvent: { event: 'flow_step', step: 'first_deposit_amount', paymentDisplayName: text.trim() }
     };
   }
 
   if (normalizedStep === 'first_deposit_amount') {
+    const depositPrompt = 'How much are you going to deposit for your first payment?';
+    const offTopic = registrationOffTopicGuard(text, depositPrompt, info, 'first_deposit_amount');
+    if (offTopic) return offTopic;
+
     const amount = parseFirstDepositAmount(text);
     if (amount == null) {
       return {
@@ -560,31 +645,39 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         registrationInfo: nextInfo
       },
       escalate: false,
-      logEvent: { event: 'first_deposit_amount_collected', firstDepositAmount: amount }
+      logEvent: { event: 'flow_step', step: 'send_qr', firstDepositAmount: amount }
     };
   }
 
   if (normalizedStep === 'await_payment_done') {
+    const awaitPrompt = `When you have sent your ${info.payment_method_name || 'payment'}, reply Done.`;
+    const offTopic = registrationOffTopicGuard(text, awaitPrompt, info, 'await_payment_done');
+    if (offTopic) return offTopic;
+
     if (!isDoneCommand(text)) {
       return {
         kind: 'registration_await_payment_done',
-        replies: [{
-          text: `When you have sent your ${info.payment_method_name || 'payment'}, reply Done.`
-        }],
+        replies: [{ text: awaitPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
-        escalate: false
+        escalate: false,
+        logEvent: { event: 'flow_step', step: 'await_payment_done' }
       };
     }
     return await handleRegistrationPaymentDone({ store, contact, info });
   }
 
   if (normalizedStep === 'username') {
+    const usernamePrompt = 'What username would you like for your account?';
+    const offTopic = registrationOffTopicGuard(text, usernamePrompt, info, 'username');
+    if (offTopic) return offTopic;
+
     if (!text || text.length < 2) {
       return {
         kind: 'registration_ask_username',
         replies: [{ text: 'I need a username with at least a couple of characters. What username would you like?' }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'username', registrationInfo: info },
-        escalate: false
+        escalate: false,
+        logEvent: { event: 'flow_step', step: 'username' }
       };
     }
     const nextInfo = {
@@ -602,15 +695,19 @@ async function continueRegistrationDecision({ store, contact, text, action, step
       }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: nextInfo },
       escalate: false,
-      logEvent: { event: 'username_collected', username: text }
+      logEvent: { event: 'flow_step', step: 'payment_app', username: text }
     };
   }
 
   if (normalizedStep === 'payment_app_other') {
+    const otherPrompt = 'Which payment app should we list as Other?';
+    const offTopic = registrationOffTopicGuard(text, otherPrompt, info, 'payment_app_other');
+    if (offTopic) return offTopic;
+
     if (!text) {
       return {
         kind: 'registration_ask_payment_app_other',
-        replies: [{ text: 'Which payment app should we list as Other?' }],
+        replies: [{ text: otherPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app_other', registrationInfo: info },
         escalate: false
       };
@@ -621,15 +718,19 @@ async function continueRegistrationDecision({ store, contact, text, action, step
       replies: [{ text: `Got it — ${text}. What’s your payment name/tag for deposits?` }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_tag', registrationInfo: nextInfo },
       escalate: false,
-      logEvent: { event: 'payment_app_selected', paymentApp: text }
+      logEvent: { event: 'flow_step', step: 'payment_tag', paymentApp: text }
     };
   }
 
   if (normalizedStep === 'payment_tag') {
+    const tagPrompt = 'I’ll need that payment tag to keep deposits tidy. What tag should we use?';
+    const offTopic = registrationOffTopicGuard(text, tagPrompt, info, 'payment_tag');
+    if (offTopic) return offTopic;
+
     if (!text) {
       return {
         kind: 'registration_ask_payment_tag',
-        replies: [{ text: 'I’ll need that payment tag to keep deposits tidy. What tag should we use?' }],
+        replies: [{ text: tagPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_tag', registrationInfo: info },
         escalate: false
       };
@@ -643,10 +744,25 @@ async function continueRegistrationDecision({ store, contact, text, action, step
   }
 
   if (normalizedStep === 'review' || normalizedStep === 'complete') {
-    return reviewDecision(info);
+    const review = reviewDecision(info);
+    if (isCasualOffTopicMessage(text)) {
+      return flowInterruptedReminder(review.replies[0].text, info, 'review');
+    }
+    return review;
   }
 
-  return await startRegistrationDecision(contact, info, store);
+  return {
+    kind: 'registration_flow_stuck',
+    replies: [{
+      text: "We're still working on your registration. Please reply Cancel to start over or Staff for help."
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: normalizedStep,
+      registrationInfo: info
+    },
+    escalate: false
+  };
 }
 
 async function handleRegistrationPaymentDone({ store, contact, info }) {
@@ -717,7 +833,7 @@ function reviewDecision(info) {
       registrationInfo: info
     },
     escalate: false,
-    logEvent: { event: 'registration_review_shown' }
+    logEvent: { event: 'flow_step', step: 'review' }
   };
 }
 
@@ -759,9 +875,14 @@ function paymentAppPrompt(username = null, methods = []) {
 }
 
 function shouldStartRegistration(step, flow, contact) {
-  if (step === 'welcome') return true;
-  if (!flow && isUnregisteredStatus(contact.registration_status)) return true;
-  return false;
+  const normalizedStep = normalizeStep(step, flow);
+  if (normalizedStep !== 'welcome') return false;
+  if (flow && flow !== 'idle' && !isRegistrationFlow(flow)) return false;
+  return isUnregisteredStatus(contact.registration_status);
+}
+
+function isRestartCommand(text) {
+  return /^(restart|start over)$/i.test(String(text || '').trim());
 }
 
 function isStartRegistrationCommand(text) {
