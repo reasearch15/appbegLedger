@@ -474,5 +474,8 @@ CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created
   ON bot_jobs(contact_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message
+  ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
+
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created
   ON settings_audit_log(created_at DESC);

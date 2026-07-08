@@ -1,7 +1,8 @@
 import {
   normalizeAppBegUsername,
   normalizePaymentTag,
-  isUnregisteredStatus
+  isUnregisteredStatus,
+  chatbotWelcomeCooldownMs
 } from '../registration/utils.js';
 
 export const BOT_REGISTRATION_STEPS = [
@@ -139,11 +140,19 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (flow === 'bot_registration' || flow === 'registration_info') {
-    return continueRegistrationDecision({ contact, text, action, step, info, flow });
+    return continueRegistrationDecision({
+      contact,
+      text,
+      action,
+      step,
+      info,
+      flow,
+      automationState
+    });
   }
 
   if (isUnregisteredStatus(contact.registration_status)) {
-    return welcomeDecision(contact, info);
+    return welcomeDecision(contact, info, automationState);
   }
 
   return {
@@ -186,16 +195,22 @@ function cancelRegistrationDecision(contact, info) {
       registrationInfo: info
     },
     setStatus: contact.registration_status === 'Collecting Info' ? 'New' : undefined,
+    markWelcomeSent: true,
     escalate: false,
     logEvent: { event: 'registration_cancelled' }
   };
 }
 
-function welcomeDecision(contact, info) {
+function welcomeDecision(contact, info, automationState = null, { forceFull = false } = {}) {
+  const throttled = !forceFull && isWelcomeThrottled(automationState);
+  const text = throttled
+    ? welcomeNudgeMessage()
+    : welcomeMessage();
+
   return {
-    kind: 'welcome',
+    kind: throttled ? 'welcome_nudge' : 'welcome',
     replies: [{
-      text: welcomeMessage(),
+      text,
       buttons: WELCOME_BUTTONS
     }],
     statePatch: {
@@ -208,9 +223,25 @@ function welcomeDecision(contact, info) {
         telegram_user_id: contact.telegram_id
       }
     },
+    markWelcomeSent: true,
     escalate: false,
-    logEvent: { event: 'welcome_shown' }
+    logEvent: {
+      event: throttled ? 'welcome_nudged' : 'welcome_shown',
+      throttled,
+      flow: 'bot_registration',
+      step: 'welcome'
+    }
   };
+}
+
+function isWelcomeThrottled(automationState) {
+  const cooldown = chatbotWelcomeCooldownMs();
+  if (!cooldown) return false;
+  const last = automationState?.last_auto_welcome_at;
+  if (!last) return false;
+  const elapsed = Date.now() - new Date(last).getTime();
+  if (Number.isNaN(elapsed)) return false;
+  return elapsed < cooldown;
 }
 
 function decideRegisteredSupport({ text, action }) {
@@ -301,7 +332,7 @@ function selectPaymentAppDecision({ info, selected }) {
   };
 }
 
-function continueRegistrationDecision({ contact, text, action, step, info, flow }) {
+function continueRegistrationDecision({ contact, text, action, step, info, flow, automationState = null }) {
   const normalizedStep = normalizeStep(step, flow);
 
   if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
@@ -336,10 +367,9 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow 
   }
 
   if (normalizedStep === 'welcome') {
-    if (!text && !action) {
-      return welcomeDecision(contact, info);
-    }
-    return startRegistrationDecision(contact, info);
+    // Stay on welcome until Register is clicked — never treat "hello" as starting registration,
+    // and never permanently suppress follow-up replies.
+    return welcomeDecision(contact, info, automationState);
   }
 
   if (normalizedStep === 'username') {
@@ -466,6 +496,10 @@ function welcomeMessage() {
 It looks like you're not registered with us yet.
 
 Choose an option below.`;
+}
+
+function welcomeNudgeMessage() {
+  return `You're not registered yet. Tap Register below to start.`;
 }
 
 export function registrationStatusLabel(contact) {

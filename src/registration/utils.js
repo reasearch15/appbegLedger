@@ -34,6 +34,12 @@ export function welcomeCooldownMs() {
   return hours * 60 * 60 * 1000;
 }
 
+/** Short chatbot welcome re-prompt throttle (seconds). Never permanent. */
+export function chatbotWelcomeCooldownMs() {
+  const seconds = Number(process.env.CHATBOT_WELCOME_COOLDOWN_SECONDS || 30);
+  return Math.max(0, seconds) * 1000;
+}
+
 export const WELCOME_MESSAGE = `Hello, welcome to Royal VIP 👋
 You are not registered with us yet.
 Click Register to start.`;

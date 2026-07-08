@@ -442,6 +442,7 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
     if (req.body?.type === 'message' && payload.contactId && payload.direction === 'incoming' && payload.text) {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
+        console.log(`[chatbot] inbound message saved contact=${user.id} telegram_message_id=${payload.telegramMessageId || 'n/a'} text_len=${String(payload.text || '').length}`);
         if (CHATBOT_ENABLED && isBotActiveForContact(user)) {
           const messageId = await store.findLatestIncomingMessageId(user.id, payload.telegramMessageId || null);
           await enqueueChatbotJob(store, {
@@ -453,6 +454,7 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
             inputText: payload.text
           });
         } else if (!user.bot_paused && !user.needs_staff_review) {
+          console.log(`[chatbot] bot job skipped reason=legacy_automation_fallback contact=${user.id}`);
           await processAutomationForContact({
             store,
             user,
@@ -462,6 +464,8 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
             bot: globalThis.telegramBot,
             io
           });
+        } else {
+          console.log(`[chatbot] bot job skipped reason=${user.needs_staff_review ? 'needs_staff_review' : 'bot_paused'} contact=${user.id}`);
         }
       }
     }

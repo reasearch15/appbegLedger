@@ -14,7 +14,7 @@ export function startChatbotWorker({ store, io, concurrency = Number(process.env
   let stopped = false;
   let tickPromise = null;
   const workerId = `node-chatbot-${process.pid}`;
-  const pollMs = Number(process.env.CHATBOT_POLL_MS || 700);
+  const pollMs = Number(process.env.CHATBOT_POLL_MS || 400);
 
   console.log(`[chatbot] worker starting concurrency=${concurrency} id=${workerId}`);
 
@@ -25,15 +25,17 @@ export function startChatbotWorker({ store, io, concurrency = Number(process.env
   async function tick() {
     if (stopped) return;
     try {
-      const claimed = [];
-      for (let i = 0; i < concurrency; i += 1) {
-        const job = await store.claimNextBotJob(workerId);
-        if (!job) break;
-        console.log(`[chatbot] bot job claimed id=${job.id} contact=${job.contact_id}`);
-        claimed.push(job);
-      }
-
-      if (claimed.length) {
+      // Drain multiple waves so follow-up messages for a contact
+      // that just finished processing get claimed without waiting a full poll.
+      for (let wave = 0; wave < 3; wave += 1) {
+        const claimed = [];
+        for (let i = 0; i < concurrency; i += 1) {
+          const job = await store.claimNextBotJob(workerId);
+          if (!job) break;
+          console.log(`[chatbot] bot job claimed id=${job.id} contact=${job.contact_id}`);
+          claimed.push(job);
+        }
+        if (!claimed.length) break;
         await Promise.all(claimed.map((job) => processBotJob(store, job, { io })));
       }
     } catch (error) {
@@ -48,7 +50,6 @@ export function startChatbotWorker({ store, io, concurrency = Number(process.env
     });
   }, pollMs);
 
-  // Run an immediate pass so the first queued jobs don't wait a full poll.
   tickPromise = tick().finally(() => {
     tickPromise = null;
   });

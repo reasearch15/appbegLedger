@@ -281,6 +281,20 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(localMessageId, nowIso(), outboundId);
   }
 
+  async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message' }) {
+    if (incomingTelegramMessageId == null || incomingTelegramMessageId === '') return null;
+    return await db.prepare(`
+      SELECT *
+      FROM bot_jobs
+      WHERE contact_id = ?
+        AND job_type = ?
+        AND incoming_telegram_message_id = ?
+        AND status IN ('pending', 'processing', 'completed')
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(contactId, jobType, incomingTelegramMessageId);
+  }
+
   async function createBotJob({
     contactId,
     telegramUserId,
@@ -290,6 +304,19 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     inputText = '',
     action = null
   }) {
+    // Dedupe by Telegram message_id so the same inbound event cannot create duplicate replies.
+    // Different message_ids for the same contact must each get their own job.
+    if (jobType === 'inbound_message' && incomingTelegramMessageId != null && incomingTelegramMessageId !== '') {
+      const existing = await findExistingBotJobForTelegramMessage({
+        contactId,
+        incomingTelegramMessageId,
+        jobType
+      });
+      if (existing) {
+        return { ...existing, duplicate: true };
+      }
+    }
+
     const now = nowIso();
     const result = await db.prepare(`
       INSERT INTO bot_jobs (
@@ -319,7 +346,23 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(String(jobId || Date.now()), nowIso());
   }
 
+  async function reclaimStuckBotJobs({ olderThanMs = Number(process.env.CHATBOT_STUCK_JOB_MS || 120000) } = {}) {
+    const cutoff = new Date(Date.now() - Math.max(5000, olderThanMs)).toISOString();
+    const result = await db.prepare(`
+      UPDATE bot_jobs
+      SET status = 'pending',
+          worker_id = NULL,
+          claimed_at = NULL,
+          error_text = COALESCE(error_text, 'Reclaimed stuck processing job'),
+          updated_at = ?
+      WHERE status = 'processing'
+        AND COALESCE(claimed_at, created_at) < ?
+    `).run(nowIso(), cutoff);
+    return result.changes || 0;
+  }
+
   async function claimNextBotJob(workerId) {
+    await reclaimStuckBotJobs();
     const now = nowIso();
     const candidate = await db.prepare(`
       SELECT id
@@ -359,14 +402,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   }
 
   async function resetStuckBotJobs(reason = 'Worker restart') {
+    // On restart, re-queue processing jobs instead of failing them forever,
+    // so follow-up inbound messages for that contact can run again.
     await db.prepare(`
       UPDATE bot_jobs
-      SET status = 'failed',
+      SET status = 'pending',
+          worker_id = NULL,
+          claimed_at = NULL,
           error_text = COALESCE(error_text, ?),
-          completed_at = ?,
           updated_at = ?
       WHERE status = 'processing'
-    `).run(reason, nowIso(), nowIso());
+    `).run(reason, nowIso());
   }
 
   async function setBotControl(contactId, {
@@ -2148,10 +2194,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     logPaymentListener,
     listPaymentListenerLogs,
     createBotJob,
+    findExistingBotJobForTelegramMessage,
     nudgeBotQueue,
     claimNextBotJob,
     completeBotJob,
     resetStuckBotJobs,
+    reclaimStuckBotJobs,
     setBotControl,
     markBotNeedsStaffReview,
     findLatestIncomingMessageId
@@ -2455,6 +2503,7 @@ async function migrate(db) {
   `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS coadmin_settings (

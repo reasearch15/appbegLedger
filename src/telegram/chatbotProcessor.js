@@ -27,14 +27,25 @@ export async function enqueueChatbotJob(store, {
   action = null
 }) {
   const contact = await store.getUserProfile(contactId);
-  if (!contact) return null;
+  if (!contact) {
+    console.log(`[chatbot] bot job skipped reason=missing_contact contact=${contactId}`);
+    return null;
+  }
+
   if (!isBotActiveForContact(contact)) {
-    console.log(`[chatbot] skip enqueue contact=${contactId} (bot inactive)`);
+    const reason = contact.needs_staff_review
+      ? 'needs_staff_review'
+      : contact.bot_paused
+        ? 'bot_paused'
+        : contact.bot_enabled === false || contact.bot_enabled === 0
+          ? 'bot_disabled'
+          : 'bot_inactive';
+    console.log(`[chatbot] bot job skipped reason=${reason} contact=${contactId}`);
     return null;
   }
 
   if (action && !isChatbotButtonAction(action) && jobType === 'callback_action') {
-    console.log(`[chatbot] skip unknown callback action=${action} contact=${contactId}`);
+    console.log(`[chatbot] bot job skipped reason=unknown_callback action=${action} contact=${contactId}`);
     return null;
   }
 
@@ -51,7 +62,13 @@ export async function enqueueChatbotJob(store, {
     inputText,
     action
   });
-  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}`);
+
+  if (job?.duplicate) {
+    console.log(`[chatbot] bot job skipped reason=duplicate_message_id contact=${contactId} telegram_message_id=${incomingTelegramMessageId} existing_job=${job.id}`);
+    return job;
+  }
+
+  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}${incomingTelegramMessageId != null ? ` telegram_message_id=${incomingTelegramMessageId}` : ''}`);
   await store.nudgeBotQueue(job.id);
   return job;
 }
@@ -60,16 +77,25 @@ export async function processBotJob(store, job, { io = null } = {}) {
   const contact = await store.getUserProfile(job.contact_id);
   if (!contact) {
     await store.completeBotJob(job.id, { status: 'failed', errorText: 'Contact not found' });
+    console.log(`[chatbot] bot job skipped id=${job.id} reason=missing_contact`);
     return { ok: false, reason: 'missing_contact' };
   }
 
   if (!isBotActiveForContact(contact)) {
-    await store.completeBotJob(job.id, { status: 'completed', errorText: 'Bot inactive — skipped' });
-    console.log(`[chatbot] bot job skipped id=${job.id} contact=${contact.id} (inactive)`);
-    return { ok: true, skipped: true };
+    const reason = contact.needs_staff_review
+      ? 'needs_staff_review'
+      : contact.bot_paused
+        ? 'bot_paused'
+        : 'bot_inactive';
+    await store.completeBotJob(job.id, { status: 'completed', errorText: `Bot inactive — ${reason}` });
+    console.log(`[chatbot] bot job skipped id=${job.id} contact=${contact.id} reason=${reason}`);
+    return { ok: true, skipped: true, reason };
   }
 
   try {
+    const beforeState = await store.ensureAutomationState(contact.id);
+    console.log(`[chatbot] processing id=${job.id} contact=${contact.id} flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} status=${contact.registration_status}`);
+
     const decision = await decideBotReply({
       store,
       contact,
@@ -93,6 +119,11 @@ export async function processBotJob(store, job, { io = null } = {}) {
       }
     }
 
+    // Time-based welcome throttle marker only — never a permanent reply block.
+    if (decision.markWelcomeSent) {
+      await store.markAutoWelcomeSent(contact.id);
+    }
+
     if (decision.completeRegistration) {
       const info = decision.statePatch?.registrationInfo
         || (await store.getAutomationState(contact.id))?.registration_info
@@ -106,6 +137,9 @@ export async function processBotJob(store, job, { io = null } = {}) {
       });
       console.log(`[chatbot] registration completed contact=${contact.id}`);
     }
+
+    const afterState = await store.getAutomationState(contact.id);
+    console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
 
     for (const reply of decision.replies || []) {
       await queueBotReply({
@@ -133,6 +167,8 @@ export async function processBotJob(store, job, { io = null } = {}) {
         kind: decision.kind,
         action: job.action || null,
         logEvent: decision.logEvent || null,
+        currentFlow: afterState?.current_flow || null,
+        currentStep: afterState?.current_step || null,
         buttons: (decision.replies || []).flatMap((reply) => reply.buttons || [])
       }
     });

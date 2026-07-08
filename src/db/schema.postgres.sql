@@ -426,6 +426,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request
   WHERE client_request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
 
 INSERT INTO telegram_account_sync_state (id, status, updated_at)
 VALUES (1, 'disabled', NOW()::TEXT)

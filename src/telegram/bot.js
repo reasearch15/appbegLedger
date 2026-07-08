@@ -66,6 +66,7 @@ export function startTelegramListener({ token, store, io }) {
 
     try {
       const result = await store.storeIncomingTelegramMessage(ctx);
+      console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id}`);
       await store.ensureBotSession(result.user.id);
       await store.ensureAutomationState(result.user.id);
       if (result.inserted) {
