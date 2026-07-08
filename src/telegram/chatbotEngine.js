@@ -5,11 +5,19 @@ import {
   chatbotWelcomeCooldownMs,
   parseFirstDepositAmount
 } from '../registration/utils.js';
+import {
+  formatDepositAmount,
+  parsePaymentMethodSelection,
+  paymentDisplayNamePrompt,
+  paymentMethodUnavailableMessage,
+  paymentQrCaption,
+  registrationPaymentAppPrompt
+} from '../payments/methodUtils.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
   'payment_app',
-  'chime_payment_name',
+  'payment_display_name',
   'first_deposit_amount',
   'await_payment_done',
   'username',
@@ -190,7 +198,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (action === 'flow:registration_info' || action === 'bot:register') {
-    return startRegistrationDecision(contact, info);
+    return await startRegistrationDecision(contact, info, store);
   }
 
   if (String(action || '').startsWith('bot:payment_app:')) {
@@ -332,12 +340,14 @@ function decideRegisteredSupport({ text, action }) {
   };
 }
 
-function startRegistrationDecision(contact, info) {
+async function startRegistrationDecision(contact, info, store) {
+  const methods = await store.listActivePaymentMethodsForRegistration();
+  const prompt = methods.length
+    ? registrationPaymentAppPrompt(methods)
+    : 'Registration payments are not available right now. Please contact staff.';
   return {
     kind: 'registration_ask_payment_app',
-    replies: [{
-      text: registrationPaymentAppPrompt()
-    }],
+    replies: [{ text: prompt }],
     statePatch: {
       currentFlow: 'bot_registration',
       currentStep: 'payment_app',
@@ -351,57 +361,8 @@ function startRegistrationDecision(contact, info) {
     },
     setStatus: 'Collecting Info',
     escalate: false,
-    logEvent: { event: 'registration_started' }
+    logEvent: { event: 'registration_started', paymentMethodCount: methods.length }
   };
-}
-
-function registrationPaymentAppPrompt() {
-  return `To register, you need to make your first payment to our app.
-
-Which payment app are you going to use?
-1️⃣ Chime
-2️⃣ Cash App
-3️⃣ Venmo`;
-}
-
-function parseRegistrationPaymentApp(text) {
-  const value = String(text || '').trim().toLowerCase();
-  if (!value) return null;
-  if (value === '1' || /\bchime\b/.test(value)) return 'chime';
-  if (value === '2' || /\bcash\s*app\b/.test(value) || value === 'cashapp') return 'cash_app';
-  if (value === '3' || /\bvenmo\b/.test(value)) return 'venmo';
-  return null;
-}
-
-function chimeUnavailableReply(info = {}) {
-  return {
-    kind: 'registration_payment_app_unavailable',
-    replies: [{
-      text: 'Sorry, we only have Chime available at the moment.'
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'payment_app',
-      registrationInfo: info
-    },
-    escalate: false
-  };
-}
-
-function formatDepositAmount(amount) {
-  const value = Math.round(Number(amount) * 100) / 100;
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(2);
-}
-
-function chimeQrCaption({ firstDepositAmount, chimePaymentName }) {
-  return [
-    `Please send ${formatDepositAmount(firstDepositAmount)} using this Chime QR.`,
-    `Use the Chime name:`,
-    chimePaymentName,
-    'After sending, reply Done.',
-    'This payment window is valid for 5 minutes.'
-  ].join('\n');
 }
 
 function selectPaymentAppDecision({ info, selected }) {
@@ -443,6 +404,8 @@ function selectPaymentAppDecision({ info, selected }) {
 
 async function continueRegistrationDecision({ store, contact, text, action, step, info, flow, automationState = null }) {
   const normalizedStep = normalizeStep(step, flow);
+  const activePaymentMethods = await store.listActivePaymentMethodsForRegistration();
+  const paymentPrompt = registrationPaymentAppPrompt(activePaymentMethods);
 
   if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
     return {
@@ -477,61 +440,79 @@ async function continueRegistrationDecision({ store, contact, text, action, step
 
   if (normalizedStep === 'welcome') {
     if (isStartRegistrationCommand(text)) {
-      return startRegistrationDecision(contact, info);
+      return await startRegistrationDecision(contact, info, store);
     }
     return welcomeDecision(contact, info, automationState);
   }
 
   if (normalizedStep === 'payment_app') {
+    if (!activePaymentMethods.length) {
+      return {
+        kind: 'registration_no_payment_methods',
+        replies: [{
+          text: 'Registration payments are not available right now. Please contact staff.'
+        }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false
+      };
+    }
     if (!text) {
       return {
         kind: 'registration_ask_payment_app',
-        replies: [{ text: registrationPaymentAppPrompt() }],
+        replies: [{ text: paymentPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
         escalate: false
       };
     }
-    const selected = parseRegistrationPaymentApp(text);
-    if (!selected) {
+    const method = parsePaymentMethodSelection(text, activePaymentMethods);
+    if (!method) {
       return {
         kind: 'registration_ask_payment_app',
-        replies: [{ text: registrationPaymentAppPrompt() }],
+        replies: [{ text: paymentPrompt }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
         escalate: false
       };
     }
-    if (selected === 'cash_app' || selected === 'venmo') {
-      return chimeUnavailableReply(info);
+    const defaultQr = await store.getActiveDefaultPaymentQr(method.id);
+    if (!defaultQr) {
+      return {
+        kind: 'registration_payment_method_unavailable',
+        replies: [{ text: paymentMethodUnavailableMessage(method.name) }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'payment_method_unavailable', paymentMethod: method.key }
+      };
     }
     return {
-      kind: 'registration_ask_chime_payment_name',
-      replies: [{
-        text: `Please send your Chime payment name.
-This should be the name shown on your Chime payment, not a $tag.`
-      }],
+      kind: 'registration_ask_payment_display_name',
+      replies: [{ text: paymentDisplayNamePrompt(method.name) }],
       statePatch: {
         currentFlow: 'bot_registration',
-        currentStep: 'chime_payment_name',
-        registrationInfo: { ...info, payment_app: 'chime' }
+        currentStep: 'payment_display_name',
+        registrationInfo: {
+          ...info,
+          payment_method_id: method.id,
+          payment_method_name: method.name,
+          payment_method_key: method.key,
+          payment_app: method.name
+        }
       },
       escalate: false,
-      logEvent: { event: 'payment_app_selected', paymentApp: 'chime' }
+      logEvent: { event: 'payment_method_selected', paymentMethod: method.key }
     };
   }
 
-  if (normalizedStep === 'chime_payment_name') {
+  if (normalizedStep === 'payment_display_name') {
+    const methodName = info.payment_method_name || 'payment app';
     if (!text || text.length < 2) {
       return {
-        kind: 'registration_ask_chime_payment_name',
-        replies: [{
-          text: `Please send your Chime payment name.
-This should be the name shown on your Chime payment, not a $tag.`
-        }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'chime_payment_name', registrationInfo: info },
+        kind: 'registration_ask_payment_display_name',
+        replies: [{ text: paymentDisplayNamePrompt(methodName) }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_display_name', registrationInfo: info },
         escalate: false
       };
     }
-    const nextInfo = { ...info, chime_payment_name: text.trim(), payment_app: 'chime' };
+    const nextInfo = { ...info, payment_display_name: text.trim() };
     return {
       kind: 'registration_ask_first_deposit_amount',
       replies: [{
@@ -543,7 +524,7 @@ This should be the name shown on your Chime payment, not a $tag.`
         registrationInfo: nextInfo
       },
       escalate: false,
-      logEvent: { event: 'chime_payment_name_collected', chimePaymentName: text.trim() }
+      logEvent: { event: 'payment_display_name_collected', paymentDisplayName: text.trim() }
     };
   }
 
@@ -562,14 +543,15 @@ This should be the name shown on your Chime payment, not a $tag.`
     }
     const nextInfo = {
       ...info,
-      first_deposit_amount: amount,
-      payment_app: 'chime'
+      first_deposit_amount: amount
     };
     return {
-      kind: 'registration_send_chime_qr',
+      kind: 'registration_send_payment_qr',
       replies: [],
-      sendChimeQr: {
-        chimePaymentName: nextInfo.chime_payment_name,
+      sendPaymentQr: {
+        paymentMethodId: nextInfo.payment_method_id,
+        paymentMethodName: nextInfo.payment_method_name,
+        paymentDisplayName: nextInfo.payment_display_name,
         firstDepositAmount: amount
       },
       statePatch: {
@@ -587,7 +569,7 @@ This should be the name shown on your Chime payment, not a $tag.`
       return {
         kind: 'registration_await_payment_done',
         replies: [{
-          text: 'When you have sent your Chime payment, reply Done.'
+          text: `When you have sent your ${info.payment_method_name || 'payment'}, reply Done.`
         }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
         escalate: false
@@ -610,13 +592,13 @@ This should be the name shown on your Chime payment, not a $tag.`
       preferred_appbeg_username: text,
       preferred_appbeg_username_normalized: normalizeAppBegUsername(text)
     };
-    if (nextInfo.chime_payment_name && nextInfo.first_deposit_amount) {
+    if (nextInfo.payment_display_name && nextInfo.first_deposit_amount) {
       return reviewDecision(nextInfo);
     }
     return {
       kind: 'registration_ask_payment_app',
       replies: [{
-        text: paymentAppPrompt(text)
+        text: paymentAppPrompt(text, activePaymentMethods)
       }],
       statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: nextInfo },
       escalate: false,
@@ -664,7 +646,7 @@ This should be the name shown on your Chime payment, not a $tag.`
     return reviewDecision(info);
   }
 
-  return startRegistrationDecision(contact, info);
+  return await startRegistrationDecision(contact, info, store);
 }
 
 async function handleRegistrationPaymentDone({ store, contact, info }) {
@@ -703,10 +685,10 @@ async function handleRegistrationPaymentDone({ store, contact, info }) {
 }
 
 function reviewDecision(info) {
-  const paymentLines = info.chime_payment_name
+  const paymentLines = info.payment_display_name
     ? [
-      '• Payment app: Chime',
-      `• Chime payment name: ${info.chime_payment_name}`,
+      `• Payment app: ${info.payment_method_name || info.payment_app || '—'}`,
+      `• Payment name: ${info.payment_display_name}`,
       `• First deposit: $${formatDepositAmount(info.first_deposit_amount)}`
     ]
     : [
@@ -744,6 +726,7 @@ function normalizeStep(step, flow) {
     if (step === 'appbeg_username') return 'username';
     if (step === 'confirm') return 'review';
   }
+  if (step === 'chime_payment_name') return 'payment_display_name';
   if (BOT_REGISTRATION_STEPS.includes(step)) return step;
   return 'welcome';
 }
@@ -770,9 +753,9 @@ function welcomeNudgeMessage() {
 Reply Register to create an account, or Staff to speak with our team.`;
 }
 
-function paymentAppPrompt(username = null) {
+function paymentAppPrompt(username = null, methods = []) {
   const intro = username ? `Nice pick: ${username}.\n\n` : '';
-  return `${intro}${registrationPaymentAppPrompt()}`;
+  return `${intro}${registrationPaymentAppPrompt(methods)}`;
 }
 
 function shouldStartRegistration(step, flow, contact) {
@@ -810,9 +793,9 @@ function isCancelCommand(text) {
 }
 
 export {
-  chimeQrCaption,
+  paymentQrCaption,
   formatDepositAmount,
-  parseRegistrationPaymentApp,
+  parsePaymentMethodSelection,
   registrationPaymentAppPrompt
 };
 

@@ -20,6 +20,7 @@ import {
   DEFAULT_TAGS
 } from './defaults.js';
 import { createQueryHelpers } from './query-helpers.js';
+import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '../payments/methodUtils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -2135,23 +2136,369 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getTelegramAccountSyncState();
   }
 
-  async function getActiveDefaultChimeQr() {
-    return await db.prepare(`
+  function hydratePaymentMethodRow(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      key: row.key,
+      is_active: normalizeBool(row.is_active),
+      display_order: Number(row.display_order || 0),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      qr_count: Number(row.qr_count || 0),
+      default_qr_label: row.default_qr_label || null,
+      has_active_default: normalizeBool(row.has_active_default)
+    };
+  }
+
+  function hydratePaymentQrRow(row) {
+    if (!row) return null;
+    const usageCount = Number(row.usage_count || 0);
+    return {
+      id: row.id,
+      payment_method_id: row.payment_method_id,
+      label: row.label || '',
+      is_active: normalizeBool(row.is_active),
+      is_default: normalizeBool(row.is_default),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      preview_url: previewUrlFromFilePath(row.file_path),
+      usage_count: usageCount,
+      in_use: usageCount > 0
+    };
+  }
+
+  async function listPaymentMethods() {
+    const rows = await db.prepare(`
+      SELECT m.*,
+        (
+          SELECT COUNT(*)
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+        ) AS qr_count,
+        (
+          SELECT q.label
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+            AND q.is_active = ${sql.boolTrue}
+            AND q.is_default = ${sql.boolTrue}
+          ORDER BY q.updated_at DESC, q.id DESC
+          LIMIT 1
+        ) AS default_qr_label,
+        EXISTS (
+          SELECT 1
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+            AND q.is_active = ${sql.boolTrue}
+            AND q.is_default = ${sql.boolTrue}
+        ) AS has_active_default
+      FROM payment_methods m
+      ORDER BY m.display_order ASC, m.id ASC
+    `).all();
+    return rows.map(hydratePaymentMethodRow);
+  }
+
+  async function listActivePaymentMethodsForRegistration() {
+    const rows = await db.prepare(`
       SELECT *
-      FROM chime_qr_codes
-      WHERE is_active = ${sql.boolTrue} AND is_default = ${sql.boolTrue}
-      ORDER BY updated_at DESC, id DESC
+      FROM payment_methods
+      WHERE is_active = ${sql.boolTrue}
+      ORDER BY display_order ASC, id ASC
+    `).all();
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      key: row.key,
+      display_order: Number(row.display_order || 0)
+    }));
+  }
+
+  async function getPaymentMethod(id) {
+    const row = await db.prepare(`
+      SELECT m.*,
+        (
+          SELECT COUNT(*)
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+        ) AS qr_count,
+        (
+          SELECT q.label
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+            AND q.is_active = ${sql.boolTrue}
+            AND q.is_default = ${sql.boolTrue}
+          ORDER BY q.updated_at DESC, q.id DESC
+          LIMIT 1
+        ) AS default_qr_label,
+        EXISTS (
+          SELECT 1
+          FROM payment_qr_codes q
+          WHERE q.payment_method_id = m.id
+            AND q.is_active = ${sql.boolTrue}
+            AND q.is_default = ${sql.boolTrue}
+        ) AS has_active_default
+      FROM payment_methods m
+      WHERE m.id = ?
+    `).get(id);
+    return hydratePaymentMethodRow(row);
+  }
+
+  async function getPaymentMethodByKey(key) {
+    const row = await db.prepare('SELECT * FROM payment_methods WHERE key = ?').get(String(key || '').trim().toLowerCase());
+    if (!row) return null;
+    return await getPaymentMethod(row.id);
+  }
+
+  async function createPaymentMethod({ name, key = null, isActive = true, displayOrder = null }) {
+    const now = nowIso();
+    const normalizedName = String(name || '').trim();
+    if (!normalizedName) {
+      const err = new Error('Payment method name is required.');
+      err.code = 'INVALID_NAME';
+      throw err;
+    }
+    let normalizedKey = String(key || slugifyPaymentMethodKey(normalizedName)).trim().toLowerCase();
+    if (!normalizedKey) normalizedKey = slugifyPaymentMethodKey(normalizedName);
+    const existing = await db.prepare('SELECT id FROM payment_methods WHERE key = ?').get(normalizedKey);
+    if (existing) {
+      const err = new Error('A payment method with this key already exists.');
+      err.code = 'DUPLICATE_KEY';
+      throw err;
+    }
+    let order = displayOrder;
+    if (order == null) {
+      const maxRow = await db.prepare('SELECT MAX(display_order) AS max_order FROM payment_methods').get();
+      order = Number(maxRow?.max_order || 0) + 1;
+    }
+    const result = await db.prepare(`
+      INSERT INTO payment_methods (name, key, is_active, display_order, created_at, updated_at)
+      VALUES (?, ?, ${sql.boolLiteral(isActive)}, ?, ?, ?)
+    `).run(normalizedName, normalizedKey, order, now, now);
+    return await getPaymentMethod(result.lastInsertRowid);
+  }
+
+  async function updatePaymentMethod(id, patch = {}) {
+    const current = await getPaymentMethod(id);
+    if (!current) return null;
+    const nextName = patch.name !== undefined ? String(patch.name || '').trim() : current.name;
+    const nextActive = patch.is_active !== undefined ? Boolean(patch.is_active) : current.is_active;
+    let nextOrder = patch.display_order !== undefined ? Number(patch.display_order) : current.display_order;
+    if (!nextName) {
+      const err = new Error('Payment method name is required.');
+      err.code = 'INVALID_NAME';
+      throw err;
+    }
+    if (!Number.isFinite(nextOrder)) nextOrder = current.display_order;
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE payment_methods
+      SET name = ?, is_active = ${sql.boolLiteral(nextActive)}, display_order = ?, updated_at = ?
+      WHERE id = ?
+    `).run(nextName, nextOrder, now, id);
+    return await getPaymentMethod(id);
+  }
+
+  async function deletePaymentMethod(id) {
+    const current = await getPaymentMethod(id);
+    if (!current) return null;
+    const usageCount = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM registration_payment_windows
+      WHERE payment_method_id = ?
+    `).get(id);
+    if (Number(usageCount?.count || 0) > 0) {
+      const err = new Error('Cannot delete a payment method used in registration payments.');
+      err.code = 'METHOD_IN_USE';
+      throw err;
+    }
+    const qrs = await listPaymentQrCodes(id);
+    await db.prepare('DELETE FROM payment_methods WHERE id = ?').run(id);
+    return { action: 'deleted', method: current, qrs };
+  }
+
+  async function listPaymentQrCodes(paymentMethodId) {
+    const rows = await db.prepare(`
+      SELECT q.*,
+        (
+          SELECT COUNT(*)
+          FROM registration_payment_windows w
+          WHERE w.payment_qr_code_id = q.id
+        ) AS usage_count
+      FROM payment_qr_codes q
+      WHERE q.payment_method_id = ?
+      ORDER BY q.is_default DESC, q.is_active DESC, q.created_at DESC, q.id DESC
+    `).all(paymentMethodId);
+    return rows.map(hydratePaymentQrRow);
+  }
+
+  async function getPaymentQrCode(id) {
+    const row = await db.prepare(`
+      SELECT q.*,
+        (
+          SELECT COUNT(*)
+          FROM registration_payment_windows w
+          WHERE w.payment_qr_code_id = q.id
+        ) AS usage_count
+      FROM payment_qr_codes q
+      WHERE q.id = ?
+    `).get(id);
+    return hydratePaymentQrRow(row);
+  }
+
+  async function getPaymentQrCodeFilePath(id) {
+    const row = await db.prepare('SELECT file_path FROM payment_qr_codes WHERE id = ?').get(id);
+    return row?.file_path || null;
+  }
+
+  async function getActiveDefaultPaymentQr(paymentMethodId) {
+    const row = await db.prepare(`
+      SELECT q.*
+      FROM payment_qr_codes q
+      WHERE q.payment_method_id = ?
+        AND q.is_active = ${sql.boolTrue}
+        AND q.is_default = ${sql.boolTrue}
+      ORDER BY q.updated_at DESC, q.id DESC
       LIMIT 1
-    `).get();
+    `).get(paymentMethodId);
+    if (!row) return null;
+    return {
+      ...hydratePaymentQrRow(row),
+      file_path: row.file_path
+    };
+  }
+
+  async function countPaymentQrUsage(id) {
+    const row = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM registration_payment_windows
+      WHERE payment_qr_code_id = ?
+    `).get(id);
+    return Number(row?.count || 0);
+  }
+
+  async function createPaymentQrCode({ paymentMethodId, filePath, label = null, isActive = true, isDefault = false }) {
+    const now = nowIso();
+    const existing = await listPaymentQrCodes(paymentMethodId);
+    const shouldDefault = isDefault || existing.length === 0;
+    const result = await db.prepare(`
+      INSERT INTO payment_qr_codes (
+        payment_method_id, label, file_path, is_default, is_active, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ${sql.boolLiteral(shouldDefault)}, ${sql.boolLiteral(isActive)}, ?, ?)
+    `).run(paymentMethodId, label || null, filePath, now, now);
+    const id = result.lastInsertRowid;
+    if (shouldDefault) {
+      await clearDefaultPaymentQrExcept(paymentMethodId, id);
+    }
+    return await getPaymentQrCode(id);
+  }
+
+  async function clearDefaultPaymentQrExcept(paymentMethodId, keepId) {
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE payment_qr_codes
+      SET is_default = ${sql.boolFalse}, updated_at = ?
+      WHERE payment_method_id = ? AND id != ?
+    `).run(now, paymentMethodId, keepId);
+  }
+
+  async function updatePaymentQrCode(id, patch = {}) {
+    const current = await getPaymentQrCode(id);
+    if (!current) return null;
+
+    const nextLabel = patch.label !== undefined ? patch.label : current.label;
+    let nextActive = patch.is_active !== undefined ? Boolean(patch.is_active) : current.is_active;
+    let nextDefault = patch.is_default !== undefined ? Boolean(patch.is_default) : current.is_default;
+    const force = Boolean(patch.force);
+
+    if (!nextActive && nextDefault) nextDefault = false;
+
+    if (!nextActive && current.is_default && !force) {
+      const otherDefault = await db.prepare(`
+        SELECT id
+        FROM payment_qr_codes
+        WHERE payment_method_id = ?
+          AND id != ?
+          AND is_active = ${sql.boolTrue}
+          AND is_default = ${sql.boolTrue}
+        LIMIT 1
+      `).get(current.payment_method_id, id);
+      if (!otherDefault) {
+        const err = new Error('Cannot deactivate the only active default QR. Set another QR as default first.');
+        err.code = 'LAST_ACTIVE_DEFAULT';
+        throw err;
+      }
+      nextDefault = false;
+    }
+
+    if (!nextActive && current.is_default && force) nextDefault = false;
+
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE payment_qr_codes
+      SET label = ?, is_active = ${sql.boolLiteral(nextActive)}, is_default = ${sql.boolLiteral(nextDefault)}, updated_at = ?
+      WHERE id = ?
+    `).run(nextLabel || null, now, id);
+
+    if (nextDefault) {
+      await clearDefaultPaymentQrExcept(current.payment_method_id, id);
+      await db.prepare(`
+        UPDATE payment_qr_codes
+        SET is_default = ${sql.boolTrue}, updated_at = ?
+        WHERE id = ?
+      `).run(now, id);
+    }
+
+    return await getPaymentQrCode(id);
+  }
+
+  async function setDefaultPaymentQr(id) {
+    const current = await getPaymentQrCode(id);
+    if (!current) return null;
+    if (!current.is_active) {
+      const err = new Error('Only an active QR can be set as default.');
+      err.code = 'INACTIVE_QR';
+      throw err;
+    }
+    const now = nowIso();
+    await clearDefaultPaymentQrExcept(current.payment_method_id, id);
+    await db.prepare(`
+      UPDATE payment_qr_codes
+      SET is_default = ${sql.boolTrue}, updated_at = ?
+      WHERE id = ?
+    `).run(now, id);
+    return await getPaymentQrCode(id);
+  }
+
+  async function deletePaymentQrCode(id) {
+    const current = await getPaymentQrCode(id);
+    if (!current) return null;
+
+    if (current.is_default) {
+      const err = new Error('Set another QR as default before deleting the current default.');
+      err.code = 'DEFAULT_QR_REQUIRED';
+      throw err;
+    }
+
+    const usageCount = await countPaymentQrUsage(id);
+    if (usageCount > 0) {
+      const deactivated = await updatePaymentQrCode(id, { is_active: false, is_default: false });
+      return { action: 'deactivated', qr: deactivated, reason: 'in_use' };
+    }
+
+    const filePath = await getPaymentQrCodeFilePath(id);
+    await db.prepare('DELETE FROM payment_qr_codes WHERE id = ?').run(id);
+    return { action: 'deleted', qr: current, file_path: filePath || null };
   }
 
   async function createRegistrationPaymentWindow({
     contactId,
     telegramUserId,
-    paymentApp = 'chime',
-    chimePaymentName,
+    paymentMethodId,
+    paymentQrCodeId = null,
+    paymentDisplayName,
     firstDepositAmount,
-    qrCodeId = null,
     windowMinutes = 5
   }) {
     const now = new Date();
@@ -2159,17 +2506,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const nowText = nowIso();
     const result = await db.prepare(`
       INSERT INTO registration_payment_windows (
-        contact_id, telegram_user_id, payment_app, chime_payment_name,
-        first_deposit_amount, qr_code_id, status, expires_at, created_at, updated_at
+        contact_id, telegram_user_id, payment_method_id, payment_qr_code_id,
+        payment_display_name, first_deposit_amount, status, expires_at, created_at, updated_at
       )
       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId),
-      paymentApp,
-      chimePaymentName || null,
+      paymentMethodId,
+      paymentQrCodeId,
+      paymentDisplayName || null,
       firstDepositAmount,
-      qrCodeId,
       expiresAt,
       nowText,
       nowText
@@ -2206,177 +2553,6 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE id = ? AND status = 'active'
     `).run(now, windowId);
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
-  }
-
-  function hydrateChimeQrRow(row) {
-    if (!row) return null;
-    const fileName = path.basename(String(row.file_path || ''));
-    const usageCount = Number(row.usage_count || 0);
-    return {
-      id: row.id,
-      label: row.label || '',
-      is_active: row.is_active === true || row.is_active === 1 || row.is_active === '1',
-      is_default: row.is_default === true || row.is_default === 1 || row.is_default === '1',
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      preview_url: fileName ? `/media/chime-qr/${fileName}` : null,
-      usage_count: usageCount,
-      in_use: usageCount > 0
-    };
-  }
-
-  async function listChimeQrCodes() {
-    const rows = await db.prepare(`
-      SELECT q.*,
-        (
-          SELECT COUNT(*)
-          FROM registration_payment_windows w
-          WHERE w.qr_code_id = q.id
-        ) AS usage_count
-      FROM chime_qr_codes q
-      ORDER BY q.is_default DESC, q.is_active DESC, q.created_at DESC, q.id DESC
-    `).all();
-    return rows.map(hydrateChimeQrRow);
-  }
-
-  async function getChimeQrCode(id) {
-    const row = await db.prepare(`
-      SELECT q.*,
-        (
-          SELECT COUNT(*)
-          FROM registration_payment_windows w
-          WHERE w.qr_code_id = q.id
-        ) AS usage_count
-      FROM chime_qr_codes q
-      WHERE q.id = ?
-    `).get(id);
-    return hydrateChimeQrRow(row);
-  }
-
-  async function getChimeQrCodeFilePath(id) {
-    const row = await db.prepare('SELECT file_path FROM chime_qr_codes WHERE id = ?').get(id);
-    return row?.file_path || null;
-  }
-
-  async function countChimeQrUsage(id) {
-    const row = await db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM registration_payment_windows
-      WHERE qr_code_id = ?
-    `).get(id);
-    return Number(row?.count || 0);
-  }
-
-  async function hasActiveDefaultChimeQr() {
-    return Boolean(await getActiveDefaultChimeQr());
-  }
-
-  async function createChimeQrCode({ filePath, label = null, isActive = true, isDefault = false }) {
-    const now = nowIso();
-    const activeLiteral = sql.boolLiteral(isActive);
-    const defaultLiteral = sql.boolLiteral(isDefault);
-    const result = await db.prepare(`
-      INSERT INTO chime_qr_codes (file_path, label, is_active, is_default, created_at, updated_at)
-      VALUES (?, ?, ${activeLiteral}, ${defaultLiteral}, ?, ?)
-    `).run(filePath, label || null, now, now);
-    const id = result.lastInsertRowid;
-    if (isDefault) {
-      await clearDefaultChimeQrExcept(id);
-    }
-    return await getChimeQrCode(id);
-  }
-
-  async function clearDefaultChimeQrExcept(keepId) {
-    const now = nowIso();
-    await db.prepare(`
-      UPDATE chime_qr_codes
-      SET is_default = ${sql.boolFalse}, updated_at = ?
-      WHERE id != ?
-    `).run(now, keepId);
-  }
-
-  async function updateChimeQrCode(id, patch = {}) {
-    const current = await getChimeQrCode(id);
-    if (!current) return null;
-
-    const nextLabel = patch.label !== undefined ? patch.label : current.label;
-    let nextActive = patch.is_active !== undefined ? Boolean(patch.is_active) : current.is_active;
-    let nextDefault = patch.is_default !== undefined ? Boolean(patch.is_default) : current.is_default;
-    const force = Boolean(patch.force);
-
-    if (!nextActive && nextDefault) {
-      nextDefault = false;
-    }
-
-    if (!nextActive && current.is_default && !force) {
-      const otherDefault = await db.prepare(`
-        SELECT id
-        FROM chime_qr_codes
-        WHERE id != ? AND is_active = ${sql.boolTrue} AND is_default = ${sql.boolTrue}
-        LIMIT 1
-      `).get(id);
-      if (!otherDefault) {
-        const err = new Error('Cannot deactivate the only active default Chime QR. Set another QR as default first.');
-        err.code = 'LAST_ACTIVE_DEFAULT';
-        throw err;
-      }
-      nextDefault = false;
-    }
-
-    if (!nextActive && current.is_default && force) {
-      nextDefault = false;
-    }
-
-    const now = nowIso();
-    await db.prepare(`
-      UPDATE chime_qr_codes
-      SET label = ?, is_active = ${sql.boolLiteral(nextActive)}, is_default = ${sql.boolLiteral(nextDefault)}, updated_at = ?
-      WHERE id = ?
-    `).run(nextLabel || null, now, id);
-
-    if (nextDefault) {
-      await clearDefaultChimeQrExcept(id);
-      await db.prepare(`
-        UPDATE chime_qr_codes
-        SET is_default = ${sql.boolTrue}, updated_at = ?
-        WHERE id = ?
-      `).run(now, id);
-    }
-
-    return await getChimeQrCode(id);
-  }
-
-  async function setDefaultChimeQr(id) {
-    const current = await getChimeQrCode(id);
-    if (!current) return null;
-    if (!current.is_active) {
-      const err = new Error('Only an active Chime QR can be set as default.');
-      err.code = 'INACTIVE_QR';
-      throw err;
-    }
-    const now = nowIso();
-    await clearDefaultChimeQrExcept(id);
-    await db.prepare(`
-      UPDATE chime_qr_codes
-      SET is_default = ${sql.boolTrue}, updated_at = ?
-      WHERE id = ?
-    `).run(now, id);
-    return await getChimeQrCode(id);
-  }
-
-  async function deleteChimeQrCode(id) {
-    const current = await getChimeQrCode(id);
-    if (!current) return null;
-
-    const usageCount = await countChimeQrUsage(id);
-    if (usageCount > 0) {
-      const deactivated = await updateChimeQrCode(id, { is_active: false, is_default: false });
-      return { action: 'deactivated', qr: deactivated, reason: 'in_use' };
-    }
-
-    const filePath = await getChimeQrCodeFilePath(id);
-    await db.prepare('DELETE FROM chime_qr_codes WHERE id = ?').run(id);
-    return { action: 'deleted', qr: current, file_path: filePath || null };
   }
 
   return {
@@ -2479,20 +2655,26 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     setBotControl,
     markBotNeedsStaffReview,
     findLatestIncomingMessageId,
-    getActiveDefaultChimeQr,
+    getActiveDefaultPaymentQr,
+    listPaymentMethods,
+    listActivePaymentMethodsForRegistration,
+    getPaymentMethod,
+    getPaymentMethodByKey,
+    createPaymentMethod,
+    updatePaymentMethod,
+    deletePaymentMethod,
+    listPaymentQrCodes,
+    getPaymentQrCode,
+    getPaymentQrCodeFilePath,
+    countPaymentQrUsage,
+    createPaymentQrCode,
+    updatePaymentQrCode,
+    setDefaultPaymentQr,
+    deletePaymentQrCode,
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
     completeRegistrationPaymentWindow,
-    expireRegistrationPaymentWindow,
-    listChimeQrCodes,
-    getChimeQrCode,
-    getChimeQrCodeFilePath,
-    countChimeQrUsage,
-    hasActiveDefaultChimeQr,
-    createChimeQrCode,
-    updateChimeQrCode,
-    setDefaultChimeQr,
-    deleteChimeQrCode
+    expireRegistrationPaymentWindow
   };
 }
 
@@ -2560,6 +2742,67 @@ function hydrateDepositEvent(event) {
     ...event,
     window_minutes: depositWindowMinutes()
   };
+}
+
+async function migrateLegacyChimeQrData(db) {
+  const hasChimeTable = await tableExists(db, 'chime_qr_codes');
+  if (!hasChimeTable) return;
+
+  const now = new Date().toISOString();
+  let chimeMethod = await db.prepare("SELECT id FROM payment_methods WHERE key = 'chime'").get();
+  if (!chimeMethod) {
+    const result = await db.prepare(`
+      INSERT INTO payment_methods (name, key, is_active, display_order, created_at, updated_at)
+      VALUES ('Chime', 'chime', 1, 1, ?, ?)
+    `).run(now, now);
+    chimeMethod = { id: result.lastInsertRowid };
+  }
+
+  const legacyRows = await db.prepare('SELECT * FROM chime_qr_codes').all();
+  const legacyIdMap = new Map();
+
+  for (const row of legacyRows) {
+    const existing = await db.prepare('SELECT id FROM payment_qr_codes WHERE file_path = ?').get(row.file_path);
+    if (existing) {
+      legacyIdMap.set(row.id, existing.id);
+      continue;
+    }
+    const result = await db.prepare(`
+      INSERT INTO payment_qr_codes (
+        payment_method_id, label, file_path, is_default, is_active, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      chimeMethod.id,
+      row.label || null,
+      row.file_path,
+      row.is_default ? 1 : 0,
+      row.is_active ? 1 : 0,
+      row.created_at || now,
+      row.updated_at || now
+    );
+    legacyIdMap.set(row.id, result.lastInsertRowid);
+  }
+
+  const windowColumns = await db.prepare("PRAGMA table_info(registration_payment_windows)").all();
+  const columnNames = new Set(windowColumns.map((col) => col.name));
+  if (columnNames.has('qr_code_id')) {
+    const windows = await db.prepare(`
+      SELECT id, qr_code_id, chime_payment_name, payment_app
+      FROM registration_payment_windows
+      WHERE payment_qr_code_id IS NULL
+    `).all();
+    for (const window of windows) {
+      const mappedQrId = window.qr_code_id ? legacyIdMap.get(window.qr_code_id) || null : null;
+      await db.prepare(`
+        UPDATE registration_payment_windows
+        SET payment_method_id = COALESCE(payment_method_id, ?),
+            payment_qr_code_id = COALESCE(payment_qr_code_id, ?),
+            payment_display_name = COALESCE(payment_display_name, ?)
+        WHERE id = ?
+      `).run(chimeMethod.id, mappedQrId, window.chime_payment_name || null, window.id);
+    }
+  }
 }
 
 async function migrate(db) {
@@ -2771,14 +3014,28 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'telegram_outbound_messages', 'message_type', "TEXT NOT NULL DEFAULT 'text'");
 
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS chime_qr_codes (
+    CREATE TABLE IF NOT EXISTS payment_methods (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      file_path TEXT NOT NULL,
-      label TEXT,
+      name TEXT NOT NULL,
+      key TEXT NOT NULL UNIQUE,
       is_active INTEGER NOT NULL DEFAULT 1,
-      is_default INTEGER NOT NULL DEFAULT 0,
+      display_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_qr_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      payment_method_id INTEGER NOT NULL,
+      label TEXT,
+      file_path TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
     )
   `);
 
@@ -2787,10 +3044,10 @@ async function migrate(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       contact_id INTEGER NOT NULL,
       telegram_user_id TEXT NOT NULL,
-      payment_app TEXT NOT NULL DEFAULT 'chime',
-      chime_payment_name TEXT,
+      payment_method_id INTEGER,
+      payment_qr_code_id INTEGER,
+      payment_display_name TEXT,
       first_deposit_amount REAL NOT NULL,
-      qr_code_id INTEGER,
       status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
       expires_at TEXT NOT NULL,
@@ -2798,11 +3055,20 @@ async function migrate(db) {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
-      FOREIGN KEY (qr_code_id) REFERENCES chime_qr_codes(id) ON DELETE SET NULL
+      FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE SET NULL,
+      FOREIGN KEY (payment_qr_code_id) REFERENCES payment_qr_codes(id) ON DELETE SET NULL
     )
   `);
-  await db.exec('CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default ON chime_qr_codes(is_active, is_default, updated_at DESC)');
+
+  await addColumnIfMissing(db, 'registration_payment_windows', 'payment_method_id', 'INTEGER');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'payment_qr_code_id', 'INTEGER');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'payment_display_name', 'TEXT');
+
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order ON payment_methods(is_active, display_order ASC, id ASC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status ON registration_payment_windows(contact_id, status, expires_at DESC)');
+
+  await migrateLegacyChimeQrData(db);
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS bot_jobs (

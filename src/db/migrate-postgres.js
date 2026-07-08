@@ -16,47 +16,97 @@ export async function migratePostgres(driver) {
   await driver.exec(`
     ALTER TABLE telegram_outbound_messages
       ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]';
-  `);
-  await driver.exec(`
-    ALTER TABLE telegram_outbound_messages
-      ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]';
     ALTER TABLE telegram_outbound_messages
       ADD COLUMN IF NOT EXISTS media_path TEXT;
     ALTER TABLE telegram_outbound_messages
       ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text';
   `);
   await driver.exec(`
-    CREATE TABLE IF NOT EXISTS chime_qr_codes (
+    CREATE TABLE IF NOT EXISTS payment_methods (
       id BIGSERIAL PRIMARY KEY,
-      file_path TEXT NOT NULL,
-      label TEXT,
+      name TEXT NOT NULL,
+      key TEXT NOT NULL UNIQUE,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
-      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      display_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default
-      ON chime_qr_codes(is_active, is_default, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order
+      ON payment_methods(is_active, display_order ASC, id ASC);
   `);
   await driver.exec(`
-    CREATE TABLE IF NOT EXISTS registration_payment_windows (
+    CREATE TABLE IF NOT EXISTS payment_qr_codes (
       id BIGSERIAL PRIMARY KEY,
-      contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
-      telegram_user_id TEXT NOT NULL,
-      payment_app TEXT NOT NULL DEFAULT 'chime',
-      chime_payment_name TEXT,
-      first_deposit_amount NUMERIC(12, 2) NOT NULL,
-      qr_code_id BIGINT REFERENCES chime_qr_codes(id) ON DELETE SET NULL,
-      status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
-      expires_at TEXT NOT NULL,
-      completed_at TEXT,
+      payment_method_id BIGINT NOT NULL REFERENCES payment_methods(id) ON DELETE CASCADE,
+      label TEXT,
+      file_path TEXT NOT NULL,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
     );
+    CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
+      ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC);
+  `);
+  await driver.exec(`
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS payment_method_id BIGINT REFERENCES payment_methods(id) ON DELETE SET NULL;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS payment_qr_code_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS payment_display_name TEXT;
+  `);
+  await driver.exec(`
     CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
       ON registration_payment_windows(contact_id, status, expires_at DESC);
   `);
+
+  const chimeTable = await driver.get(`
+    SELECT 1 AS ok
+    FROM information_schema.tables
+    WHERE table_name = 'chime_qr_codes'
+  `);
+  if (chimeTable?.ok) {
+    let chimeMethod = await driver.get("SELECT id FROM payment_methods WHERE key = 'chime'");
+    if (!chimeMethod) {
+      await driver.run(`
+        INSERT INTO payment_methods (name, key, is_active, display_order, created_at, updated_at)
+        VALUES ('Chime', 'chime', TRUE, 1, NOW()::TEXT, NOW()::TEXT)
+      `);
+      chimeMethod = await driver.get("SELECT id FROM payment_methods WHERE key = 'chime'");
+    }
+    const legacyRows = await driver.all('SELECT * FROM chime_qr_codes');
+    for (const row of legacyRows) {
+      const existing = await driver.get('SELECT id FROM payment_qr_codes WHERE file_path = ?', [row.file_path]);
+      let newId = existing?.id;
+      if (!newId) {
+        const inserted = await driver.run(`
+          INSERT INTO payment_qr_codes (
+            payment_method_id, label, file_path, is_default, is_active, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          RETURNING id
+        `, [
+          chimeMethod.id,
+          row.label,
+          row.file_path,
+          row.is_default,
+          row.is_active,
+          row.created_at,
+          row.updated_at
+        ]);
+        newId = inserted?.lastInsertRowid || inserted?.id;
+      }
+      await driver.run(`
+        UPDATE registration_payment_windows
+        SET payment_method_id = COALESCE(payment_method_id, ?),
+            payment_qr_code_id = COALESCE(payment_qr_code_id, ?),
+            payment_display_name = COALESCE(payment_display_name, chime_payment_name)
+        WHERE qr_code_id = ?
+      `, [chimeMethod.id, newId, row.id]);
+    }
+  }
+
   await driver.exec(`
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused BOOLEAN NOT NULL DEFAULT FALSE;

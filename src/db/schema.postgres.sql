@@ -389,12 +389,23 @@ CREATE TABLE IF NOT EXISTS settings_audit_log (
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );
 
-CREATE TABLE IF NOT EXISTS chime_qr_codes (
+CREATE TABLE IF NOT EXISTS payment_methods (
   id BIGSERIAL PRIMARY KEY,
-  file_path TEXT NOT NULL,
-  label TEXT,
+  name TEXT NOT NULL,
+  key TEXT NOT NULL UNIQUE,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  display_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE TABLE IF NOT EXISTS payment_qr_codes (
+  id BIGSERIAL PRIMARY KEY,
+  payment_method_id BIGINT NOT NULL REFERENCES payment_methods(id) ON DELETE CASCADE,
+  label TEXT,
+  file_path TEXT NOT NULL,
   is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
   updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );
@@ -403,10 +414,10 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   id BIGSERIAL PRIMARY KEY,
   contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
   telegram_user_id TEXT NOT NULL,
-  payment_app TEXT NOT NULL DEFAULT 'chime',
-  chime_payment_name TEXT,
+  payment_method_id BIGINT REFERENCES payment_methods(id) ON DELETE SET NULL,
+  payment_qr_code_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL,
+  payment_display_name TEXT,
   first_deposit_amount NUMERIC(12, 2) NOT NULL,
-  qr_code_id BIGINT REFERENCES chime_qr_codes(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
   expires_at TEXT NOT NULL,

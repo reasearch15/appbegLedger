@@ -5,7 +5,7 @@ import { createDataStore } from '../src/db/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const fixtureDir = path.join(rootDir, 'data', 'media', 'chime-qr');
+const fixtureDir = path.join(rootDir, 'data', 'media', 'payment-qr');
 
 async function run() {
   fs.mkdirSync(fixtureDir, { recursive: true });
@@ -18,30 +18,43 @@ async function run() {
   const store = await createDataStore();
   const relativePath = path.relative(rootDir, fixturePath).split(path.sep).join('/');
 
-  const created = await store.createChimeQrCode({
+  const method = await store.createPaymentMethod({ name: 'Test Method', key: `test${Date.now()}` });
+  const created = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
     filePath: relativePath,
     label: 'Test QR',
     isActive: true,
     isDefault: true
   });
-  if (!created?.preview_url?.includes('/media/chime-qr/')) {
+  if (!created?.preview_url?.includes('/media/payment-qr/')) {
     throw new Error('preview_url missing');
   }
 
-  const listed = await store.listChimeQrCodes();
+  const listed = await store.listPaymentQrCodes(method.id);
   if (!listed.some((item) => item.id === created.id)) {
     throw new Error('created QR not listed');
   }
 
-  const hasDefault = await store.hasActiveDefaultChimeQr();
-  if (!hasDefault) throw new Error('expected active default');
+  const defaultQr = await store.getActiveDefaultPaymentQr(method.id);
+  if (!defaultQr) throw new Error('expected active default');
 
-  const deleted = await store.deleteChimeQrCode(created.id);
+  const second = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: relativePath,
+    label: 'Second QR',
+    isActive: true,
+    isDefault: false
+  });
+  await store.setDefaultPaymentQr(second.id);
+
+  const deleted = await store.deletePaymentQrCode(created.id);
   if (deleted.action !== 'deleted') {
     throw new Error(`expected hard delete, got ${deleted.action}`);
   }
 
-  console.log('ALL CHIME QR STORE CHECKS PASSED');
+  await store.deletePaymentMethod(method.id);
+
+  console.log('ALL PAYMENT METHOD STORE CHECKS PASSED');
 }
 
 run().catch((error) => {

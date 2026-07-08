@@ -2410,20 +2410,82 @@ textarea {
 
 .payment-info-layout {
   display: grid;
-  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
 
-.payment-info-upload-card,
-.payment-info-list-card {
+.payment-info-layout.list-view {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.payment-info-layout.manage-view {
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+}
+
+.payment-info-methods-panel,
+.payment-info-manage-panel {
   min-width: 0;
 }
 
-.payment-info-list-header {
-  display: grid;
+.payment-info-panel-header {
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+  justify-content: space-between;
+  align-items: flex-start;
   margin-bottom: 14px;
+}
+
+.payment-info-method-list {
+  display: grid;
+  gap: 12px;
+}
+
+.payment-info-method-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: white;
+  padding: 12px;
+}
+
+.payment-info-method-card.inactive {
+  opacity: 0.82;
+}
+
+.payment-info-method-title {
+  font-weight: 800;
+  font-size: 1rem;
+}
+
+.payment-info-inline-form {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.payment-info-upload-details {
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.payment-info-upload-details summary {
+  cursor: pointer;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.payment-info-banner {
+  margin-bottom: 12px;
 }
 
 .payment-info-warning {
@@ -2534,11 +2596,23 @@ textarea {
 }
 
 @media (max-width: 900px) {
-  .payment-info-layout {
+  .payment-info-layout.manage-view {
     grid-template-columns: 1fr;
   }
 
   .payment-info-grid {
     grid-template-columns: 1fr;
+  }
+
+  .payment-info-method-card {
+    align-items: flex-start;
+  }
+
+  .payment-info-actions {
+    width: 100%;
+  }
+
+  .payment-info-actions .button {
+    flex: 1 1 auto;
   }
 }

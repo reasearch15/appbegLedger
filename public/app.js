@@ -76,13 +76,18 @@ let state = {
   settingsError: null,
   registrationModal: null,
   registrationWizard: null,
-  chimeQrs: [],
-  chimeQrLoading: false,
-  chimeQrUploading: false,
-  chimeQrActionId: null,
-  hasActiveDefaultChimeQr: false,
-  chimeQrError: null,
-  chimeQrSuccess: null
+  paymentMethods: [],
+  paymentMethodsLoading: false,
+  selectedPaymentMethodId: null,
+  selectedPaymentMethod: null,
+  paymentMethodQrs: [],
+  paymentInfoView: 'list',
+  paymentInfoSaving: false,
+  paymentInfoUploading: false,
+  paymentInfoActionId: null,
+  showAddPaymentMethod: false,
+  paymentInfoError: null,
+  paymentInfoSuccess: null
 };
 
 let playersController;
@@ -1872,9 +1877,10 @@ function bindEvents() {
         await refreshPlayers({ keepSelection: true });
       }
       if (state.section === 'payment-info') {
-        state.chimeQrError = null;
-        state.chimeQrSuccess = null;
-        await paymentInfoController.refreshChimeQrs();
+        state.paymentInfoError = null;
+        state.paymentInfoSuccess = null;
+        state.paymentInfoView = 'list';
+        await paymentInfoController.refreshPaymentMethods();
       }
       render();
     });

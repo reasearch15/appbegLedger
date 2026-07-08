@@ -22,7 +22,7 @@ import { routePaymentEvent, routeUnprocessedPayments, startDepositEventForContac
 import { requestLogger } from './middleware/requestLogger.js';
 import { wrapAsyncHandlers, notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { registerHealthRoutes } from './routes/health.js';
-import { registerPaymentInfoRoutes } from './routes/paymentInfo.js';
+import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
 import { isDebugEnabled } from './config/debug.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -65,7 +65,7 @@ app.use(express.static(publicDir));
 app.use('/media', express.static(mediaDir));
 
 registerHealthRoutes(app, { store });
-registerPaymentInfoRoutes(app, { store, rootDir });
+registerPaymentMethodRoutes(app, { store, rootDir });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });

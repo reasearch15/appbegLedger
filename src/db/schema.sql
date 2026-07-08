@@ -409,24 +409,36 @@ CREATE TABLE IF NOT EXISTS settings_audit_log (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS chime_qr_codes (
+CREATE TABLE IF NOT EXISTS payment_methods (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_path TEXT NOT NULL,
-  label TEXT,
+  name TEXT NOT NULL,
+  key TEXT NOT NULL UNIQUE,
   is_active INTEGER NOT NULL DEFAULT 1,
-  is_default INTEGER NOT NULL DEFAULT 0,
+  display_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payment_qr_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  payment_method_id INTEGER NOT NULL,
+  label TEXT,
+  file_path TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS registration_payment_windows (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   contact_id INTEGER NOT NULL,
   telegram_user_id TEXT NOT NULL,
-  payment_app TEXT NOT NULL DEFAULT 'chime',
-  chime_payment_name TEXT,
+  payment_method_id INTEGER,
+  payment_qr_code_id INTEGER,
+  payment_display_name TEXT,
   first_deposit_amount REAL NOT NULL,
-  qr_code_id INTEGER,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
   expires_at TEXT NOT NULL,
@@ -434,7 +446,8 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
-  FOREIGN KEY (qr_code_id) REFERENCES chime_qr_codes(id) ON DELETE SET NULL
+  FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE SET NULL,
+  FOREIGN KEY (payment_qr_code_id) REFERENCES payment_qr_codes(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_telegram_users_last_seen
@@ -510,8 +523,11 @@ CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created
   ON settings_audit_log(created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default
-  ON chime_qr_codes(is_active, is_default, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order
+  ON payment_methods(is_active, display_order ASC, id ASC);
+
+CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
+  ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
   ON registration_payment_windows(contact_id, status, expires_at DESC);

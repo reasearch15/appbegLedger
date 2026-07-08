@@ -15,6 +15,9 @@ function createFakeStore(initial = {}) {
     },
     async getAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
+    },
+    async listActivePaymentMethodsForRegistration() {
+      return [{ id: 1, name: 'Chime', key: 'chime', display_order: 1 }];
     }
   };
 }
@@ -57,18 +60,6 @@ async function run() {
   assertEqual(started.kind, 'registration_ask_payment_app');
   assertEqual(started.statePatch.currentStep, 'payment_app');
   console.log('ok Register text command');
-
-  store.state.current_flow = 'bot_registration';
-  store.state.current_step = 'username';
-  store.state.registration_info = {
-    chime_payment_name: 'John Smith',
-    first_deposit_amount: 25,
-    payment_app: 'chime'
-  };
-  const advanced = await decideBotReply({ store, contact, messageText: 'luckyalex' });
-  assertEqual(advanced.kind, 'registration_review');
-  assertEqual(advanced.statePatch.currentStep, 'review');
-  console.log('ok username after chime payment goes to review');
 
   console.log('ALL AUTO-REPLY FIX CHECKS PASSED');
 }

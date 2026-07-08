@@ -3,9 +3,9 @@ import {
   decideBotReply,
   isBotActiveForContact,
   isChatbotButtonAction,
-  normalizeCallbackAction,
-  chimeQrCaption
+  normalizeCallbackAction
 } from './chatbotEngine.js';
+import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 
 /**
@@ -60,29 +60,30 @@ export async function queueBotPhotoReply({ store, user, text, mediaPath, bot = n
   return result;
 }
 
-async function handleChimeRegistrationQr({ store, contact, sendChimeQr, bot }) {
-  const qr = await store.getActiveDefaultChimeQr();
+async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot }) {
+  const qr = await store.getActiveDefaultPaymentQr(sendPaymentQr.paymentMethodId);
   if (!qr?.file_path) {
     await queueBotReply({
       store,
       user: contact,
-      text: 'Sorry, Chime payment is not available right now. Please wait for staff.',
+      text: paymentMethodUnavailableMessage(sendPaymentQr.paymentMethodName || 'This payment method'),
       bot: bot || globalThis.telegramBot || null
     });
     return;
   }
 
-  const caption = chimeQrCaption({
-    firstDepositAmount: sendChimeQr.firstDepositAmount,
-    chimePaymentName: sendChimeQr.chimePaymentName
+  const caption = paymentQrCaption({
+    paymentMethodName: sendPaymentQr.paymentMethodName,
+    firstDepositAmount: sendPaymentQr.firstDepositAmount,
+    paymentDisplayName: sendPaymentQr.paymentDisplayName
   });
   const paymentWindow = await store.createRegistrationPaymentWindow({
     contactId: contact.id,
     telegramUserId: contact.telegram_id,
-    paymentApp: 'chime',
-    chimePaymentName: sendChimeQr.chimePaymentName,
-    firstDepositAmount: sendChimeQr.firstDepositAmount,
-    qrCodeId: qr.id,
+    paymentMethodId: sendPaymentQr.paymentMethodId,
+    paymentQrCodeId: qr.id,
+    paymentDisplayName: sendPaymentQr.paymentDisplayName,
+    firstDepositAmount: sendPaymentQr.firstDepositAmount,
     windowMinutes: 5
   });
 
@@ -98,7 +99,7 @@ async function handleChimeRegistrationQr({ store, contact, sendChimeQr, bot }) {
     currentStep: 'await_payment_done'
   });
 
-  console.log(`[chatbot] registration_qr_sent contact=${contact.id} window=${paymentWindow.id} qr=${qr.id}`);
+  console.log(`[chatbot] registration_qr_sent contact=${contact.id} window=${paymentWindow.id} method=${sendPaymentQr.paymentMethodId} qr=${qr.id}`);
   console.log(`[chatbot] registration_payment_window_started contact=${contact.id} window=${paymentWindow.id} expires_at=${paymentWindow.expires_at}`);
 }
 
@@ -224,11 +225,11 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
       await store.completeRegistrationPaymentWindow(decision.completePaymentWindowId);
     }
 
-    if (decision.sendChimeQr) {
-      await handleChimeRegistrationQr({
+    if (decision.sendPaymentQr) {
+      await handlePaymentRegistrationQr({
         store,
         contact,
-        sendChimeQr: decision.sendChimeQr,
+        sendPaymentQr: decision.sendPaymentQr,
         bot: bot || globalThis.telegramBot || null
       });
     }
