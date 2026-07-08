@@ -36,7 +36,10 @@ export function startChatbotWorker({ store, io, concurrency = Number(process.env
           claimed.push(job);
         }
         if (!claimed.length) break;
-        await Promise.all(claimed.map((job) => processBotJob(store, job, { io })));
+        await Promise.all(claimed.map((job) => processBotJob(store, job, {
+          io,
+          bot: globalThis.telegramBot || null
+        })));
       }
     } catch (error) {
       console.error('[chatbot] worker tick failed:', error);

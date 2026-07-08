@@ -254,19 +254,40 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function queueTelegramOutboundMessage({ contactId, telegramUserId, body, buttons = [], localMessageId = null, clientRequestId = null }) {
     const now = nowIso();
+    const normalizedButtons = Array.isArray(buttons)
+      ? buttons.map((row) => (Array.isArray(row) ? row : [row]).map((button) => ({
+        text: button?.text || button?.label || 'Button',
+        data: button?.data || button?.action || button?.callback_data || 'noop',
+        label: button?.label || button?.text || 'Button',
+        action: button?.action || button?.data || button?.callback_data || 'noop'
+      })))
+      : [];
     const result = await db.prepare(`
       INSERT INTO telegram_outbound_messages (
         contact_id, telegram_user_id, body, buttons_json, status, local_message_id, client_request_id,
         created_at, updated_at
       )
       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-    `).run(contactId, String(telegramUserId), body, JSON.stringify(buttons || []), localMessageId, clientRequestId || null, now, now);
+    `).run(
+      contactId,
+      String(telegramUserId),
+      body,
+      JSON.stringify(normalizedButtons),
+      localMessageId,
+      clientRequestId || null,
+      now,
+      now
+    );
+    const buttonCount = normalizedButtons.reduce((sum, row) => sum + row.length, 0);
+    if (buttonCount) {
+      console.log(`[telegram-outbound] welcome_buttons_queued contact=${contactId} buttons=${buttonCount}`);
+    }
     return {
       id: result.lastInsertRowid,
       contactId,
       telegramUserId: String(telegramUserId),
       body,
-      buttons,
+      buttons: normalizedButtons,
       status: 'pending',
       localMessageId,
       clientRequestId: clientRequestId || null

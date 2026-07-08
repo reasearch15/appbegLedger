@@ -1,19 +1,40 @@
-import { createAccountReplySender } from './messageDelivery.js';
+import { createReplySender, normalizeButtonRows } from './messageDelivery.js';
 import {
   decideBotReply,
   isBotActiveForContact,
-  isChatbotButtonAction
+  isChatbotButtonAction,
+  normalizeCallbackAction
 } from './chatbotEngine.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 
 /**
- * Always queues replies into telegram_outbound_messages (Telethon sends).
- * Never calls Telegraf sendMessage directly.
+ * Prefer Bot API for messages that include inline buttons (Telegram user
+ * accounts often cannot render callback buttons). Text-only replies still go
+ * through the existing outbound queue when that is the preferred channel.
  */
-export async function queueBotReply({ store, user, text, buttons = [] }) {
-  const sendReply = createAccountReplySender({ store });
-  const result = await sendReply({ user, text, buttons, messageType: buttons.length ? 'buttons' : 'text' });
-  console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'} buttons=${(buttons || []).flat().length}`);
+export async function queueBotReply({ store, user, text, buttons = [], bot = null }) {
+  const normalizedButtons = normalizeButtonRows(buttons);
+  const sendReply = await createReplySender({
+    store,
+    user,
+    bot: bot || globalThis.telegramBot || null,
+    preferButtonsViaBot: true
+  });
+  const result = await sendReply({
+    user,
+    text,
+    buttons: normalizedButtons,
+    messageType: normalizedButtons.length ? 'buttons' : 'text'
+  });
+  const buttonCount = normalizedButtons.flat().length;
+  if (result?.queued) {
+    console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'} buttons=${buttonCount}`);
+  } else {
+    console.log(`[chatbot] bot reply sent contact=${user.id} channel=bot_api buttons=${buttonCount}`);
+  }
+  if (buttonCount) {
+    console.log(`[chatbot] welcome_buttons_${result?.queued ? 'queued' : 'sent'} contact=${user.id} buttons=${buttonCount}`);
+  }
   return result;
 }
 
@@ -50,7 +71,14 @@ export async function enqueueChatbotJob(store, {
   }
 
   if (action) {
-    console.log(`[chatbot] button clicked contact=${contactId} action=${action}`);
+    const normalized = normalizeCallbackAction(action);
+    console.log(`[chatbot] callback_received contact=${contactId} action=${action} normalized=${normalized}`);
+    if (normalized === 'bot:register' || action === 'register') {
+      console.log(`[chatbot] register_clicked contact=${contactId}`);
+    }
+    if (normalized === 'staff:takeover' || action === 'staff') {
+      console.log(`[chatbot] staff_clicked contact=${contactId}`);
+    }
   }
 
   const job = await store.createBotJob({
@@ -60,7 +88,7 @@ export async function enqueueChatbotJob(store, {
     incomingTelegramMessageId,
     jobType,
     inputText,
-    action
+    action: action ? normalizeCallbackAction(action) : null
   });
 
   if (job?.duplicate) {
@@ -73,7 +101,7 @@ export async function enqueueChatbotJob(store, {
   return job;
 }
 
-export async function processBotJob(store, job, { io = null } = {}) {
+export async function processBotJob(store, job, { io = null, bot = null } = {}) {
   const contact = await store.getUserProfile(job.contact_id);
   if (!contact) {
     await store.completeBotJob(job.id, { status: 'failed', errorText: 'Contact not found' });
@@ -146,7 +174,8 @@ export async function processBotJob(store, job, { io = null } = {}) {
         store,
         user: contact,
         text: reply.text,
-        buttons: reply.buttons || []
+        buttons: reply.buttons || [],
+        bot: bot || globalThis.telegramBot || null
       });
     }
 

@@ -24,13 +24,16 @@ export const PAYMENT_APP_OPTIONS = [
 ];
 
 export const WELCOME_BUTTONS = [
-  [{ label: '📝 Register', action: 'bot:register' }],
-  [{ label: '💬 Talk to Staff', action: 'staff:takeover' }]
+  [{ label: '📝 Register', action: 'register', text: '📝 Register', data: 'register' }],
+  [{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]
 ];
 
 export const REVIEW_BUTTONS = [
-  [{ label: 'Confirm', action: 'bot:confirm' }, { label: 'Edit', action: 'bot:edit' }],
-  [{ label: 'Cancel', action: 'bot:cancel' }]
+  [
+    { label: 'Confirm', action: 'confirm', text: 'Confirm', data: 'confirm' },
+    { label: 'Edit', action: 'edit', text: 'Edit', data: 'edit' }
+  ],
+  [{ label: 'Cancel', action: 'cancel', text: 'Cancel', data: 'cancel' }]
 ];
 
 const INSULT_PATTERNS = [
@@ -69,22 +72,64 @@ export function isBotActiveForContact(contact) {
 }
 
 export function isChatbotButtonAction(action) {
-  const value = String(action || '');
+  const value = normalizeCallbackAction(action);
+  if (!value) return false;
   return value.startsWith('bot:')
-    || value.startsWith('staff:')
-    || value === 'flow:registration_info';
+    || value.startsWith('staff')
+    || value === 'register'
+    || value === 'confirm'
+    || value === 'edit'
+    || value === 'cancel'
+    || value === 'flow:registration_info'
+    || value.startsWith('bot:payment_app:')
+    || value.startsWith('payment_app:');
+}
+
+export function normalizeCallbackAction(action) {
+  const raw = String(action || '').trim();
+  if (!raw) return '';
+  const aliases = {
+    register: 'bot:register',
+    staff: 'staff:takeover',
+    'talk_to_staff': 'staff:takeover',
+    'bot:talk_to_staff': 'staff:takeover',
+    confirm: 'bot:confirm',
+    edit: 'bot:edit',
+    cancel: 'bot:cancel'
+  };
+  if (aliases[raw]) return aliases[raw];
+  if (raw.startsWith('payment_app:') && !raw.startsWith('bot:')) {
+    return `bot:${raw}`;
+  }
+  return raw;
 }
 
 export function paymentAppButtons() {
   return [
-    PAYMENT_APP_OPTIONS.slice(0, 2).map((item) => ({ label: item.label, action: item.action })),
-    PAYMENT_APP_OPTIONS.slice(2, 4).map((item) => ({ label: item.label, action: item.action })),
-    [PAYMENT_APP_OPTIONS[4]].map((item) => ({ label: item.label, action: item.action }))
+    PAYMENT_APP_OPTIONS.slice(0, 2).map((item) => ({
+      label: item.label,
+      action: item.action,
+      text: item.label,
+      data: item.action
+    })),
+    PAYMENT_APP_OPTIONS.slice(2, 4).map((item) => ({
+      label: item.label,
+      action: item.action,
+      text: item.label,
+      data: item.action
+    })),
+    [PAYMENT_APP_OPTIONS[4]].map((item) => ({
+      label: item.label,
+      action: item.action,
+      text: item.label,
+      data: item.action
+    }))
   ];
 }
 
 export async function decideBotReply({ store, contact, messageText = '', action = null }) {
   const text = String(messageText || '').trim();
+  action = normalizeCallbackAction(action) || null;
   const automationState = await store.ensureAutomationState(contact.id);
   const info = { ...(automationState.registration_info || {}) };
   const flow = automationState.current_flow;
@@ -159,7 +204,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     kind: 'fallback_support',
     replies: [{
       text: 'I’m here and ready — tell me what you need, or tap below if you’d rather chat with a human.',
-      buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
+      buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
     }],
     statePatch: null,
     escalate: false
@@ -254,7 +299,7 @@ function decideRegisteredSupport({ text, action }) {
       kind: 'registered_support',
       replies: [{
         text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever), or I can grab a human teammate.',
-        buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
+        buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
       }],
       statePatch: null,
       escalate: false
@@ -265,7 +310,7 @@ function decideRegisteredSupport({ text, action }) {
     kind: 'registered_support',
     replies: [{
       text: 'You’re all set on registration. Tell me what you need help with, or tap below for a human teammate.',
-      buttons: [[{ label: '💬 Talk to Staff', action: 'staff:takeover' }]]
+      buttons: [[{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]]
     }],
     statePatch: null,
     escalate: false

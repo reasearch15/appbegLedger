@@ -750,18 +750,62 @@ async def login():
 
 
 def build_inline_buttons(button_rows):
+    """
+    Convert buttons_json rows into Telethon Button.inline rows.
+
+    Accepted button shapes:
+      {"text": "...", "data": "..."}
+      {"label": "...", "action": "..."}
+      {"text": "...", "callback_data": "..."}
+    """
     if not button_rows:
         return None
     rows = []
     for row in button_rows:
+        if not isinstance(row, list):
+            row = [row]
         built_row = []
         for button in row:
-            label = button.get("label") or "Button"
-            action = button.get("action") or "noop"
-            built_row.append(Button.inline(label, action.encode("utf-8")))
+            if not isinstance(button, dict):
+                continue
+            label = (
+                button.get("text")
+                or button.get("label")
+                or button.get("title")
+                or "Button"
+            )
+            action = (
+                button.get("data")
+                or button.get("action")
+                or button.get("callback_data")
+                or "noop"
+            )
+            action = str(action)
+            # Telegram callback_data must be <= 64 bytes.
+            encoded = action.encode("utf-8")
+            if len(encoded) > 64:
+                print(
+                    f"[telegram-outbound] skipping button with oversized callback_data ({len(encoded)} bytes): {action}",
+                    flush=True,
+                )
+                continue
+            built_row.append(Button.inline(str(label), encoded))
         if built_row:
             rows.append(built_row)
     return rows or None
+
+
+def normalize_callback_action(action):
+    raw = (action or "").strip()
+    aliases = {
+        "register": "bot:register",
+        "staff": "staff:takeover",
+        "talk_to_staff": "staff:takeover",
+        "confirm": "bot:confirm",
+        "edit": "bot:edit",
+        "cancel": "bot:cancel",
+    }
+    return aliases.get(raw, raw)
 
 
 def log_outbound(phase, outbound_id, **extra):
@@ -1008,6 +1052,12 @@ async def process_outbound_row(client, db, queue_row):
         if not isinstance(entity, User) or entity.bot or entity.deleted:
             raise RuntimeError("Target is not an active private Telegram user.")
         buttons = build_inline_buttons(parse_buttons_json(queue_row["buttons_json"]))
+        button_count = sum(len(row) for row in buttons) if buttons else 0
+        if button_count:
+            print(
+                f"[telegram-outbound] welcome_buttons_sending id={queue_row['id']} contact={queue_row['contact_id']} buttons={button_count}",
+                flush=True,
+            )
         message = await client.send_message(entity, queue_row["body"], buttons=buttons)
         payload = {
             "ok": True,
@@ -1017,6 +1067,7 @@ async def process_outbound_row(client, db, queue_row):
             "sync_kind": "queued",
             "source": "business_account",
             "outboundQueueId": queue_row["id"],
+            "buttons": parse_buttons_json(queue_row["buttons_json"]),
         }
         mark_outbound_sent(db, queue_row, message.id, utc_iso(message.date), payload)
         log_outbound(
@@ -1024,7 +1075,25 @@ async def process_outbound_row(client, db, queue_row):
             queue_row["id"],
             contact=queue_row["contact_id"],
             telegram_message_id=message.id,
+            buttons=button_count,
         )
+        if button_count:
+            print(
+                f"[telegram-outbound] welcome_buttons_sent id={queue_row['id']} contact={queue_row['contact_id']} telegram_message_id={message.id} buttons={button_count}",
+                flush=True,
+            )
+            log_sync(
+                db,
+                "welcome_buttons_sent",
+                f"Sent outbound queue row {queue_row['id']} with {button_count} inline button(s).",
+                metadata={
+                    "outbound_id": queue_row["id"],
+                    "contact_id": queue_row["contact_id"],
+                    "telegram_message_id": message.id,
+                    "buttons": parse_buttons_json(queue_row["buttons_json"]),
+                },
+                commit=False,
+            )
         log_sync(
             db,
             "outbound_sent",
@@ -1033,6 +1102,7 @@ async def process_outbound_row(client, db, queue_row):
                 "outbound_id": queue_row["id"],
                 "contact_id": queue_row["contact_id"],
                 "telegram_message_id": message.id,
+                "buttons": button_count,
             },
         )
         notify_node(
@@ -1205,6 +1275,7 @@ async def sync_forever():
                 return
             contact = upsert_contact(db, entity, now_iso())
             action = event.data.decode("utf-8") if event.data else ""
+            normalized = normalize_callback_action(action)
             try:
                 await event.answer()
             except Exception as answer_exc:
@@ -1217,19 +1288,25 @@ async def sync_forever():
                         level="warning",
                         metadata={"contact_id": contact["id"], "action": action},
                     )
+            event_type = "callback_received"
+            if normalized in ("bot:register", "register") or action == "register":
+                event_type = "register_clicked"
+            elif normalized in ("staff:takeover", "staff") or action == "staff":
+                event_type = "staff_clicked"
             log_sync(
                 db,
-                "button_clicked",
+                event_type,
                 f"Inline button clicked by contact {contact['id']}: {action}",
                 metadata={
                     "contact_id": contact["id"],
                     "telegram_id": entity.id,
                     "action": action,
+                    "normalized_action": normalized,
                     "message_id": getattr(event, "message_id", None),
                 },
             )
             print(
-                f"[telegram-callback] button_clicked contact={contact['id']} telegram={entity.id} action={action}",
+                f"[telegram-callback] {event_type} contact={contact['id']} telegram={entity.id} action={action} normalized={normalized}",
                 flush=True,
             )
             notify_node(
@@ -1237,7 +1314,8 @@ async def sync_forever():
                 {
                     "contactId": contact["id"],
                     "telegramId": entity.id,
-                    "action": action,
+                    "action": normalized or action,
+                    "rawAction": action,
                     "messageId": getattr(event, "message_id", None),
                 },
             )
