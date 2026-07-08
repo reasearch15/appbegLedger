@@ -2,13 +2,17 @@ import {
   normalizeAppBegUsername,
   normalizePaymentTag,
   isUnregisteredStatus,
-  chatbotWelcomeCooldownMs
+  chatbotWelcomeCooldownMs,
+  parseFirstDepositAmount
 } from '../registration/utils.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
-  'username',
   'payment_app',
+  'chime_payment_name',
+  'first_deposit_amount',
+  'await_payment_done',
+  'username',
   'payment_app_other',
   'payment_tag',
   'review',
@@ -138,9 +142,9 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   // Exact text commands work without inline buttons (Telethon user sessions).
   if (!action && isStaffCommand(text)) {
     action = 'staff:takeover';
-  } else if (!action && isRegisterCommand(text)) {
+  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(step, flow, contact)) {
     action = 'bot:register';
-  } else if (!action && isConfirmCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
+  } else if (!action && isConfirmCommand(text) && step === 'review' && (flow === 'bot_registration' || flow === 'registration_info')) {
     action = 'bot:confirm';
   } else if (!action && isEditCommand(text) && (flow === 'bot_registration' || flow === 'registration_info')) {
     action = 'bot:edit';
@@ -198,7 +202,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (flow === 'bot_registration' || flow === 'registration_info') {
-    return continueRegistrationDecision({
+    return await continueRegistrationDecision({
+      store,
       contact,
       text,
       action,
@@ -329,13 +334,13 @@ function decideRegisteredSupport({ text, action }) {
 
 function startRegistrationDecision(contact, info) {
   return {
-    kind: 'registration_ask_username',
+    kind: 'registration_ask_payment_app',
     replies: [{
-      text: 'Great! Let’s get you registered. What username would you like?'
+      text: registrationPaymentAppPrompt()
     }],
     statePatch: {
       currentFlow: 'bot_registration',
-      currentStep: 'username',
+      currentStep: 'payment_app',
       registrationInfo: {
         ...info,
         telegram_display_name: contact.display_name,
@@ -348,6 +353,55 @@ function startRegistrationDecision(contact, info) {
     escalate: false,
     logEvent: { event: 'registration_started' }
   };
+}
+
+function registrationPaymentAppPrompt() {
+  return `To register, you need to make your first payment to our app.
+
+Which payment app are you going to use?
+1️⃣ Chime
+2️⃣ Cash App
+3️⃣ Venmo`;
+}
+
+function parseRegistrationPaymentApp(text) {
+  const value = String(text || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value === '1' || /\bchime\b/.test(value)) return 'chime';
+  if (value === '2' || /\bcash\s*app\b/.test(value) || value === 'cashapp') return 'cash_app';
+  if (value === '3' || /\bvenmo\b/.test(value)) return 'venmo';
+  return null;
+}
+
+function chimeUnavailableReply(info = {}) {
+  return {
+    kind: 'registration_payment_app_unavailable',
+    replies: [{
+      text: 'Sorry, we only have Chime available at the moment.'
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: 'payment_app',
+      registrationInfo: info
+    },
+    escalate: false
+  };
+}
+
+function formatDepositAmount(amount) {
+  const value = Math.round(Number(amount) * 100) / 100;
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(2);
+}
+
+function chimeQrCaption({ firstDepositAmount, chimePaymentName }) {
+  return [
+    `Please send ${formatDepositAmount(firstDepositAmount)} using this Chime QR.`,
+    `Use the Chime name:`,
+    chimePaymentName,
+    'After sending, reply Done.',
+    'This payment window is valid for 5 minutes.'
+  ].join('\n');
 }
 
 function selectPaymentAppDecision({ info, selected }) {
@@ -387,7 +441,7 @@ function selectPaymentAppDecision({ info, selected }) {
   };
 }
 
-function continueRegistrationDecision({ contact, text, action, step, info, flow, automationState = null }) {
+async function continueRegistrationDecision({ store, contact, text, action, step, info, flow, automationState = null }) {
   const normalizedStep = normalizeStep(step, flow);
 
   if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
@@ -422,9 +476,124 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
   }
 
   if (normalizedStep === 'welcome') {
-    // Stay on welcome until Register is clicked — never treat "hello" as starting registration,
-    // and never permanently suppress follow-up replies.
+    if (isStartRegistrationCommand(text)) {
+      return startRegistrationDecision(contact, info);
+    }
     return welcomeDecision(contact, info, automationState);
+  }
+
+  if (normalizedStep === 'payment_app') {
+    if (!text) {
+      return {
+        kind: 'registration_ask_payment_app',
+        replies: [{ text: registrationPaymentAppPrompt() }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false
+      };
+    }
+    const selected = parseRegistrationPaymentApp(text);
+    if (!selected) {
+      return {
+        kind: 'registration_ask_payment_app',
+        replies: [{ text: registrationPaymentAppPrompt() }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false
+      };
+    }
+    if (selected === 'cash_app' || selected === 'venmo') {
+      return chimeUnavailableReply(info);
+    }
+    return {
+      kind: 'registration_ask_chime_payment_name',
+      replies: [{
+        text: `Please send your Chime payment name.
+This should be the name shown on your Chime payment, not a $tag.`
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'chime_payment_name',
+        registrationInfo: { ...info, payment_app: 'chime' }
+      },
+      escalate: false,
+      logEvent: { event: 'payment_app_selected', paymentApp: 'chime' }
+    };
+  }
+
+  if (normalizedStep === 'chime_payment_name') {
+    if (!text || text.length < 2) {
+      return {
+        kind: 'registration_ask_chime_payment_name',
+        replies: [{
+          text: `Please send your Chime payment name.
+This should be the name shown on your Chime payment, not a $tag.`
+        }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'chime_payment_name', registrationInfo: info },
+        escalate: false
+      };
+    }
+    const nextInfo = { ...info, chime_payment_name: text.trim(), payment_app: 'chime' };
+    return {
+      kind: 'registration_ask_first_deposit_amount',
+      replies: [{
+        text: 'How much are you going to deposit for your first payment?'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'first_deposit_amount',
+        registrationInfo: nextInfo
+      },
+      escalate: false,
+      logEvent: { event: 'chime_payment_name_collected', chimePaymentName: text.trim() }
+    };
+  }
+
+  if (normalizedStep === 'first_deposit_amount') {
+    const amount = parseFirstDepositAmount(text);
+    if (amount == null) {
+      return {
+        kind: 'registration_first_deposit_invalid',
+        replies: [{
+          text: 'Please enter a valid deposit amount, for example 10 or 25.50.'
+        }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'first_deposit_amount', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'first_deposit_amount_invalid', input: text || '' }
+      };
+    }
+    const nextInfo = {
+      ...info,
+      first_deposit_amount: amount,
+      payment_app: 'chime'
+    };
+    return {
+      kind: 'registration_send_chime_qr',
+      replies: [],
+      sendChimeQr: {
+        chimePaymentName: nextInfo.chime_payment_name,
+        firstDepositAmount: amount
+      },
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'first_deposit_amount',
+        registrationInfo: nextInfo
+      },
+      escalate: false,
+      logEvent: { event: 'first_deposit_amount_collected', firstDepositAmount: amount }
+    };
+  }
+
+  if (normalizedStep === 'await_payment_done') {
+    if (!isDoneCommand(text)) {
+      return {
+        kind: 'registration_await_payment_done',
+        replies: [{
+          text: 'When you have sent your Chime payment, reply Done.'
+        }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
+        escalate: false
+      };
+    }
+    return await handleRegistrationPaymentDone({ store, contact, info });
   }
 
   if (normalizedStep === 'username') {
@@ -441,6 +610,9 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
       preferred_appbeg_username: text,
       preferred_appbeg_username_normalized: normalizeAppBegUsername(text)
     };
+    if (nextInfo.chime_payment_name && nextInfo.first_deposit_amount) {
+      return reviewDecision(nextInfo);
+    }
     return {
       kind: 'registration_ask_payment_app',
       replies: [{
@@ -450,20 +622,6 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
       escalate: false,
       logEvent: { event: 'username_collected', username: text }
     };
-  }
-
-  if (normalizedStep === 'payment_app') {
-    if (!text) {
-      return {
-        kind: 'registration_ask_payment_app',
-        replies: [{
-          text: paymentAppPrompt()
-        }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false
-      };
-    }
-    return selectPaymentAppDecision({ info, selected: text });
   }
 
   if (normalizedStep === 'payment_app_other') {
@@ -509,12 +667,56 @@ function continueRegistrationDecision({ contact, text, action, step, info, flow,
   return startRegistrationDecision(contact, info);
 }
 
+async function handleRegistrationPaymentDone({ store, contact, info }) {
+  const window = await store.getActiveRegistrationPaymentWindow(contact.id);
+  const expired = !window || new Date(window.expires_at).getTime() <= Date.now();
+  if (expired) {
+    return {
+      kind: 'registration_payment_expired',
+      expirePaymentWindowId: window?.id || null,
+      replies: [{
+        text: 'This payment window has expired. Please type Register to start again.'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'welcome',
+        registrationInfo: info
+      },
+      escalate: false,
+      logEvent: { event: 'registration_payment_window_expired' }
+    };
+  }
+  return {
+    kind: 'registration_payment_done',
+    completePaymentWindowId: window.id,
+    replies: [{
+      text: 'Thanks! We noted your payment. What username would you like for your account?'
+    }],
+    statePatch: {
+      currentFlow: 'bot_registration',
+      currentStep: 'username',
+      registrationInfo: info
+    },
+    escalate: false,
+    logEvent: { event: 'registration_payment_window_completed', windowId: window.id }
+  };
+}
+
 function reviewDecision(info) {
+  const paymentLines = info.chime_payment_name
+    ? [
+      '• Payment app: Chime',
+      `• Chime payment name: ${info.chime_payment_name}`,
+      `• First deposit: $${formatDepositAmount(info.first_deposit_amount)}`
+    ]
+    : [
+      `• Payment app: ${info.payment_app || info.preferred_game || '—'}`,
+      `• Payment tag: ${info.payment_tag || '—'}`
+    ];
   const summary = [
     'Please confirm these details:',
     `• Username: ${info.preferred_appbeg_username || '—'}`,
-    `• Payment app: ${info.payment_app || info.preferred_game || '—'}`,
-    `• Payment tag: ${info.payment_tag || '—'}`,
+    ...paymentLines,
     '',
     'Reply with one of:',
     'Confirm',
@@ -570,17 +772,25 @@ Reply Register to create an account, or Staff to speak with our team.`;
 
 function paymentAppPrompt(username = null) {
   const intro = username ? `Nice pick: ${username}.\n\n` : '';
-  return `${intro}Which payment app do you use? Reply with one of:
+  return `${intro}${registrationPaymentAppPrompt()}`;
+}
 
-Cash App
-Chime
-Zelle
-Apple Pay
-Other`;
+function shouldStartRegistration(step, flow, contact) {
+  if (step === 'welcome') return true;
+  if (!flow && isUnregisteredStatus(contact.registration_status)) return true;
+  return false;
+}
+
+function isStartRegistrationCommand(text) {
+  return /^(register|ok|yes|start|signup|\/register)$/i.test(String(text || '').trim());
+}
+
+function isDoneCommand(text) {
+  return /^done$/i.test(String(text || '').trim());
 }
 
 function isRegisterCommand(text) {
-  return /^(register|\/register)$/i.test(String(text || '').trim());
+  return isStartRegistrationCommand(text);
 }
 
 function isStaffCommand(text) {
@@ -598,6 +808,13 @@ function isEditCommand(text) {
 function isCancelCommand(text) {
   return /^(cancel|stop|quit)$/i.test(String(text || '').trim());
 }
+
+export {
+  chimeQrCaption,
+  formatDepositAmount,
+  parseRegistrationPaymentApp,
+  registrationPaymentAppPrompt
+};
 
 export function registrationStatusLabel(contact) {
   if (contact?.needs_staff_review) return 'Needs staff review';

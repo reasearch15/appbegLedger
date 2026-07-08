@@ -252,7 +252,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(clientRequestId, telegramUserId);
   }
 
-  async function queueTelegramOutboundMessage({ contactId, telegramUserId, body, buttons = [], localMessageId = null, clientRequestId = null }) {
+  async function queueTelegramOutboundMessage({
+    contactId,
+    telegramUserId,
+    body,
+    buttons = [],
+    localMessageId = null,
+    clientRequestId = null,
+    mediaPath = null,
+    messageType = 'text'
+  }) {
     const now = nowIso();
     const normalizedButtons = Array.isArray(buttons)
       ? buttons.map((row) => (Array.isArray(row) ? row : [row]).map((button) => ({
@@ -264,15 +273,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       : [];
     const result = await db.prepare(`
       INSERT INTO telegram_outbound_messages (
-        contact_id, telegram_user_id, body, buttons_json, status, local_message_id, client_request_id,
-        created_at, updated_at
+        contact_id, telegram_user_id, body, buttons_json, media_path, message_type, status,
+        local_message_id, client_request_id, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId),
       body,
       JSON.stringify(normalizedButtons),
+      mediaPath || null,
+      messageType || 'text',
       localMessageId,
       clientRequestId || null,
       now,
@@ -2124,6 +2135,79 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getTelegramAccountSyncState();
   }
 
+  async function getActiveDefaultChimeQr() {
+    return await db.prepare(`
+      SELECT *
+      FROM chime_qr_codes
+      WHERE is_active = ${sql.boolTrue} AND is_default = ${sql.boolTrue}
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `).get();
+  }
+
+  async function createRegistrationPaymentWindow({
+    contactId,
+    telegramUserId,
+    paymentApp = 'chime',
+    chimePaymentName,
+    firstDepositAmount,
+    qrCodeId = null,
+    windowMinutes = 5
+  }) {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + windowMinutes * 60 * 1000).toISOString();
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO registration_payment_windows (
+        contact_id, telegram_user_id, payment_app, chime_payment_name,
+        first_deposit_amount, qr_code_id, status, expires_at, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    `).run(
+      contactId,
+      String(telegramUserId),
+      paymentApp,
+      chimePaymentName || null,
+      firstDepositAmount,
+      qrCodeId,
+      expiresAt,
+      nowText,
+      nowText
+    );
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid);
+  }
+
+  async function getActiveRegistrationPaymentWindow(contactId) {
+    return await db.prepare(`
+      SELECT *
+      FROM registration_payment_windows
+      WHERE contact_id = ?
+        AND status = 'active'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(contactId);
+  }
+
+  async function completeRegistrationPaymentWindow(windowId) {
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE registration_payment_windows
+      SET status = 'completed', completed_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).run(now, now, windowId);
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
+  async function expireRegistrationPaymentWindow(windowId) {
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE registration_payment_windows
+      SET status = 'expired', updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).run(now, windowId);
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
   return {
     db,
     upsertTelegramUser,
@@ -2223,7 +2307,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     reclaimStuckBotJobs,
     setBotControl,
     markBotNeedsStaffReview,
-    findLatestIncomingMessageId
+    findLatestIncomingMessageId,
+    getActiveDefaultChimeQr,
+    createRegistrationPaymentWindow,
+    getActiveRegistrationPaymentWindow,
+    completeRegistrationPaymentWindow,
+    expireRegistrationPaymentWindow
   };
 }
 
@@ -2498,6 +2587,42 @@ async function migrate(db) {
   await db.exec('CREATE INDEX IF NOT EXISTS idx_telegram_outbound_contact_created ON telegram_outbound_messages(contact_id, created_at DESC)');
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request ON telegram_outbound_messages(client_request_id, contact_id) WHERE client_request_id IS NOT NULL');
   await addColumnIfMissing(db, 'telegram_outbound_messages', 'buttons_json', "TEXT NOT NULL DEFAULT '[]'");
+  await addColumnIfMissing(db, 'telegram_outbound_messages', 'media_path', 'TEXT');
+  await addColumnIfMissing(db, 'telegram_outbound_messages', 'message_type', "TEXT NOT NULL DEFAULT 'text'");
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS chime_qr_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_path TEXT NOT NULL,
+      label TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS registration_payment_windows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      telegram_user_id TEXT NOT NULL,
+      payment_app TEXT NOT NULL DEFAULT 'chime',
+      chime_payment_name TEXT,
+      first_deposit_amount REAL NOT NULL,
+      qr_code_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
+      expires_at TEXT NOT NULL,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (qr_code_id) REFERENCES chime_qr_codes(id) ON DELETE SET NULL
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default ON chime_qr_codes(is_active, is_default, updated_at DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status ON registration_payment_windows(contact_id, status, expires_at DESC)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS bot_jobs (

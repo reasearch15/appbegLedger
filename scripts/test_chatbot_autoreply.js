@@ -54,16 +54,21 @@ async function run() {
   console.log('ok welcome cooldown is time-based not permanent');
 
   const started = await decideBotReply({ store, contact, messageText: 'Register' });
-  assertEqual(started.kind, 'registration_ask_username');
-  assertEqual(started.statePatch.currentStep, 'username');
+  assertEqual(started.kind, 'registration_ask_payment_app');
+  assertEqual(started.statePatch.currentStep, 'payment_app');
   console.log('ok Register text command');
 
   store.state.current_flow = 'bot_registration';
   store.state.current_step = 'username';
+  store.state.registration_info = {
+    chime_payment_name: 'John Smith',
+    first_deposit_amount: 25,
+    payment_app: 'chime'
+  };
   const advanced = await decideBotReply({ store, contact, messageText: 'luckyalex' });
-  assertEqual(advanced.kind, 'registration_ask_payment_app');
-  assertEqual(advanced.statePatch.currentStep, 'payment_app');
-  console.log('ok active flow uses inbound as answer');
+  assertEqual(advanced.kind, 'registration_review');
+  assertEqual(advanced.statePatch.currentStep, 'review');
+  console.log('ok username after chime payment goes to review');
 
   console.log('ALL AUTO-REPLY FIX CHECKS PASSED');
 }

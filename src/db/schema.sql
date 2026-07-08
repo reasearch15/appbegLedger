@@ -351,6 +351,8 @@ CREATE TABLE IF NOT EXISTS telegram_outbound_messages (
   telegram_user_id TEXT NOT NULL,
   body TEXT NOT NULL,
   buttons_json TEXT NOT NULL DEFAULT '[]',
+  media_path TEXT,
+  message_type TEXT NOT NULL DEFAULT 'text',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
   error_text TEXT,
   telegram_message_id INTEGER,
@@ -405,6 +407,34 @@ CREATE TABLE IF NOT EXISTS settings_audit_log (
   new_value TEXT,
   actor_name TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chime_qr_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_path TEXT NOT NULL,
+  label TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS registration_payment_windows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  contact_id INTEGER NOT NULL,
+  telegram_user_id TEXT NOT NULL,
+  payment_app TEXT NOT NULL DEFAULT 'chime',
+  chime_payment_name TEXT,
+  first_deposit_amount REAL NOT NULL,
+  qr_code_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
+  expires_at TEXT NOT NULL,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+  FOREIGN KEY (qr_code_id) REFERENCES chime_qr_codes(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_telegram_users_last_seen
@@ -479,3 +509,9 @@ CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message
 
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created
   ON settings_audit_log(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default
+  ON chime_qr_codes(is_active, is_default, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
+  ON registration_payment_windows(contact_id, status, expires_at DESC);

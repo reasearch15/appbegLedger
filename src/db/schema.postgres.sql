@@ -335,6 +335,8 @@ CREATE TABLE IF NOT EXISTS telegram_outbound_messages (
   telegram_user_id TEXT NOT NULL,
   body TEXT NOT NULL,
   buttons_json TEXT NOT NULL DEFAULT '[]',
+  media_path TEXT,
+  message_type TEXT NOT NULL DEFAULT 'text',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
   error_text TEXT,
   telegram_message_id BIGINT,
@@ -385,6 +387,32 @@ CREATE TABLE IF NOT EXISTS settings_audit_log (
   new_value TEXT,
   actor_name TEXT,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chime_qr_codes (
+  id BIGSERIAL PRIMARY KEY,
+  file_path TEXT NOT NULL,
+  label TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE TABLE IF NOT EXISTS registration_payment_windows (
+  id BIGSERIAL PRIMARY KEY,
+  contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+  telegram_user_id TEXT NOT NULL,
+  payment_app TEXT NOT NULL DEFAULT 'chime',
+  chime_payment_name TEXT,
+  first_deposit_amount NUMERIC(12, 2) NOT NULL,
+  qr_code_id BIGINT REFERENCES chime_qr_codes(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
+  expires_at TEXT NOT NULL,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

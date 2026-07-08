@@ -18,6 +18,46 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]';
   `);
   await driver.exec(`
+    ALTER TABLE telegram_outbound_messages
+      ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE telegram_outbound_messages
+      ADD COLUMN IF NOT EXISTS media_path TEXT;
+    ALTER TABLE telegram_outbound_messages
+      ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text';
+  `);
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS chime_qr_codes (
+      id BIGSERIAL PRIMARY KEY,
+      file_path TEXT NOT NULL,
+      label TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_chime_qr_codes_active_default
+      ON chime_qr_codes(is_active, is_default, updated_at DESC);
+  `);
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS registration_payment_windows (
+      id BIGSERIAL PRIMARY KEY,
+      contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+      telegram_user_id TEXT NOT NULL,
+      payment_app TEXT NOT NULL DEFAULT 'chime',
+      chime_payment_name TEXT,
+      first_deposit_amount NUMERIC(12, 2) NOT NULL,
+      qr_code_id BIGINT REFERENCES chime_qr_codes(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
+      expires_at TEXT NOT NULL,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
+      ON registration_payment_windows(contact_id, status, expires_at DESC);
+  `);
+  await driver.exec(`
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS needs_staff_review BOOLEAN NOT NULL DEFAULT FALSE;

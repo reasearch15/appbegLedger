@@ -3,7 +3,8 @@ import {
   decideBotReply,
   isBotActiveForContact,
   isChatbotButtonAction,
-  normalizeCallbackAction
+  normalizeCallbackAction,
+  chimeQrCaption
 } from './chatbotEngine.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 
@@ -36,6 +37,69 @@ export async function queueBotReply({ store, user, text, buttons = [], bot = nul
     console.log(`[chatbot] welcome_buttons_${result?.queued ? 'queued' : 'sent'} contact=${user.id} channel=${result?.source || 'unknown'} buttons=${JSON.stringify(normalizedButtons)}`);
   }
   return result;
+}
+
+export async function queueBotPhotoReply({ store, user, text, mediaPath, bot = null }) {
+  const sendReply = await createReplySender({
+    store,
+    user,
+    bot: bot || globalThis.telegramBot || null,
+    preferButtonsViaBot: true
+  });
+  const result = await sendReply({
+    user,
+    text,
+    mediaPath,
+    messageType: 'image'
+  });
+  if (result?.queued) {
+    console.log(`[chatbot] bot photo queued contact=${user.id} outbound=${result.outboundId || 'n/a'} media=${mediaPath}`);
+  } else {
+    console.log(`[chatbot] bot photo sent contact=${user.id} channel=${result?.source || 'bot_api'} message_id=${result?.messageId || 'n/a'}`);
+  }
+  return result;
+}
+
+async function handleChimeRegistrationQr({ store, contact, sendChimeQr, bot }) {
+  const qr = await store.getActiveDefaultChimeQr();
+  if (!qr?.file_path) {
+    await queueBotReply({
+      store,
+      user: contact,
+      text: 'Sorry, Chime payment is not available right now. Please wait for staff.',
+      bot: bot || globalThis.telegramBot || null
+    });
+    return;
+  }
+
+  const caption = chimeQrCaption({
+    firstDepositAmount: sendChimeQr.firstDepositAmount,
+    chimePaymentName: sendChimeQr.chimePaymentName
+  });
+  const paymentWindow = await store.createRegistrationPaymentWindow({
+    contactId: contact.id,
+    telegramUserId: contact.telegram_id,
+    paymentApp: 'chime',
+    chimePaymentName: sendChimeQr.chimePaymentName,
+    firstDepositAmount: sendChimeQr.firstDepositAmount,
+    qrCodeId: qr.id,
+    windowMinutes: 5
+  });
+
+  await queueBotPhotoReply({
+    store,
+    user: contact,
+    text: caption,
+    mediaPath: qr.file_path,
+    bot: bot || globalThis.telegramBot || null
+  });
+
+  await store.updateAutomationState(contact.id, {
+    currentStep: 'await_payment_done'
+  });
+
+  console.log(`[chatbot] registration_qr_sent contact=${contact.id} window=${paymentWindow.id} qr=${qr.id}`);
+  console.log(`[chatbot] registration_payment_window_started contact=${contact.id} window=${paymentWindow.id} expires_at=${paymentWindow.expires_at}`);
 }
 
 export async function enqueueChatbotJob(store, {
@@ -150,6 +214,23 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
     // Time-based welcome throttle marker only — never a permanent reply block.
     if (decision.markWelcomeSent) {
       await store.markAutoWelcomeSent(contact.id);
+    }
+
+    if (decision.expirePaymentWindowId) {
+      await store.expireRegistrationPaymentWindow(decision.expirePaymentWindowId);
+    }
+
+    if (decision.completePaymentWindowId) {
+      await store.completeRegistrationPaymentWindow(decision.completePaymentWindowId);
+    }
+
+    if (decision.sendChimeQr) {
+      await handleChimeRegistrationQr({
+        store,
+        contact,
+        sendChimeQr: decision.sendChimeQr,
+        bot: bot || globalThis.telegramBot || null
+      });
     }
 
     if (decision.completeRegistration) {

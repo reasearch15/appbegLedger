@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 export function createBotReplySender(bot, store) {
   return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
     const normalizedButtons = normalizeButtonRows(buttons);
@@ -60,13 +63,48 @@ export function createBotReplySender(bot, store) {
   };
 }
 
+export function createBotPhotoSender(bot, store) {
+  return async function sendPhoto({ user, text, mediaPath, messageType = 'image' }) {
+    const absolutePath = path.resolve(mediaPath);
+    if (!fs.existsSync(absolutePath)) {
+      throw new Error(`Photo file not found: ${absolutePath}`);
+    }
+
+    console.log(`[telegram-outbound] bot_api send_photo contact=${user.id} media=${absolutePath}`);
+    const telegramResponse = await bot.telegram.sendPhoto(
+      user.telegram_id,
+      { source: fs.createReadStream(absolutePath) },
+      { caption: text }
+    );
+
+    await store.storeOutgoingMessage({
+      telegramUserId: user.id,
+      telegramMessageId: telegramResponse.message_id,
+      text,
+      payload: {
+        telegramResponse,
+        mediaPath: absolutePath,
+        channel: 'bot_api'
+      },
+      senderType: 'bot',
+      source: 'bot_api',
+      messageType
+    });
+
+    return {
+      ok: true,
+      queued: false,
+      source: 'bot_api',
+      messageId: telegramResponse.message_id,
+      mediaPath: absolutePath
+    };
+  };
+}
+
 export function createAccountReplySender({ store }) {
-  return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
+  return async function sendReply({ user, text, buttons = [], messageType = 'text', mediaPath = null }) {
     const normalizedButtons = normalizeButtonRows(buttons);
     if (normalizedButtons.length) {
-      // Do not silently queue button messages for Telethon user sessions.
-      // Evidence: Telethon logs "buttons=2" then Telegram shows plain text
-      // because user/business accounts cannot attach Bot-style inline keyboards.
       throw new Error(
         'Inline buttons cannot be sent via the Telethon business-account queue. ' +
         'Configure TELEGRAM_BOT_TOKEN so welcome/register buttons go through Bot API.'
@@ -74,6 +112,7 @@ export function createAccountReplySender({ store }) {
     }
 
     const temporaryTelegramMessageId = -Number(`${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
+    const resolvedMessageType = mediaPath ? 'image' : messageType;
     const stored = await store.storeOutgoingMessage({
       telegramUserId: user.id,
       telegramMessageId: temporaryTelegramMessageId,
@@ -81,12 +120,13 @@ export function createAccountReplySender({ store }) {
       payload: {
         queued: true,
         buttons: normalizedButtons,
+        mediaPath: mediaPath || null,
         sync_kind: 'queued',
         source: 'business_account'
       },
       senderType: 'bot',
       source: 'business_account',
-      messageType: messageType,
+      messageType: resolvedMessageType,
       sentAt: new Date().toISOString()
     });
     const outbound = await store.queueTelegramOutboundMessage({
@@ -94,20 +134,26 @@ export function createAccountReplySender({ store }) {
       telegramUserId: user.telegram_id,
       body: text,
       buttons: normalizedButtons,
-      localMessageId: stored.messageId
+      localMessageId: stored.messageId,
+      mediaPath,
+      messageType: resolvedMessageType
     });
     await store.db.prepare(`
       INSERT INTO sync_state (key, value, updated_at)
       VALUES ('outbound_queue:nudge', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run(String(outbound.id), new Date().toISOString());
-    console.log(`[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id} buttons=0`);
+    console.log(
+      `[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id} ` +
+      `buttons=0 media=${mediaPath ? 'yes' : 'no'}`
+    );
     return {
       ok: true,
       queued: true,
       source: 'business_account',
       outboundId: outbound.id,
-      buttons: normalizedButtons
+      buttons: normalizedButtons,
+      mediaPath: mediaPath || null
     };
   };
 }
@@ -123,6 +169,20 @@ export async function createReplySender({ store, user, rootDir, bot }) {
   return async function sendReply(options = {}) {
     const normalizedButtons = normalizeButtonRows(options.buttons);
     const hasButtons = normalizedButtons.length > 0;
+    const hasMedia = Boolean(options.mediaPath);
+
+    if (hasMedia) {
+      if (bot) {
+        return createBotPhotoSender(bot, store)(options);
+      }
+      if (preferredSource === 'business_account' && accountEnabled) {
+        return createAccountReplySender({ store })(options);
+      }
+      if (accountEnabled) {
+        return createAccountReplySender({ store })(options);
+      }
+      throw new Error('No Telegram photo channel is available for this contact.');
+    }
 
     if (hasButtons) {
       if (!bot) {

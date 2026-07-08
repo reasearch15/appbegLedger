@@ -45,3 +45,16 @@ You are not registered with us yet.
 Click Register to start.`;
 
 export const WELCOME_BUTTONS = [[{ label: 'Register', action: 'flow:registration_info' }]];
+
+/**
+ * Parse a first-deposit amount for registration.
+ * Accepts positive numbers like 10, 10.5, 25.00, 100.75.
+ * Rejects text, zero, negatives, and symbols-only input.
+ */
+export function parseFirstDepositAmount(text) {
+  const raw = String(text || '').trim();
+  if (!raw || !/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.round(value * 100) / 100;
+}

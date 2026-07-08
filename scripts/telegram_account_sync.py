@@ -893,6 +893,8 @@ def ensure_outbound_queue_storage(db):
             """
         )
         db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN IF NOT EXISTS buttons_json TEXT NOT NULL DEFAULT '[]'")
+        db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN IF NOT EXISTS media_path TEXT")
+        db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text'")
     else:
         db.execute(
             """
@@ -919,6 +921,10 @@ def ensure_outbound_queue_storage(db):
         columns = [row["name"] for row in db.execute("PRAGMA table_info(telegram_outbound_messages)").fetchall()]
         if "buttons_json" not in columns:
             db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN buttons_json TEXT NOT NULL DEFAULT '[]'")
+        if "media_path" not in columns:
+            db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN media_path TEXT")
+        if "message_type" not in columns:
+            db.execute("ALTER TABLE telegram_outbound_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'")
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_telegram_outbound_status_created ON telegram_outbound_messages(status, created_at ASC, id ASC)"
     )
@@ -1096,46 +1102,71 @@ async def process_outbound_row(client, db, queue_row):
             raise RuntimeError("Target is not an active private Telegram user.")
         raw_buttons_json = queue_row["buttons_json"]
         parsed_buttons = parse_buttons_json(raw_buttons_json)
-        print(
-            f"[telegram-outbound] reconstruct id={queue_row['id']} "
-            f"raw_buttons_json={raw_buttons_json!r} parsed={parsed_buttons!r}",
-            flush=True,
-        )
-        buttons = build_inline_buttons(parsed_buttons)
-        button_count = sum(len(row) for row in buttons) if buttons else 0
-        log_buttons_just_before_send(
-            buttons,
-            outbound_id=queue_row["id"],
-            raw_buttons_json=raw_buttons_json,
-        )
-        # Explicit kwargs — never omit buttons= when we intended a keyboard.
-        print(
-            f"[telegram-outbound] calling client.send_message("
-            f"entity={getattr(entity, 'id', entity)!r}, "
-            f"message=<len {len(queue_row['body'] or '')}>, "
-            f"buttons={buttons!r})",
-            flush=True,
-        )
-        message = await client.send_message(
-            entity,
-            queue_row["body"],
-            buttons=buttons,
-        )
-        markup_info = reply_markup_summary(message)
-        print(
-            f"[telegram-outbound] send_message returned message_id={message.id} "
-            f"reply_markup={markup_info!r}",
-            flush=True,
-        )
-        if button_count and not markup_info.get("present"):
-            # User/business accounts often accept the send but strip inline
-            # callback buttons. Treat that as a hard failure so we stop lying.
-            raise RuntimeError(
-                "Telethon send returned message WITHOUT reply_markup even though "
-                f"{button_count} Button.inline object(s) were passed. "
-                "Inline callback buttons require a Bot API sender "
-                "(TELEGRAM_BOT_TOKEN), not a user/business account session."
+        media_path = queue_row["media_path"] if "media_path" in queue_row.keys() else None
+        if media_path:
+            resolved_media = Path(media_path)
+            if not resolved_media.is_absolute():
+                resolved_media = ROOT / media_path
+            if not resolved_media.exists():
+                raise RuntimeError(f"Outbound media file not found: {resolved_media}")
+            print(
+                f"[telegram-outbound] calling client.send_file("
+                f"entity={getattr(entity, 'id', entity)!r}, "
+                f"file={resolved_media!r}, "
+                f"caption=<len {len(queue_row['body'] or '')}>)",
+                flush=True,
             )
+            message = await client.send_file(
+                entity,
+                str(resolved_media),
+                caption=queue_row["body"] or None,
+            )
+        else:
+            print(
+                f"[telegram-outbound] reconstruct id={queue_row['id']} "
+                f"raw_buttons_json={raw_buttons_json!r} parsed={parsed_buttons!r}",
+                flush=True,
+            )
+            buttons = build_inline_buttons(parsed_buttons)
+            button_count = sum(len(row) for row in buttons) if buttons else 0
+            log_buttons_just_before_send(
+                buttons,
+                outbound_id=queue_row["id"],
+                raw_buttons_json=raw_buttons_json,
+            )
+            # Explicit kwargs — never omit buttons= when we intended a keyboard.
+            print(
+                f"[telegram-outbound] calling client.send_message("
+                f"entity={getattr(entity, 'id', entity)!r}, "
+                f"message=<len {len(queue_row['body'] or '')}>, "
+                f"buttons={buttons!r})",
+                flush=True,
+            )
+            message = await client.send_message(
+                entity,
+                queue_row["body"],
+                buttons=buttons,
+            )
+            markup_info = reply_markup_summary(message)
+            print(
+                f"[telegram-outbound] send_message returned message_id={message.id} "
+                f"reply_markup={markup_info!r}",
+                flush=True,
+            )
+            if button_count and not markup_info.get("present"):
+                # User/business accounts often accept the send but strip inline
+                # callback buttons. Treat that as a hard failure so we stop lying.
+                raise RuntimeError(
+                    "Telethon send returned message WITHOUT reply_markup even though "
+                    f"{button_count} Button.inline object(s) were passed. "
+                    "Inline callback buttons require a Bot API sender "
+                    "(TELEGRAM_BOT_TOKEN), not a user/business account session."
+                )
+        if media_path:
+            button_count = 0
+            markup_info = reply_markup_summary(message)
+        else:
+            button_count = sum(len(row) for row in buttons) if buttons else 0
         payload = {
             "ok": True,
             "message_id": message.id,
