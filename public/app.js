@@ -2,6 +2,7 @@ import { statusBadge, progressBar, progressChecklist } from './playerUtils.js';
 import { renderAvatar as avatar } from './avatarUtils.js';
 import { renderRegistrationModal, readRegistrationModalForm } from './registrationModal.js';
 import { createPlayersController } from './playersRegistry.js';
+import { createPaymentInfoController } from './paymentInfo.js';
 import {
   renderContactOverview,
   createEmptyWizardForm,
@@ -74,10 +75,18 @@ let state = {
   settingsSuccess: null,
   settingsError: null,
   registrationModal: null,
-  registrationWizard: null
+  registrationWizard: null,
+  chimeQrs: [],
+  chimeQrLoading: false,
+  chimeQrUploading: false,
+  chimeQrActionId: null,
+  hasActiveDefaultChimeQr: false,
+  chimeQrError: null,
+  chimeQrSuccess: null
 };
 
 let playersController;
+let paymentInfoController;
 
 let composerEventsBound = false;
 let sendingMessage = false;
@@ -221,10 +230,15 @@ class ApiError extends Error {
 
 async function api(path, options = {}) {
   let response;
+  const headers = { ...(options.headers || {}) };
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  if (!isFormData && !headers['Content-Type'] && !headers['content-type']) {
+    headers['Content-Type'] = 'application/json';
+  }
   try {
     response = await fetch(path, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options
+      ...options,
+      headers
     });
   } catch (networkError) {
     const error = new ApiError({
@@ -268,6 +282,16 @@ playersController = createPlayersController({
     state = { ...state, ...patch };
   },
   render
+});
+
+paymentInfoController = createPaymentInfoController({
+  api,
+  getState: () => state,
+  setState: (patch) => {
+    state = { ...state, ...patch };
+  },
+  render,
+  fmtDateTime
 });
 
 async function openContactById(contactId, { pane = 'overview' } = {}) {
@@ -1648,6 +1672,7 @@ function render() {
     { id: 'contacts', label: 'Contacts', icon: '💬' },
     { id: 'players', label: 'Players', icon: '👥' },
     { id: 'payments', label: 'Payments', icon: '💳' },
+    { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
     { id: 'settings', label: 'Settings', icon: '⚙️' }
   ];
   const navHtml = items.map((item) => `
@@ -1671,6 +1696,8 @@ function render() {
       </div>
       ${state.section === 'payments'
     ? paymentsWorkspace()
+    : state.section === 'payment-info'
+      ? paymentInfoController.renderPaymentInfoWorkspace(state)
     : state.section === 'players'
       ? playersController.renderPlayersWorkspace(state, { avatar, fmtDateTime })
       : state.section === 'settings'
@@ -1682,6 +1709,9 @@ function render() {
   bindEvents();
   if (state.section === 'players') {
     playersController.bindPlayersEvents(app);
+  }
+  if (state.section === 'payment-info') {
+    paymentInfoController.bindPaymentInfoEvents(app);
   }
   scrollChatToBottom();
 }
@@ -1840,6 +1870,11 @@ function bindEvents() {
       }
       if (state.section === 'players') {
         await refreshPlayers({ keepSelection: true });
+      }
+      if (state.section === 'payment-info') {
+        state.chimeQrError = null;
+        state.chimeQrSuccess = null;
+        await paymentInfoController.refreshChimeQrs();
       }
       render();
     });

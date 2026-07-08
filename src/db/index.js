@@ -2208,6 +2208,177 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
   }
 
+  function hydrateChimeQrRow(row) {
+    if (!row) return null;
+    const fileName = path.basename(String(row.file_path || ''));
+    const usageCount = Number(row.usage_count || 0);
+    return {
+      id: row.id,
+      label: row.label || '',
+      is_active: row.is_active === true || row.is_active === 1 || row.is_active === '1',
+      is_default: row.is_default === true || row.is_default === 1 || row.is_default === '1',
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      preview_url: fileName ? `/media/chime-qr/${fileName}` : null,
+      usage_count: usageCount,
+      in_use: usageCount > 0
+    };
+  }
+
+  async function listChimeQrCodes() {
+    const rows = await db.prepare(`
+      SELECT q.*,
+        (
+          SELECT COUNT(*)
+          FROM registration_payment_windows w
+          WHERE w.qr_code_id = q.id
+        ) AS usage_count
+      FROM chime_qr_codes q
+      ORDER BY q.is_default DESC, q.is_active DESC, q.created_at DESC, q.id DESC
+    `).all();
+    return rows.map(hydrateChimeQrRow);
+  }
+
+  async function getChimeQrCode(id) {
+    const row = await db.prepare(`
+      SELECT q.*,
+        (
+          SELECT COUNT(*)
+          FROM registration_payment_windows w
+          WHERE w.qr_code_id = q.id
+        ) AS usage_count
+      FROM chime_qr_codes q
+      WHERE q.id = ?
+    `).get(id);
+    return hydrateChimeQrRow(row);
+  }
+
+  async function getChimeQrCodeFilePath(id) {
+    const row = await db.prepare('SELECT file_path FROM chime_qr_codes WHERE id = ?').get(id);
+    return row?.file_path || null;
+  }
+
+  async function countChimeQrUsage(id) {
+    const row = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM registration_payment_windows
+      WHERE qr_code_id = ?
+    `).get(id);
+    return Number(row?.count || 0);
+  }
+
+  async function hasActiveDefaultChimeQr() {
+    return Boolean(await getActiveDefaultChimeQr());
+  }
+
+  async function createChimeQrCode({ filePath, label = null, isActive = true, isDefault = false }) {
+    const now = nowIso();
+    const activeLiteral = sql.boolLiteral(isActive);
+    const defaultLiteral = sql.boolLiteral(isDefault);
+    const result = await db.prepare(`
+      INSERT INTO chime_qr_codes (file_path, label, is_active, is_default, created_at, updated_at)
+      VALUES (?, ?, ${activeLiteral}, ${defaultLiteral}, ?, ?)
+    `).run(filePath, label || null, now, now);
+    const id = result.lastInsertRowid;
+    if (isDefault) {
+      await clearDefaultChimeQrExcept(id);
+    }
+    return await getChimeQrCode(id);
+  }
+
+  async function clearDefaultChimeQrExcept(keepId) {
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE chime_qr_codes
+      SET is_default = ${sql.boolFalse}, updated_at = ?
+      WHERE id != ?
+    `).run(now, keepId);
+  }
+
+  async function updateChimeQrCode(id, patch = {}) {
+    const current = await getChimeQrCode(id);
+    if (!current) return null;
+
+    const nextLabel = patch.label !== undefined ? patch.label : current.label;
+    let nextActive = patch.is_active !== undefined ? Boolean(patch.is_active) : current.is_active;
+    let nextDefault = patch.is_default !== undefined ? Boolean(patch.is_default) : current.is_default;
+    const force = Boolean(patch.force);
+
+    if (!nextActive && nextDefault) {
+      nextDefault = false;
+    }
+
+    if (!nextActive && current.is_default && !force) {
+      const otherDefault = await db.prepare(`
+        SELECT id
+        FROM chime_qr_codes
+        WHERE id != ? AND is_active = ${sql.boolTrue} AND is_default = ${sql.boolTrue}
+        LIMIT 1
+      `).get(id);
+      if (!otherDefault) {
+        const err = new Error('Cannot deactivate the only active default Chime QR. Set another QR as default first.');
+        err.code = 'LAST_ACTIVE_DEFAULT';
+        throw err;
+      }
+      nextDefault = false;
+    }
+
+    if (!nextActive && current.is_default && force) {
+      nextDefault = false;
+    }
+
+    const now = nowIso();
+    await db.prepare(`
+      UPDATE chime_qr_codes
+      SET label = ?, is_active = ${sql.boolLiteral(nextActive)}, is_default = ${sql.boolLiteral(nextDefault)}, updated_at = ?
+      WHERE id = ?
+    `).run(nextLabel || null, now, id);
+
+    if (nextDefault) {
+      await clearDefaultChimeQrExcept(id);
+      await db.prepare(`
+        UPDATE chime_qr_codes
+        SET is_default = ${sql.boolTrue}, updated_at = ?
+        WHERE id = ?
+      `).run(now, id);
+    }
+
+    return await getChimeQrCode(id);
+  }
+
+  async function setDefaultChimeQr(id) {
+    const current = await getChimeQrCode(id);
+    if (!current) return null;
+    if (!current.is_active) {
+      const err = new Error('Only an active Chime QR can be set as default.');
+      err.code = 'INACTIVE_QR';
+      throw err;
+    }
+    const now = nowIso();
+    await clearDefaultChimeQrExcept(id);
+    await db.prepare(`
+      UPDATE chime_qr_codes
+      SET is_default = ${sql.boolTrue}, updated_at = ?
+      WHERE id = ?
+    `).run(now, id);
+    return await getChimeQrCode(id);
+  }
+
+  async function deleteChimeQrCode(id) {
+    const current = await getChimeQrCode(id);
+    if (!current) return null;
+
+    const usageCount = await countChimeQrUsage(id);
+    if (usageCount > 0) {
+      const deactivated = await updateChimeQrCode(id, { is_active: false, is_default: false });
+      return { action: 'deactivated', qr: deactivated, reason: 'in_use' };
+    }
+
+    const filePath = await getChimeQrCodeFilePath(id);
+    await db.prepare('DELETE FROM chime_qr_codes WHERE id = ?').run(id);
+    return { action: 'deleted', qr: current, file_path: filePath || null };
+  }
+
   return {
     db,
     upsertTelegramUser,
@@ -2312,7 +2483,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
     completeRegistrationPaymentWindow,
-    expireRegistrationPaymentWindow
+    expireRegistrationPaymentWindow,
+    listChimeQrCodes,
+    getChimeQrCode,
+    getChimeQrCodeFilePath,
+    countChimeQrUsage,
+    hasActiveDefaultChimeQr,
+    createChimeQrCode,
+    updateChimeQrCode,
+    setDefaultChimeQr,
+    deleteChimeQrCode
   };
 }
 
