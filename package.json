@@ -1,0 +1,27 @@
+{
+  "name": "royal-vip-coadmin-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Telegram customer management foundation for the future Royal VIP Coadmin Agent.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:init": "node scripts/db-init.js",
+    "db:verify": "node scripts/verify-db.js",
+    "telegram:login": "python scripts/telegram_account_sync.py login",
+    "telegram:sync": "python scripts/telegram_account_sync.py sync",
+    "payment:login": "python scripts/payment_telegram_sync.py login",
+    "payment:sync": "python scripts/payment_telegram_sync.py sync"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "pg": "^8.22.0",
+    "socket.io": "^4.8.1",
+    "telegraf": "^4.16.3"
+  }
+}
