@@ -45,6 +45,16 @@ export function createQueryHelpers(dialect) {
     return tableSql.replace(/INSERT OR IGNORE INTO/gi, 'INSERT INTO');
   }
 
+  function quoteAlias(name) {
+    return isPostgres ? `"${name}"` : name;
+  }
+
+  function datePrefixExpr(column) {
+    return isPostgres
+      ? `substring(${column} FROM 1 FOR 10)`
+      : `substr(${column}, 1, 10)`;
+  }
+
   return {
     isPostgres,
     boolTrue,
@@ -53,6 +63,8 @@ export function createQueryHelpers(dialect) {
     tagsJsonSelect,
     notesTextSelect,
     messageUpsertSuffix,
-    insertOrIgnore
+    insertOrIgnore,
+    quoteAlias,
+    datePrefixExpr
   };
 }

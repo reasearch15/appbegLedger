@@ -425,19 +425,25 @@ app.get('/api/payment-sync/status', async (req, res) => {
 });
 
 app.get('/api/payment-stats', async (req, res) => {
-  res.json({ stats: await store.getPaymentStats() });
+  const stats = await store.getPaymentStats();
+  console.log('[payments-api] GET /api/payment-stats', JSON.stringify(stats));
+  res.json({ stats });
 });
 
 app.get('/api/payments', async (req, res) => {
-  res.json({
-    payments: await store.listPaymentEvents({
-      limit: req.query.limit || 200,
-      status: req.query.status || 'All',
-      routingStatus: req.query.routingStatus || 'All',
-      query: req.query.query || '',
-      exceptionsOnly: req.query.exceptionsOnly === 'true'
-    })
-  });
+  const options = {
+    limit: req.query.limit || 500,
+    status: req.query.status || 'All',
+    routingStatus: req.query.routingStatus || 'All',
+    query: req.query.query || '',
+    exceptionsOnly: req.query.exceptionsOnly === 'true'
+  };
+  const payments = await store.listPaymentEvents(options);
+  console.log(`[payments-api] GET /api/payments returned ${payments.length} rows`, JSON.stringify({
+    ...options,
+    exceptionsOnly: options.exceptionsOnly
+  }));
+  res.json({ payments });
 });
 
 app.get('/api/payments/exceptions', async (req, res) => {

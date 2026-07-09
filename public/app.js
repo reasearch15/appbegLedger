@@ -986,6 +986,24 @@ async function refreshSelectedContact({ markRead = false, requestId = null, forc
   }
 }
 
+function normalizePaymentStats(stats = {}) {
+  return {
+    messagesToday: Number(stats.messagesToday ?? stats.messagestoday ?? 0) || 0,
+    registeredPlayerDeposits: Number(stats.registeredPlayerDeposits ?? stats.registeredplayerdeposits ?? 0) || 0,
+    registrationMatched: Number(stats.registrationMatched ?? stats.registrationmatched ?? 0) || 0,
+    frozenManualReview: Number(stats.frozenManualReview ?? stats.frozenmanualreview ?? 0) || 0,
+    expiredWindowMatch: Number(stats.expiredWindowMatch ?? stats.expiredwindowmatch ?? 0) || 0,
+    parseFailed: Number(stats.parseFailed ?? stats.parsefailed ?? 0) || 0,
+    ignored: Number(stats.ignored ?? 0) || 0,
+    exceptions: Number(stats.exceptions ?? 0) || 0,
+    waiting: Number(stats.waiting ?? 0) || 0,
+    unrouted: Number(stats.unrouted ?? 0) || 0,
+    appbegOwned: Number(stats.appbegOwned ?? stats.appbegowned ?? 0) || 0,
+    failed: Number(stats.failed ?? 0) || 0,
+    totalMessages: Number(stats.totalMessages ?? stats.totalmessages ?? 0) || 0
+  };
+}
+
 async function refreshPayments({ keepSelection = true } = {}) {
   const query = new URLSearchParams({
     status: state.paymentStatusFilter,
@@ -994,15 +1012,22 @@ async function refreshPayments({ keepSelection = true } = {}) {
     query: state.paymentQuery,
     limit: '500'
   });
-  const [{ payments }, { stats }, { sync }] = await Promise.all([
+  const [paymentsPayload, statsPayload, syncPayload] = await Promise.all([
     api(`/api/payments?${query}`),
     api('/api/payment-stats'),
     api('/api/payment-sync/status')
   ]);
+  const payments = Array.isArray(paymentsPayload?.payments) ? paymentsPayload.payments : [];
   state.payments = payments;
-  state.paymentStats = stats;
-  state.paymentSync = sync;
-  if (!keepSelection || !state.selectedPaymentId || !payments.some((payment) => payment.id === state.selectedPaymentId)) {
+  state.paymentStats = normalizePaymentStats(statsPayload?.stats || {});
+  state.paymentSync = syncPayload?.sync || {};
+  console.log(`[payments-ui] loaded ${payments.length} payments`, {
+    status: state.paymentStatusFilter,
+    routingStatus: state.paymentRoutingFilter,
+    exceptionsOnly: state.paymentExceptionsOnly,
+    totalMessages: state.paymentStats.totalMessages
+  });
+  if (!keepSelection || !state.selectedPaymentId || !payments.some((payment) => Number(payment.id) === Number(state.selectedPaymentId))) {
     state.selectedPaymentId = payments[0]?.id || null;
   }
 }
@@ -1544,6 +1569,7 @@ function paymentStatCards() {
     ['Registered Deposits', state.paymentStats.registeredPlayerDeposits || 0],
     ['Registration Matched', state.paymentStats.registrationMatched || 0],
     ['Frozen / Review', state.paymentStats.frozenManualReview || 0],
+    ['Unrouted', state.paymentStats.unrouted || 0],
     ['Expired Window', state.paymentStats.expiredWindowMatch || 0],
     ['Parse Failed', state.paymentStats.parseFailed || 0],
     ['Total', state.paymentStats.totalMessages || 0]
@@ -1570,7 +1596,7 @@ function paymentSyncStatus() {
 function paymentRows() {
   if (!state.payments.length) return '<div class="empty-state">No payment messages match the current filters.</div>';
   return state.payments.map((payment) => `
-    <button class="payment-row ${state.selectedPaymentId === payment.id ? 'selected' : ''}" data-payment-id="${payment.id}">
+    <button class="payment-row ${Number(state.selectedPaymentId) === Number(payment.id) ? 'selected' : ''}" data-payment-id="${payment.id}">
       <span>${fmtDateTime(payment.message_date)}</span>
       <span class="truncate">${escapeHtml(payment.sender_name || payment.sender_username || 'Unknown')}</span>
       <span>${payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : '—'}</span>
@@ -2226,6 +2252,10 @@ function bindEvents() {
       }
       if (state.section === 'payments') {
         state.mobilePaymentsPane = 'list';
+        state.paymentStatusFilter = 'All';
+        state.paymentRoutingFilter = 'All';
+        state.paymentExceptionsOnly = false;
+        state.paymentQuery = '';
         await refreshPayments({ keepSelection: true });
         await refreshSelectedPayment();
       }

@@ -29,6 +29,23 @@ const schemaPath = path.join(__dirname, 'schema.sql');
 
 export { REGISTRATION_STATUSES, CONVERSATION_STATUSES, DEFAULT_TAGS, DEFAULT_QUICK_REPLIES, DEFAULT_AUTOMATION_RULES } from './defaults.js';
 
+function pickRowValue(row, key) {
+  if (!row) return undefined;
+  if (row[key] !== undefined) return row[key];
+  const lower = key.toLowerCase();
+  if (row[lower] !== undefined) return row[lower];
+  return undefined;
+}
+
+function normalizeAggregateStats(row, keys) {
+  const normalized = {};
+  for (const key of keys) {
+    const raw = pickRowValue(row, key);
+    normalized[key] = Number(raw ?? 0) || 0;
+  }
+  return normalized;
+}
+
 export async function createDataStore(config = resolveDatabaseConfig()) {
   const driver = await createDriver(config);
   const db = driver;
@@ -615,18 +632,27 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function getStats() {
     const today = new Date().toISOString().slice(0, 10);
+    const firstSeenDay = sql.datePrefixExpr('first_seen');
+    const lastSeenDay = sql.datePrefixExpr('last_seen');
     const row = await db.prepare(`
       SELECT
-        COUNT(*) AS totalTelegramUsers,
-        SUM(CASE WHEN substr(first_seen, 1, 10) = @today THEN 1 ELSE 0 END) AS newToday,
-        SUM(CASE WHEN registration_status = 'Pending' THEN 1 ELSE 0 END) AS pendingRegistration,
-        SUM(CASE WHEN registration_status = 'Registered' THEN 1 ELSE 0 END) AS registeredUsers,
-        SUM(CASE WHEN registration_status = 'Suspended' THEN 1 ELSE 0 END) AS suspendedUsers,
-        SUM(CASE WHEN substr(last_seen, 1, 10) = @today THEN 1 ELSE 0 END) AS activeToday
+        COUNT(*) AS ${sql.quoteAlias('totalTelegramUsers')},
+        SUM(CASE WHEN ${firstSeenDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('newToday')},
+        SUM(CASE WHEN registration_status = 'Pending' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('pendingRegistration')},
+        SUM(CASE WHEN registration_status = 'Registered' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredUsers')},
+        SUM(CASE WHEN registration_status = 'Suspended' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('suspendedUsers')},
+        SUM(CASE WHEN ${lastSeenDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('activeToday')}
       FROM telegram_users
     `).get({ today });
 
-    return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value ?? 0]));
+    return normalizeAggregateStats(row, [
+      'totalTelegramUsers',
+      'newToday',
+      'pendingRegistration',
+      'registeredUsers',
+      'suspendedUsers',
+      'activeToday'
+    ]);
   }
 
   async function getUserProfile(id) {
@@ -1503,13 +1529,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getUserProfile(id);
   }
 
-  async function listPaymentEvents({ limit = 200, status = 'All', routingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
-    const params = {
-      limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
-      status,
-      routingStatus,
-      query: `%${String(query || '').trim().toLowerCase()}%`
-    };
+  function buildPaymentEventsQuery({ status = 'All', routingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
     const where = [];
     if (status && status !== 'All') where.push('processing_status = @status');
     if (routingStatus && routingStatus !== 'All') {
@@ -1530,17 +1550,43 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         lower(COALESCE(sender_name, '')) LIKE @query OR
         lower(COALESCE(sender_username, '')) LIKE @query OR
         lower(COALESCE(parsed_recipient_tag, '')) LIKE @query OR
+        lower(COALESCE(parsed_payment_app, '')) LIKE @query OR
+        lower(COALESCE(parsed_sender_name, '')) LIKE @query OR
+        lower(COALESCE(CAST(routing_reason AS TEXT), '')) LIKE @query OR
         CAST(telegram_message_id AS TEXT) LIKE @query
       )`);
     }
-    const sql = `
+    const querySql = `
       SELECT *
       FROM payment_events
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY message_date DESC, id DESC
       LIMIT @limit
     `;
-    return (await db.prepare(sql).all(params)).map(hydratePaymentEvent);
+    return { querySql, where };
+  }
+
+  async function listPaymentEvents({ limit = 200, status = 'All', routingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
+    const params = {
+      limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
+      status,
+      routingStatus,
+      query: `%${String(query || '').trim().toLowerCase()}%`
+    };
+    const { querySql, where } = buildPaymentEventsQuery({ status, routingStatus, query, exceptionsOnly });
+    console.log('[payments-api] listPaymentEvents', JSON.stringify({
+      where,
+      orderBy: 'message_date DESC, id DESC',
+      limit: params.limit,
+      status: params.status,
+      routingStatus: params.routingStatus,
+      exceptionsOnly: Boolean(exceptionsOnly),
+      query: String(query || '').trim() || null
+    }));
+    const rows = await db.prepare(querySql).all(params);
+    const payments = rows.map(hydratePaymentEvent);
+    console.log(`[payments-api] payment_visible_in_ui count=${payments.length}`);
+    return payments;
   }
 
   async function getPaymentEvent(id) {
@@ -1561,22 +1607,39 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function getPaymentStats() {
     const today = new Date().toISOString().slice(0, 10);
+    const messageDay = sql.datePrefixExpr('message_date');
     const row = await db.prepare(`
       SELECT
-        SUM(CASE WHEN substr(message_date, 1, 10) = @today THEN 1 ELSE 0 END) AS messagesToday,
-        SUM(CASE WHEN routing_status = 'registered_player_deposit' THEN 1 ELSE 0 END) AS registeredPlayerDeposits,
-        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS registrationMatched,
-        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS frozenManualReview,
-        SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS expiredWindowMatch,
-        SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS parseFailed,
-        SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ignored,
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS exceptions,
-        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS waiting,
-        SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS failed,
-        COUNT(*) AS totalMessages
+        SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
+        SUM(CASE WHEN routing_status = 'registered_player_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
+        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
+        SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
+        SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailed')},
+        SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')},
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
+        SUM(CASE WHEN routing_status = 'unrouted' OR routed_at IS NULL THEN 1 ELSE 0 END) AS ${sql.quoteAlias('unrouted')},
+        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('appbegOwned')},
+        SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('failed')},
+        COUNT(*) AS ${sql.quoteAlias('totalMessages')}
       FROM payment_events
     `).get({ today });
-    return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value ?? 0]));
+    return normalizeAggregateStats(row, [
+      'messagesToday',
+      'registeredPlayerDeposits',
+      'registrationMatched',
+      'frozenManualReview',
+      'expiredWindowMatch',
+      'parseFailed',
+      'ignored',
+      'exceptions',
+      'waiting',
+      'unrouted',
+      'appbegOwned',
+      'failed',
+      'totalMessages'
+    ]);
   }
 
   async function listUnroutedPaymentEvents(limit = 50) {
@@ -3060,9 +3123,21 @@ function hydratePlayer(row) {
 }
 
 function hydratePaymentEvent(event) {
+  let raw_payload = {};
+  try {
+    raw_payload = JSON.parse(event.raw_payload_json || '{}');
+  } catch {
+    raw_payload = { parseError: true };
+  }
   return {
     ...event,
-    raw_payload: JSON.parse(event.raw_payload_json || '{}')
+    id: event.id != null ? Number(event.id) : event.id,
+    telegram_message_id: event.telegram_message_id != null ? Number(event.telegram_message_id) : event.telegram_message_id,
+    contact_id: event.contact_id != null ? Number(event.contact_id) : event.contact_id,
+    registration_payment_window_id: event.registration_payment_window_id != null
+      ? Number(event.registration_payment_window_id)
+      : event.registration_payment_window_id,
+    raw_payload
   };
 }
 
