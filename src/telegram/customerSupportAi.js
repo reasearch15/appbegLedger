@@ -36,6 +36,25 @@ const INTENTS = [
   }
 ];
 
+export async function generateCustomerSupportReply({ store, contact, messageText, useTraining = false }) {
+  const draft = await generateCustomerSupportDraft({ store, contact, messageText });
+  if (!useTraining || !store.findStaffAiTrainingReply) {
+    return { ...draft, replySource: 'template' };
+  }
+  const trainedReply = await store.findStaffAiTrainingReply({
+    contactId: contact.id,
+    intent: draft.kind
+  });
+  if (trainedReply) {
+    return {
+      ...draft,
+      reply: trainedReply,
+      replySource: 'training'
+    };
+  }
+  return { ...draft, replySource: 'template' };
+}
+
 export async function generateCustomerSupportDraft({ store, contact, messageText }) {
   const text = String(messageText || '').trim();
   const messages = await store.listMessagesForUser(contact.id);

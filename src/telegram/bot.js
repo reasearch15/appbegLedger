@@ -54,11 +54,8 @@ export function startTelegramListener({ token, store, io }) {
         return;
       }
 
-      const staffAiMode = await store.getStaffAiApprenticeSettings?.();
-      if (staffAiMode) {
-        console.log(`[chatbot] callback_auto_send_suppressed contact=${user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
-        return;
-      }
+      console.log(`[chatbot] callback_auto_send_suppressed contact=${user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
+      return;
 
       const automationResult = await processAutomationActionForContact({
         action,
@@ -136,11 +133,8 @@ export function startTelegramListener({ token, store, io }) {
         return;
       }
 
-      const staffAiMode = await store.getStaffAiApprenticeSettings?.();
-      if (staffAiMode) {
-        console.log(`[chatbot] direct_auto_send_suppressed contact=${result.user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
-        return;
-      }
+      console.log(`[chatbot] direct_auto_send_suppressed contact=${result.user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
+      return;
 
       const automationResult = await processAutomationForContact({
         store,

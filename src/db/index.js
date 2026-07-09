@@ -772,6 +772,115 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
+  function normalizeContactAiMode(value) {
+    return String(value || '').trim().toLowerCase() === 'auto' ? 'auto' : 'train';
+  }
+
+  function hydrateContactAiSettings(user = {}) {
+    return {
+      mode: normalizeContactAiMode(user.ai_mode),
+      auto_paused: Boolean(user.ai_auto_paused),
+      updated_at: user.ai_mode_updated_at || null,
+      updated_by: user.ai_mode_updated_by || null
+    };
+  }
+
+  async function setContactAiMode(contactId, mode, actorName = 'Staff') {
+    const contact = await db.prepare('SELECT id, ai_mode FROM telegram_users WHERE id = ?').get(contactId);
+    if (!contact) throw new Error('Contact not found.');
+    const nextMode = normalizeContactAiMode(mode);
+    const updatedAt = nowIso();
+    await db.prepare(`
+      UPDATE telegram_users
+      SET ai_mode = ?,
+          ai_auto_paused = ?,
+          ai_mode_updated_at = ?,
+          ai_mode_updated_by = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      nextMode,
+      0,
+      updatedAt,
+      actorName,
+      updatedAt,
+      contactId
+    );
+    if (nextMode === 'auto') {
+      await setBotControl(contactId, { botPaused: false, actorName });
+    }
+    const user = await getUserProfile(contactId);
+    return hydrateContactAiSettings(user);
+  }
+
+  async function pauseContactAiAuto(contactId, actorName = 'Staff') {
+    const contact = await db.prepare('SELECT id, ai_mode, ai_auto_paused FROM telegram_users WHERE id = ?').get(contactId);
+    if (!contact) throw new Error('Contact not found.');
+    if (normalizeContactAiMode(contact.ai_mode) !== 'auto' || contact.ai_auto_paused) {
+      return hydrateContactAiSettings(contact);
+    }
+    const updatedAt = nowIso();
+    await db.prepare(`
+      UPDATE telegram_users
+      SET ai_auto_paused = 1,
+          ai_mode_updated_at = ?,
+          ai_mode_updated_by = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(updatedAt, actorName, updatedAt, contactId);
+    const user = await getUserProfile(contactId);
+    return hydrateContactAiSettings(user);
+  }
+
+  async function findStaffAiTrainingReply({ contactId, intent }) {
+    const normalizedIntent = String(intent || '').trim();
+    if (!normalizedIntent) return null;
+    const pickReply = (row) => {
+      const reply = String(row?.reply || '').trim();
+      return reply || null;
+    };
+    const contactRow = await db.prepare(`
+      SELECT COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply) AS reply
+      FROM staff_ai_training_examples
+      WHERE contact_id = ?
+        AND detected_intent = ?
+        AND TRIM(COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply, '')) != ''
+        AND outcome IN ('sent', 'completed', 'auto_sent')
+      ORDER BY
+        CASE COALESCE(reply_used, '')
+          WHEN 'good' THEN 0
+          WHEN 'bad' THEN 1
+          ELSE 2
+        END,
+        CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END,
+        sent_at DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 1
+    `).get(contactId, normalizedIntent);
+    const contactReply = pickReply(contactRow);
+    if (contactReply) return contactReply;
+    const globalRow = await db.prepare(`
+      SELECT COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply) AS reply
+      FROM staff_ai_training_examples
+      WHERE detected_intent = ?
+        AND TRIM(COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply, '')) != ''
+        AND outcome IN ('sent', 'completed', 'auto_sent')
+      ORDER BY
+        CASE COALESCE(reply_used, '')
+          WHEN 'good' THEN 0
+          WHEN 'bad' THEN 1
+          ELSE 2
+        END,
+        CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END,
+        sent_at DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 1
+    `).get(normalizedIntent);
+    return pickReply(globalRow);
+  }
+
   async function setStaffAiApprenticeModeEnabled(enabled, actorName = 'Staff') {
     const current = await getStaffAiApprenticeSettings();
     const nextEnabled = Boolean(enabled);
@@ -3404,6 +3513,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getCoadminSettings,
     getStaffAiApprenticeSettings,
     setStaffAiApprenticeModeEnabled,
+    setContactAiMode,
+    pauseContactAiAuto,
+    findStaffAiTrainingReply,
+    hydrateContactAiSettings,
     createStaffAiTrainingDraft,
     getStaffAiTrainingExample,
     getLatestStaffAiTrainingDraftForContact,
@@ -3492,11 +3605,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 }
 
 function hydrateUser(user) {
+  const aiMode = String(user.ai_mode || '').trim().toLowerCase() === 'auto' ? 'auto' : 'train';
   return {
     ...user,
     bot_enabled: user.bot_enabled === undefined || user.bot_enabled === null ? true : Boolean(user.bot_enabled),
     bot_paused: Boolean(user.bot_paused),
     needs_staff_review: Boolean(user.needs_staff_review),
+    ai_mode: aiMode,
+    ai_auto_paused: Boolean(user.ai_auto_paused),
     tags: parseJsonField(user.tags_json, []).filter((tag) => tag && tag.id),
     tags_json: undefined
   };
@@ -3720,7 +3836,11 @@ async function migrate(db) {
     ['bot_paused_at', 'TEXT'],
     ['bot_paused_by', 'TEXT'],
     ['staff_review_reason', 'TEXT'],
-    ['staff_review_at', 'TEXT']
+    ['staff_review_at', 'TEXT'],
+    ['ai_mode', "TEXT NOT NULL DEFAULT 'train'"],
+    ['ai_auto_paused', 'INTEGER NOT NULL DEFAULT 0'],
+    ['ai_mode_updated_at', 'TEXT'],
+    ['ai_mode_updated_by', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'telegram_users', column[0], column[1]);
   }

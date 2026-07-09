@@ -178,8 +178,7 @@ app.get('/api/contacts/:id', async (req, res) => {
     quickReplies: await store.listQuickReplies(),
     automationState: await store.getAutomationState(user.id),
     automationLogs: await store.listAutomationLogsForUser(user.id),
-    staffAiDraft: await store.getLatestStaffAiTrainingDraftForContact(user.id),
-    staffAiApprenticeMode: await store.getStaffAiApprenticeSettings()
+    staffAiDraft: await store.getLatestStaffAiTrainingDraftForContact(user.id)
   });
 });
 
@@ -459,6 +458,27 @@ app.patch('/api/settings/staff-ai-apprentice-mode', requireAdmin, async (req, re
   }
 });
 
+app.patch('/api/contacts/:id/ai-mode', async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const contact = await store.getUserProfile(contactId);
+    if (!contact) return res.status(404).json({ error: 'Contact not found.' });
+    const mode = String(req.body?.mode || req.body?.aiMode || '').trim().toLowerCase();
+    if (mode !== 'train' && mode !== 'auto') {
+      return res.status(400).json({ error: 'mode must be train or auto.' });
+    }
+    const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
+    const aiMode = await store.setContactAiMode(contactId, mode, actorName);
+    const updated = await store.getUserProfile(contactId);
+    io.emit('contact:changed', { contactId, userId: contactId });
+    io.emit('contact:ai-mode:changed', { contactId, aiMode });
+    io.emit('contacts:changed');
+    res.json({ contact: updated, aiMode });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.get('/api/payment-sync/status', async (req, res) => {
   res.json({ sync: await store.getPaymentSyncState() });
 });
@@ -667,9 +687,8 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
         });
         if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
           const autoBot = await store.getAutoRegistrationBotSettings();
-          const staffAiMode = await store.getStaffAiApprenticeSettings();
           if (autoBot.enabled) {
-            console.log(`[chatbot] legacy_automation_fallback_suppressed contact=${user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
+            console.log(`[chatbot] legacy_automation_fallback_suppressed contact=${user.id} ai_mode=${user.ai_mode || 'train'}`);
           }
         } else if (!enqueueResult.enqueued) {
           console.log(`[chatbot] bot job skipped reason=${enqueueResult.reason || 'inactive'} contact=${user.id}`);
@@ -702,9 +721,8 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
         });
         if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
           const autoBot = await store.getAutoRegistrationBotSettings();
-          const staffAiMode = await store.getStaffAiApprenticeSettings();
           if (autoBot.enabled && !isChatbotButtonAction(action)) {
-            console.log(`[chatbot] legacy_callback_fallback_suppressed contact=${user.id} action=${action} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
+            console.log(`[chatbot] legacy_callback_fallback_suppressed contact=${user.id} action=${action} ai_mode=${user.ai_mode || 'train'}`);
           }
         } else if (enqueueResult.enqueued) {
           console.log(`[chatbot] callback_received contact=${user.id} action=${action}`);
@@ -1063,6 +1081,9 @@ async function sendTelegramMessage(req, res) {
   const text = String(req.body.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Message text is required.' });
 
+  const replyUsed = String(req.body.replyUsed || '').trim().toLowerCase();
+  const isTrainingSend = replyUsed === 'good' || replyUsed === 'bad';
+
   // Staff override: pause bot for this contact so automations don't collide.
   if (!user.bot_paused) {
     try {
@@ -1072,6 +1093,16 @@ async function sendTelegramMessage(req, res) {
       });
     } catch (error) {
       console.warn('[chatbot] auto-pause on staff send failed:', error.message);
+    }
+  }
+
+  if (!isTrainingSend && user.ai_mode === 'auto' && !user.ai_auto_paused) {
+    try {
+      const aiMode = await store.pauseContactAiAuto(user.id, req.body.staffName || 'Staff');
+      console.log(`[support-ai] auto_paused_on_manual_send contact=${user.id} mode=${aiMode.mode}`);
+      io.emit('contact:ai-mode:changed', { contactId: user.id, aiMode });
+    } catch (error) {
+      console.warn('[support-ai] auto-pause on manual send failed:', error.message);
     }
   }
 

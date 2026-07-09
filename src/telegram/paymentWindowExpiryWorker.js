@@ -44,12 +44,6 @@ export async function processPaymentWindowExpiryTick({
       notifiedCount += 1;
       continue;
     }
-    const staffAiMode = await store.getStaffAiApprenticeSettings?.();
-    if (staffAiMode) {
-      console.log(`[chatbot] expiry_notification_suppressed contact=${window.contact_id} window=${window.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
-      notifiedCount += 1;
-      continue;
-    }
 
     await sendExpiryMessage({
       store,

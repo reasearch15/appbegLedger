@@ -48,8 +48,7 @@ export async function tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
 
   const autoBot = await store.getAutoRegistrationBotSettings();
   if (!autoBot.enabled) {
-    console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${contact.id}`);
-    return { enqueued: false, reason: 'bot_disabled' };
+    console.log(`[chatbot] registration_bot_disabled contact=${contact.id} (support AI jobs may still process)`);
   }
 
   if (!isBotActiveForContact(contact)) {
