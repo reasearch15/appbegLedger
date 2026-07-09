@@ -1,38 +1,41 @@
 import { queueBotReply } from './chatbotProcessor.js';
 
 export const REGISTRATION_PAYMENT_EXPIRY_MESSAGE = [
-  'Your 5-minute payment window has expired.',
+  '⏰ Your payment confirmation window has expired.',
   '',
-  'Please type Register to start again.'
+  'Your registration has been cancelled for your security.',
+  '',
+  'Please type **Register** to start the registration process again.'
 ].join('\n');
-
-const PAYMENT_WAIT_STEPS = new Set(['await_payment_done', 'first_deposit_amount']);
 
 export async function processPaymentWindowExpiryTick({
   store,
   io = null,
   sendExpiryMessage = queueBotReply
 }) {
-  const dueWindows = await store.listDueRegistrationPaymentWindows();
+  const windows = await store.listRegistrationPaymentWindowsForExpiryWorker();
   let expiredCount = 0;
+  let notifiedCount = 0;
 
-  for (const window of dueWindows) {
+  for (const window of windows) {
+    if (window.status === 'completed') continue;
+
     const expired = await store.expireRegistrationPaymentWindowIfDue(window.id);
-    if (!expired) continue;
+    if (expired) {
+      expiredCount += 1;
+      console.log(`[chatbot] payment_window_expired contact=${window.contact_id} window=${window.id}`);
+    }
 
-    expiredCount += 1;
-    console.log(`[chatbot] payment_window_expired contact=${window.contact_id} window=${window.id}`);
+    const claimed = await store.claimRegistrationPaymentWindowExpiryNotification(window.id);
+    if (!claimed) continue;
 
     const contact = await store.getUserProfile(window.contact_id);
     if (!contact) continue;
 
     const automationState = await store.getAutomationState(window.contact_id);
-    const shouldResetFlow = automationState?.current_flow === 'bot_registration'
-      && PAYMENT_WAIT_STEPS.has(automationState?.current_step);
-
-    if (shouldResetFlow) {
+    if (automationState?.current_flow === 'bot_registration') {
       await store.resetRegistrationFlowToIdle(window.contact_id, 'PaymentWindowExpiry');
-      console.log(`[chatbot] registration_flow_auto_stopped contact=${window.contact_id} window=${window.id}`);
+      console.log(`[chatbot] registration_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
     }
 
     await sendExpiryMessage({
@@ -41,7 +44,8 @@ export async function processPaymentWindowExpiryTick({
       text: REGISTRATION_PAYMENT_EXPIRY_MESSAGE,
       bot: globalThis.telegramBot || null
     });
-    console.log(`[chatbot] expiry_message_queued contact=${window.contact_id} window=${window.id}`);
+    notifiedCount += 1;
+    console.log(`[chatbot] expiry_notification_sent contact=${window.contact_id} window=${window.id}`);
 
     if (io) {
       io.emit('message:new', { userId: contact.id, contactId: contact.id, telegramId: contact.telegram_id });
@@ -50,7 +54,7 @@ export async function processPaymentWindowExpiryTick({
     }
   }
 
-  return { checked: dueWindows.length, expired: expiredCount };
+  return { checked: windows.length, expired: expiredCount, notified: notifiedCount };
 }
 
 export function startPaymentWindowExpiryWorker({ store, io, pollMs = Number(process.env.PAYMENT_WINDOW_EXPIRY_POLL_MS || 30000) } = {}) {

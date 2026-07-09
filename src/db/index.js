@@ -2547,29 +2547,36 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
   }
 
-  async function expireRegistrationPaymentWindow(windowId) {
+  async function expireRegistrationPaymentWindow(windowId, { suppressNotification = false } = {}) {
     const now = nowIso();
     const result = await db.prepare(`
       UPDATE registration_payment_windows
-      SET status = 'expired', updated_at = ?
+      SET status = 'expired',
+          updated_at = ?,
+          expiry_notified_at = CASE WHEN ? THEN COALESCE(expiry_notified_at, ?) ELSE expiry_notified_at END
       WHERE id = ? AND status = 'active'
-    `).run(now, windowId);
+    `).run(now, suppressNotification ? 1 : 0, now, windowId);
     if (!result.changes) {
       return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
     }
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
   }
 
-  async function listDueRegistrationPaymentWindows(limit = 100) {
+  async function listRegistrationPaymentWindowsForExpiryWorker(limit = 100) {
     const now = nowIso();
     return await db.prepare(`
       SELECT *
       FROM registration_payment_windows
-      WHERE status = 'active'
-        AND expires_at <= ?
+      WHERE expires_at <= ?
+        AND status IN ('active', 'expired')
+        AND (status = 'active' OR expiry_notified_at IS NULL)
       ORDER BY expires_at ASC, id ASC
       LIMIT ?
     `).all(now, limit);
+  }
+
+  async function listDueRegistrationPaymentWindows(limit = 100) {
+    return await listRegistrationPaymentWindowsForExpiryWorker(limit);
   }
 
   async function expireRegistrationPaymentWindowIfDue(windowId) {
@@ -2579,6 +2586,20 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SET status = 'expired', updated_at = ?
       WHERE id = ?
         AND status = 'active'
+        AND expires_at <= ?
+    `).run(now, windowId, now);
+    if (!result.changes) return null;
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
+  async function claimRegistrationPaymentWindowExpiryNotification(windowId) {
+    const now = nowIso();
+    const result = await db.prepare(`
+      UPDATE registration_payment_windows
+      SET expiry_notified_at = ?
+      WHERE id = ?
+        AND status = 'expired'
+        AND expiry_notified_at IS NULL
         AND expires_at <= ?
     `).run(now, windowId, now);
     if (!result.changes) return null;
@@ -2723,7 +2744,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     completeRegistrationPaymentWindow,
     expireRegistrationPaymentWindow,
     listDueRegistrationPaymentWindows,
+    listRegistrationPaymentWindowsForExpiryWorker,
     expireRegistrationPaymentWindowIfDue,
+    claimRegistrationPaymentWindowExpiryNotification,
     resetRegistrationFlowToIdle
   };
 }
@@ -3102,6 +3125,7 @@ async function migrate(db) {
         CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
       expires_at TEXT NOT NULL,
       completed_at TEXT,
+      expiry_notified_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
@@ -3113,6 +3137,7 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_method_id', 'INTEGER');
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_qr_code_id', 'INTEGER');
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_display_name', 'TEXT');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'expiry_notified_at', 'TEXT');
 
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order ON payment_methods(is_active, display_order ASC, id ASC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC)');

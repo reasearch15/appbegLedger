@@ -55,6 +55,8 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS payment_qr_code_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL;
     ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS payment_display_name TEXT;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS expiry_notified_at TEXT;
   `);
   await driver.exec(`
     CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status

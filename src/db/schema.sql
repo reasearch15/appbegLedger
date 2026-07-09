@@ -443,6 +443,7 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
     CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
   expires_at TEXT NOT NULL,
   completed_at TEXT,
+  expiry_notified_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,

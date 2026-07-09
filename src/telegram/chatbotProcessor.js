@@ -221,7 +221,7 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
     }
 
     if (decision.expirePaymentWindowId) {
-      await store.expireRegistrationPaymentWindow(decision.expirePaymentWindowId);
+      await store.expireRegistrationPaymentWindow(decision.expirePaymentWindowId, { suppressNotification: true });
     }
 
     if (decision.completePaymentWindowId) {
