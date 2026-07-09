@@ -3,6 +3,7 @@ import { renderAvatar as avatar } from './avatarUtils.js';
 import { renderRegistrationModal, readRegistrationModalForm } from './registrationModal.js';
 import { createPlayersController } from './playersRegistry.js';
 import { createPaymentInfoController } from './paymentInfo.js';
+import { createAppBegPlayersController } from './appbegPlayersLedger.js';
 import {
   renderContactOverview,
   createEmptyWizardForm,
@@ -92,11 +93,25 @@ let state = {
   ledgerUsers: [],
   ledgerUsersLoading: false,
   ledgerUserForm: null,
-  ledgerUserSaving: false
+  ledgerUserSaving: false,
+  appbegPlayers: [],
+  appbegPlayersLoading: false,
+  appbegPlayersError: null,
+  appbegPlayersConfigured: null,
+  appbegPlayersPagination: null,
+  appbegPlayersFilters: { statuses: [], coadmins: [] },
+  appbegPlayersQuery: '',
+  appbegPlayersStatus: '',
+  appbegPlayersCoadmin: '',
+  appbegPlayersSort: 'created_at',
+  appbegPlayersDir: 'desc',
+  appbegPlayersPage: 1,
+  appbegPlayersLimit: 50
 };
 
 let playersController;
 let paymentInfoController;
+let appbegPlayersController;
 
 let composerEventsBound = false;
 let sendingMessage = false;
@@ -341,6 +356,16 @@ playersController = createPlayersController({
 });
 
 paymentInfoController = createPaymentInfoController({
+  api,
+  getState: () => state,
+  setState: (patch) => {
+    state = { ...state, ...patch };
+  },
+  render,
+  fmtDateTime
+});
+
+appbegPlayersController = createAppBegPlayersController({
   api,
   getState: () => state,
   setState: (patch) => {
@@ -1767,6 +1792,7 @@ function render() {
   const items = [
     { id: 'contacts', label: 'Contacts', icon: '💬' },
     { id: 'players', label: 'Players', icon: '👥' },
+    { id: 'appbeg-players', label: 'AppBeg Players', icon: '📊' },
     { id: 'payments', label: 'Payments', icon: '💳' },
     { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
     { id: 'settings', label: 'Settings', icon: '⚙️', adminOnly: true }
@@ -1805,6 +1831,8 @@ function render() {
     ? paymentsWorkspace()
     : state.section === 'payment-info'
       ? paymentInfoController.renderPaymentInfoWorkspace(state)
+    : state.section === 'appbeg-players'
+      ? appbegPlayersController.renderAppBegPlayersWorkspace(state)
     : state.section === 'players'
       ? playersController.renderPlayersWorkspace(state, { avatar, fmtDateTime })
       : state.section === 'settings'
@@ -1819,6 +1847,9 @@ function render() {
   }
   if (state.section === 'payment-info') {
     paymentInfoController.bindPaymentInfoEvents(app);
+  }
+  if (state.section === 'appbeg-players') {
+    appbegPlayersController.bindAppBegPlayersEvents(app);
   }
   scrollChatToBottom();
 }
@@ -1984,6 +2015,9 @@ function bindEvents() {
         state.paymentInfoSuccess = null;
         state.paymentInfoView = 'list';
         await paymentInfoController.refreshPaymentMethods();
+      }
+      if (state.section === 'appbeg-players') {
+        await appbegPlayersController.refreshAppBegPlayers();
       }
       render();
     });

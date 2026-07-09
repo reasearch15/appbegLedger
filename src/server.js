@@ -26,6 +26,8 @@ import { createSessionMiddleware, isAuthExemptPath, isAuthenticated, requireAuth
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
+import { registerAppBegPlayerRoutes } from './routes/appbegPlayers.js';
+import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -43,6 +45,7 @@ const io = new SocketIOServer(server, {
   cors: { origin: '*' }
 });
 let store;
+let appbegStore;
 
 async function initStore() {
   const dbConfig = resolveDatabaseConfig();
@@ -59,7 +62,38 @@ async function initStore() {
   }
 }
 
+async function initAppBegStore() {
+  try {
+    appbegStore = await createAppBegStore();
+    if (appbegStore.configured) {
+      try {
+        const url = new URL(process.env.APPBEG_DATABASE_URL);
+        console.log(`AppBeg database: postgres @ ${url.hostname}:${url.port || '5432'}${url.pathname}`);
+      } catch {
+        console.log('AppBeg database: postgres (read-only)');
+      }
+    } else {
+      console.log('AppBeg database: not configured (APPBEG_DATABASE_URL missing)');
+    }
+  } catch (error) {
+    console.error('[appbeg-db] failed to initialize read-only connection:', error.message);
+    appbegStore = {
+      configured: false,
+      async listPlayers() {
+        throw new Error(error.message || 'AppBeg database connection failed.');
+      },
+      async getFilterOptions() {
+        throw new Error(error.message || 'AppBeg database connection failed.');
+      },
+      async exportPlayersCsv() {
+        throw new Error(error.message || 'AppBeg database connection failed.');
+      }
+    };
+  }
+}
+
 await initStore();
+await initAppBegStore();
 
 const sessionMiddleware = createSessionMiddleware();
 
@@ -99,6 +133,7 @@ app.use('/media', (req, res, next) => {
 
 registerHealthRoutes(app, { store });
 registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
+registerAppBegPlayerRoutes(app, { appbegStore });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });
@@ -1021,7 +1056,8 @@ async function shutdownWorkers(signal = 'shutdown') {
     stopPaymentTelegramSync(),
     globalThis.chatbotWorker?.stop?.(),
     globalThis.paymentWindowExpiryWorker?.stop?.(),
-    Promise.resolve(globalThis.telegramBot?.stop?.(signal))
+    Promise.resolve(globalThis.telegramBot?.stop?.(signal)),
+    appbegStore?.close?.()
   ]);
 }
 
