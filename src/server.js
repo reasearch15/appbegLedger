@@ -11,9 +11,9 @@ import { resolveDatabaseConfig } from './db/config.js';
 import { startTelegramListener } from './telegram/bot.js';
 import { renderMenu } from './telegram/menuEngine.js';
 import { startRegistrationFlow } from './telegram/automationEngine.js';
-import { processAutomationActionForContact, processAutomationForContact } from './telegram/processAutomation.js';
 import { enqueueChatbotJob } from './telegram/chatbotProcessor.js';
-import { isBotActiveForContact, isChatbotButtonAction } from './telegram/chatbotEngine.js';
+import { isChatbotButtonAction } from './telegram/chatbotEngine.js';
+import { tryEnqueueRegistrationBotJob } from './telegram/autoRegistrationBot.js';
 import { startChatbotWorker } from './telegram/chatbotWorker.js';
 import { startPaymentWindowExpiryWorker } from './telegram/paymentWindowExpiryWorker.js';
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
@@ -177,7 +177,9 @@ app.get('/api/contacts/:id', async (req, res) => {
     tags: await store.listTags(),
     quickReplies: await store.listQuickReplies(),
     automationState: await store.getAutomationState(user.id),
-    automationLogs: await store.listAutomationLogsForUser(user.id)
+    automationLogs: await store.listAutomationLogsForUser(user.id),
+    staffAiDraft: await store.getLatestStaffAiTrainingDraftForContact(user.id),
+    staffAiApprenticeMode: await store.getStaffAiApprenticeSettings()
   });
 });
 
@@ -266,7 +268,8 @@ function parseCoadminRequestBody(body = {}) {
     coadmin_code: body.coadmin_code ?? body.coadminCode ?? '',
     appbeg_coadmin_uid: body.appbeg_coadmin_uid ?? body.appbegCoadminUid ?? '',
     telegram_account_username: body.telegram_account_username ?? body.telegramAccountUsername ?? '',
-    telegram_account_id: body.telegram_account_id ?? body.telegramAccountId ?? ''
+    telegram_account_id: body.telegram_account_id ?? body.telegramAccountId ?? '',
+    staff_ai_apprentice_mode_enabled: body.staff_ai_apprentice_mode_enabled ?? body.staffAiApprenticeModeEnabled
   };
 }
 
@@ -292,6 +295,15 @@ async function handleCoadminSettingsSave(req, res) {
   try {
     const patch = parseCoadminRequestBody(req.body);
     const actorName = req.body.staff_name || req.body.staffName || 'Staff';
+    if (patch.staff_ai_apprentice_mode_enabled !== undefined) {
+      await store.setStaffAiApprenticeModeEnabled(
+        patch.staff_ai_apprentice_mode_enabled === true ||
+          patch.staff_ai_apprentice_mode_enabled === 'true' ||
+          patch.staff_ai_apprentice_mode_enabled === 1,
+        actorName
+      );
+      delete patch.staff_ai_apprentice_mode_enabled;
+    }
     const { settings, backfill } = await store.updateCoadminSettings(patch, actorName, {
       applyToExisting: req.body.apply_to_existing !== false && req.body.applyToExisting !== false
     });
@@ -416,8 +428,34 @@ app.patch('/api/contacts/:id/registration-status', async (req, res) => {
 app.get('/api/telegram-account-sync/status', async (req, res) => {
   res.json({
     sync: await store.getTelegramAccountSyncState(),
-    logs: await store.listAccountSyncLogs(20)
+    logs: await store.listAccountSyncLogs(20),
+    autoRegistrationBot: await store.getAutoRegistrationBotSettings()
   });
+});
+
+app.patch('/api/auto-registration-bot', requireAdmin, async (req, res) => {
+  try {
+    const enabled = req.body?.enabled === true || req.body?.enabled === 'true' || req.body?.enabled === 1;
+    const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
+    const autoRegistrationBot = await store.setAutoRegistrationBotEnabled(enabled, actorName);
+    io.emit('auto-registration-bot:changed', autoRegistrationBot);
+    res.json({ autoRegistrationBot });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.patch('/api/settings/staff-ai-apprentice-mode', requireAdmin, async (req, res) => {
+  try {
+    const enabled = req.body?.enabled === true || req.body?.enabled === 'true' || req.body?.enabled === 1;
+    const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
+    const staffAiApprenticeMode = await store.setStaffAiApprenticeModeEnabled(enabled, actorName);
+    io.emit('settings:changed');
+    io.emit('staff-ai-apprentice-mode:changed', staffAiApprenticeMode);
+    res.json({ staffAiApprenticeMode });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.get('/api/payment-sync/status', async (req, res) => {
@@ -612,29 +650,28 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
         console.log(`[chatbot] inbound message saved contact=${user.id} telegram_message_id=${payload.telegramMessageId || 'n/a'} text_len=${String(payload.text || '').length}`);
-        if (CHATBOT_ENABLED && isBotActiveForContact(user)) {
-          const messageId = await store.findLatestIncomingMessageId(user.id, payload.telegramMessageId || null);
-          await enqueueChatbotJob(store, {
+        const messageId = await store.findLatestIncomingMessageId(user.id, payload.telegramMessageId || null);
+        const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+          CHATBOT_ENABLED,
+          contact: user,
+          sentAt: payload.sentAt || payload.messageDate || null,
+          enqueueParams: {
             contactId: user.id,
             telegramUserId: user.telegram_id,
             messageId,
             incomingTelegramMessageId: payload.telegramMessageId || null,
             jobType: 'inbound_message',
             inputText: payload.text
-          });
-        } else if (!user.bot_paused && !user.needs_staff_review) {
-          console.log(`[chatbot] bot job skipped reason=legacy_automation_fallback contact=${user.id}`);
-          await processAutomationForContact({
-            store,
-            user,
-            message: { text: payload.text, message_id: payload.telegramMessageId },
-            inserted: true,
-            rootDir,
-            bot: globalThis.telegramBot,
-            io
-          });
-        } else {
-          console.log(`[chatbot] bot job skipped reason=${user.needs_staff_review ? 'needs_staff_review' : 'bot_paused'} contact=${user.id}`);
+          }
+        });
+        if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
+          const autoBot = await store.getAutoRegistrationBotSettings();
+          const staffAiMode = await store.getStaffAiApprenticeSettings();
+          if (autoBot.enabled) {
+            console.log(`[chatbot] legacy_automation_fallback_suppressed contact=${user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
+          }
+        } else if (!enqueueResult.enqueued) {
+          console.log(`[chatbot] bot job skipped reason=${enqueueResult.reason || 'inactive'} contact=${user.id}`);
         }
       }
     }
@@ -643,24 +680,33 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
       const user = await store.getUserProfile(payload.contactId);
       if (user) {
         const action = payload.action;
-        if (CHATBOT_ENABLED && isBotActiveForContact(user) && isChatbotButtonAction(action)) {
-          console.log(`[chatbot] callback received contact=${user.id} action=${action}`);
-          await enqueueChatbotJob(store, {
+        const callbackMessageId = payload.messageId || payload.telegramMessageId || null;
+        let callbackSentAt = payload.sentAt || null;
+        if (!callbackSentAt && callbackMessageId) {
+          callbackSentAt = await store.getIncomingMessageSentAt(user.id, callbackMessageId);
+        }
+        const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+          CHATBOT_ENABLED,
+          contact: user,
+          sentAt: callbackSentAt,
+          requireChatbotAction: true,
+          enqueueParams: {
             contactId: user.id,
             telegramUserId: user.telegram_id,
+            incomingTelegramMessageId: callbackMessageId,
             jobType: 'callback_action',
             inputText: '',
             action
-          });
-        } else if (!user.bot_paused && !user.needs_staff_review) {
-          await processAutomationActionForContact({
-            store,
-            user,
-            action,
-            rootDir,
-            bot: globalThis.telegramBot,
-            io
-          });
+          }
+        });
+        if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
+          const autoBot = await store.getAutoRegistrationBotSettings();
+          const staffAiMode = await store.getStaffAiApprenticeSettings();
+          if (autoBot.enabled && !isChatbotButtonAction(action)) {
+            console.log(`[chatbot] legacy_callback_fallback_suppressed contact=${user.id} action=${action} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
+          }
+        } else if (enqueueResult.enqueued) {
+          console.log(`[chatbot] callback_received contact=${user.id} action=${action}`);
         }
       }
     }
@@ -988,6 +1034,27 @@ app.patch('/api/contacts/:id/tags', async (req, res) => {
   res.json({ contact });
 });
 
+app.post('/api/contacts/:id/staff-ai-draft/feedback', async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const contact = await store.getUserProfile(contactId);
+    if (!contact) return res.status(404).json({ error: 'Contact not found.' });
+    const draftId = Number(req.body.trainingExampleId || req.body.draftId || 0);
+    if (!draftId) return res.status(400).json({ error: 'trainingExampleId is required.' });
+    const reason = String(req.body.reason || '').trim();
+    const draft = await store.markStaffAiTrainingFeedback(draftId, {
+      contactId,
+      reason,
+      outcome: req.body.outcome || 'feedback'
+    });
+    if (!draft) return res.status(404).json({ error: 'AI draft not found.' });
+    io.emit('contact:changed', { contactId, userId: contactId });
+    res.json({ draft });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 async function sendTelegramMessage(req, res) {
   const user = await store.getUserProfile(Number(req.params.id));
   if (!user) return res.status(404).json({ error: 'User not found.' });
@@ -1094,6 +1161,20 @@ async function sendTelegramMessage(req, res) {
       response,
       messageId: storedMessageId
     });
+
+    const trainingExampleId = req.body.trainingExampleId || req.body.staffAiTrainingExampleId || null;
+    const trainingExample = await store.completeStaffAiTrainingExampleOnSend({
+      trainingExampleId,
+      contactId: user.id,
+      telegramUserId: user.telegram_id,
+      finalStaffReply: text,
+      staffUserId: req.ledgerUser?.id || null,
+      staffUsername: req.ledgerUser?.username || req.body.staffName || 'Staff',
+      staffFeedbackReason: req.body.staffFeedbackReason || null
+    });
+    if (trainingExample) {
+      response.trainingExample = trainingExample;
+    }
 
     io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
     io.emit('contacts:changed');

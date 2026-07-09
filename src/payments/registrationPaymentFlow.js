@@ -37,6 +37,23 @@ export async function continueBotRegistrationAfterPayment(store, {
   };
 
   await store.updateRegistrationInfo(contactId, info, actorName);
+
+  const autoBot = await store.getAutoRegistrationBotSettings();
+  if (!autoBot.enabled) {
+    console.log(`[payment-router] registration_continued_after_payment_match skipped reason=auto_registration_bot_disabled contact=${contactId} window=${windowId}`);
+    if (paymentEventId) {
+      await store.logPaymentRouting(paymentEventId, 'registration_payment_matched_bot_paused', 'Payment matched but auto registration bot is disabled; no automatic reply sent.', {
+        contactId,
+        windowId
+      });
+    }
+    if (io) {
+      io.emit('contacts:changed');
+      io.emit('contact:changed', { contactId, userId: contactId });
+    }
+    return { contact, window, botSkipped: true };
+  }
+
   await store.updateAutomationState(contactId, {
     currentFlow: 'bot_registration',
     currentStep: 'username',

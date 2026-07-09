@@ -3,7 +3,8 @@ import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
 import { handleMenuAction, initialScreenForUser, renderMenu } from './menuEngine.js';
 import { processAutomationActionForContact, processAutomationForContact } from './processAutomation.js';
 import { enqueueChatbotJob } from './chatbotProcessor.js';
-import { isBotActiveForContact, isChatbotButtonAction } from './chatbotEngine.js';
+import { isChatbotButtonAction } from './chatbotEngine.js';
+import { tryEnqueueRegistrationBotJob } from './autoRegistrationBot.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -25,16 +26,37 @@ export function startTelegramListener({ token, store, io }) {
 
       const action = ctx.callbackQuery.data;
       const fresh = await store.getUserProfile(user.id);
-      if (CHATBOT_ENABLED && isBotActiveForContact(fresh) && isChatbotButtonAction(action)) {
-        await enqueueChatbotJob(store, {
+      const callbackMessageId = ctx.callbackQuery.message?.message_id || null;
+      const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+        CHATBOT_ENABLED,
+        contact: fresh,
+        sentAt: ctx.callbackQuery.message?.date
+          ? new Date(ctx.callbackQuery.message.date * 1000).toISOString()
+          : null,
+        requireChatbotAction: true,
+        enqueueParams: {
           contactId: user.id,
           telegramUserId: user.telegram_id,
+          incomingTelegramMessageId: callbackMessageId,
           jobType: 'callback_action',
           inputText: '',
           action
-        });
+        }
+      });
+      if (enqueueResult.enqueued) {
         io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
         io.emit('contacts:changed');
+        return;
+      }
+
+      const autoBot = await store.getAutoRegistrationBotSettings();
+      if (!autoBot.enabled) {
+        return;
+      }
+
+      const staffAiMode = await store.getStaffAiApprenticeSettings?.();
+      if (staffAiMode) {
+        console.log(`[chatbot] callback_auto_send_suppressed contact=${user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
         return;
       }
 
@@ -83,21 +105,40 @@ export function startTelegramListener({ token, store, io }) {
       }
 
       const fresh = await store.getUserProfile(result.user.id);
-      if (CHATBOT_ENABLED && result.inserted && isBotActiveForContact(fresh)) {
-        const messageId = await store.findLatestIncomingMessageId(result.user.id, ctx.message.message_id);
-        await enqueueChatbotJob(store, {
+      const messageSentAt = ctx.message?.date
+        ? new Date(ctx.message.date * 1000).toISOString()
+        : null;
+      const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+        CHATBOT_ENABLED,
+        contact: fresh,
+        sentAt: messageSentAt,
+        enqueueParams: {
           contactId: result.user.id,
           telegramUserId: result.user.telegram_id,
-          messageId,
+          messageId: await store.findLatestIncomingMessageId(result.user.id, ctx.message.message_id),
           incomingTelegramMessageId: ctx.message.message_id,
           jobType: 'inbound_message',
           inputText: ctx.message.text || ctx.message.caption || ''
-        });
+        }
+      });
+      if (enqueueResult.enqueued) {
         return;
       }
 
       // Staff override / handoff: do not auto-reply while bot is paused.
       if (fresh?.bot_paused || fresh?.needs_staff_review) {
+        return;
+      }
+
+      const autoBot = await store.getAutoRegistrationBotSettings();
+      if (!autoBot.enabled) {
+        console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${result.user.id}`);
+        return;
+      }
+
+      const staffAiMode = await store.getStaffAiApprenticeSettings?.();
+      if (staffAiMode) {
+        console.log(`[chatbot] direct_auto_send_suppressed contact=${result.user.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
         return;
       }
 

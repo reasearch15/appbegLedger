@@ -143,6 +143,41 @@ export async function migratePostgres(driver) {
     CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
   `);
 
+  await driver.exec(`
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_by TEXT;
+    CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
+      id BIGSERIAL PRIMARY KEY,
+      contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+      telegram_user_id TEXT,
+      incoming_message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+      customer_message TEXT,
+      conversation_context TEXT,
+      detected_intent TEXT,
+      detected_entities_json TEXT NOT NULL DEFAULT '{}',
+      ai_draft_reply TEXT,
+      final_staff_reply TEXT,
+      staff_user_id TEXT,
+      staff_username TEXT,
+      was_edited BOOLEAN NOT NULL DEFAULT FALSE,
+      edit_distance_percent DOUBLE PRECISION,
+      staff_feedback_reason TEXT,
+      outcome TEXT NOT NULL DEFAULT 'drafted',
+      language TEXT,
+      sentiment TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      sent_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created
+      ON staff_ai_training_examples(contact_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created
+      ON staff_ai_training_examples(outcome, created_at DESC);
+  `);
+
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);
   if (applied?.ok) {
     return;
@@ -206,8 +241,20 @@ export async function migratePostgres(driver) {
   await driver.run('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, NOW()::TEXT) ON CONFLICT (id) DO NOTHING');
 
   await driver.exec(`
-    ALTER TABLE payment_events
-      ADD COLUMN IF NOT EXISTS routing_reason TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS auto_registration_bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS auto_registration_bot_enabled_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS auto_registration_bot_updated_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS auto_registration_bot_updated_by TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_by TEXT;
   `);
 
   await driver.exec(`

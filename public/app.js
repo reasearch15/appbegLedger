@@ -58,6 +58,8 @@ let state = {
   timeline: [],
   automationState: null,
   automationLogs: [],
+  staffAiDraft: null,
+  staffAiApprenticeMode: { enabled: true },
   allTags: [],
   quickReplies: [],
   query: '',
@@ -100,6 +102,8 @@ let state = {
   paymentInfoError: null,
   paymentInfoSuccess: null,
   paymentActionBusy: false,
+  autoRegistrationBot: { enabled: true, enabled_at: null },
+  autoRegistrationBotSaving: false,
   registrationWindow: null,
   authUser: null,
   ledgerUsers: [],
@@ -216,6 +220,8 @@ function cacheContactDetail(contactId, detail) {
       timeline: detail.timeline || [],
       automationState: detail.automationState,
       automationLogs: detail.automationLogs || [],
+      staffAiDraft: detail.staffAiDraft || null,
+      staffAiApprenticeMode: detail.staffAiApprenticeMode || { enabled: true },
       tags: detail.tags || [],
       quickReplies: detail.quickReplies || []
     }
@@ -241,6 +247,8 @@ function applyContactDetail(detail) {
   state.timeline = detail.timeline || [];
   state.automationState = detail.automationState;
   state.automationLogs = detail.automationLogs || [];
+  state.staffAiDraft = detail.staffAiDraft || null;
+  state.staffAiApprenticeMode = detail.staffAiApprenticeMode || { enabled: true };
   state.allTags = detail.tags || [];
   state.quickReplies = detail.quickReplies || [];
   state.contactLoading = false;
@@ -874,7 +882,8 @@ function readCoadminFormValues() {
     coadmin_code: document.querySelector('#coadminCode')?.value?.trim() ?? state.coadminSettings.coadmin_code ?? '',
     appbeg_coadmin_uid: document.querySelector('#appbegCoadminUid')?.value?.trim() ?? state.coadminSettings.appbeg_coadmin_uid ?? '',
     telegram_account_username: document.querySelector('#telegramAccountUsername')?.value?.trim() ?? state.coadminSettings.telegram_account_username ?? '',
-    telegram_account_id: document.querySelector('#telegramAccountId')?.value?.trim() ?? state.coadminSettings.telegram_account_id ?? ''
+    telegram_account_id: document.querySelector('#telegramAccountId')?.value?.trim() ?? state.coadminSettings.telegram_account_id ?? '',
+    staff_ai_apprentice_mode_enabled: document.querySelector('#staffAiApprenticeMode')?.checked ?? state.coadminSettings.staff_ai_apprentice_mode_enabled ?? true
   };
 }
 
@@ -928,6 +937,7 @@ async function refreshSyncStatus({ force = false, reason = 'manual' } = {}) {
     const syncPayload = await api('/api/telegram-account-sync/status');
     state.sync = syncPayload.sync || syncPayload;
     state.syncLogs = syncPayload.logs || [];
+    state.autoRegistrationBot = syncPayload.autoRegistrationBot || state.autoRegistrationBot;
     lastSyncStatusRefreshAt = Date.now();
   })();
 
@@ -1107,12 +1117,33 @@ function syncStatus() {
   const sync = state.sync || {};
   const accountLabel = sync.account_username ? `@${sync.account_username}` : 'account';
   const latestLog = (state.syncLogs || [])[0];
+  const bot = state.autoRegistrationBot || {};
+  const botEnabled = bot.enabled !== false;
+  const botStatusClass = botEnabled ? 'enabled' : 'disabled';
+  const botStatusLabel = botEnabled ? '🟢 Enabled' : '🔴 Disabled';
   return `
     <div class="sync-status-wrap">
       <div class="sync-status ${escapeHtml(sync.status || 'disabled')}">
         <span class="sync-dot"></span>
         <span>${escapeHtml(sync.status || 'disabled')}</span>
-        <span class="subtle">${escapeHtml(accountLabel)} · ${Number(sync.imported_contacts || 0)} contacts / ${Number(sync.imported_messages || 0)} messages</span>
+        <span class="subtle">Connected ${escapeHtml(accountLabel)} · ${Number(sync.imported_contacts || 0)} contacts / ${Number(sync.imported_messages || 0)} messages</span>
+      </div>
+      <div class="auto-registration-bot-status">
+        <div class="auto-registration-bot-copy">
+          <div class="auto-registration-bot-title">Auto Registration Bot</div>
+          <div class="auto-registration-bot-pill ${botStatusClass}">${botStatusLabel}</div>
+        </div>
+        ${isAdmin() ? `
+          <label class="auto-registration-bot-toggle">
+            <input
+              type="checkbox"
+              id="autoRegistrationBotToggle"
+              ${botEnabled ? 'checked' : ''}
+              ${state.autoRegistrationBotSaving ? 'disabled' : ''}
+            />
+            <span>${botEnabled ? 'Disable bot' : 'Enable bot'}</span>
+          </label>
+        ` : ''}
       </div>
       ${latestLog ? `<div class="sync-log-preview subtle">${escapeHtml(latestLog.message)}</div>` : ''}
     </div>
@@ -1248,11 +1279,90 @@ function quickReplyBar() {
   `;
 }
 
+function staffAiSuggestedReplyPanel() {
+  if (!state.contact) return '';
+  const mode = state.staffAiApprenticeMode || { enabled: true };
+  const draft = state.staffAiDraft;
+  if (!mode.enabled) {
+    return `
+      <section class="ai-suggested-reply-panel is-muted">
+        <div class="ai-suggested-header">
+          <div>
+            <div class="card-title">AI Suggested Reply</div>
+            <div class="subtle">Apprentice mode is OFF. Manual replies only.</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+  if (!draft?.ai_draft_reply) {
+    return `
+      <section class="ai-suggested-reply-panel is-empty">
+        <div class="ai-suggested-header">
+          <div>
+            <div class="card-title">AI Suggested Reply</div>
+            <div class="subtle">Waiting for the next customer message draft.</div>
+          </div>
+          <span class="badge">Apprentice</span>
+        </div>
+      </section>
+    `;
+  }
+  const feedbackButtons = [
+    ['wrong_intent', 'Mark Wrong Intent'],
+    ['needs_staff', 'Needs Staff'],
+    ['too_formal', 'Too Formal'],
+    ['too_long', 'Too Long'],
+    ['wrong_info', 'Wrong Info'],
+    ['better_wording', 'Better Wording']
+  ];
+  return `
+    <section class="ai-suggested-reply-panel">
+      <div class="ai-suggested-header">
+        <div>
+          <div class="card-title">AI Suggested Reply</div>
+          <div class="subtle">
+            ${draft.detected_intent ? `Intent: ${escapeHtml(draft.detected_intent)} · ` : ''}
+            ${draft.created_at ? fmtDateTime(draft.created_at) : 'Private draft'}
+          </div>
+        </div>
+        <span class="badge">Apprentice</span>
+      </div>
+      ${draft.customer_message ? `
+        <div class="ai-context-block">
+          <span>Customer</span>
+          <p>${escapeHtml(draft.customer_message)}</p>
+        </div>
+      ` : ''}
+      ${draft.conversation_context ? `
+        <details class="ai-context-details">
+          <summary>Conversation context</summary>
+          <pre>${escapeHtml(draft.conversation_context)}</pre>
+        </details>
+      ` : ''}
+      <textarea id="aiSuggestedReplyText" class="ai-suggested-text">${escapeHtml(draft.ai_draft_reply)}</textarea>
+      <div class="ai-suggested-actions">
+        <button type="button" class="button secondary small" data-ai-draft-action="use">Use Reply</button>
+        <button type="button" class="button secondary small" data-ai-draft-action="edit">Edit</button>
+        <button type="button" class="button small" data-ai-draft-action="send">Send</button>
+        <button type="button" class="button secondary small" data-ai-draft-action="save-training">Save as Training Data</button>
+        <button type="button" class="button secondary small" data-ai-draft-action="regenerate">Regenerate</button>
+      </div>
+      <div class="ai-feedback-actions">
+        ${feedbackButtons.map(([reason, label]) => `
+          <button type="button" class="quick-reply" data-ai-feedback="${reason}">${escapeHtml(label)}</button>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function composer() {
   if (!state.contact) return '';
   const disabled = sendingMessage ? 'disabled' : '';
   return `
     <form class="composer" id="sendForm">
+      ${staffAiSuggestedReplyPanel()}
       ${quickReplyBar()}
       <div class="composer-row">
         <textarea id="messageText" placeholder="Write a Telegram message" ${disabled}>${escapeHtml(state.draft)}</textarea>
@@ -1888,6 +1998,18 @@ function settingsWorkspace() {
               <span>Telegram Account ID</span>
               <input id="telegramAccountId" value="${escapeHtml(settings.telegram_account_id || '')}" placeholder="Numeric Telegram user ID" />
             </label>
+            <div class="form-section-label">Staff AI</div>
+            <label class="settings-toggle-row">
+              <input
+                id="staffAiApprenticeMode"
+                type="checkbox"
+                ${settings.staff_ai_apprentice_mode_enabled !== false ? 'checked' : ''}
+              />
+              <span>
+                <strong>AI Apprentice Mode</strong>
+                <small>AI drafts privately. Staff reviews and sends every Telegram reply.</small>
+              </span>
+            </label>
             <div class="settings-meta subtle">
               Last updated ${settings.updated_at ? fmtDateTime(settings.updated_at) : 'never'}
               ${settings.updated_by ? ` by ${escapeHtml(settings.updated_by)}` : ''}
@@ -2339,6 +2461,26 @@ function bindEvents() {
     render();
   });
 
+  document.querySelector('#autoRegistrationBotToggle')?.addEventListener('change', async (event) => {
+    const enabled = Boolean(event.target.checked);
+    state.autoRegistrationBotSaving = true;
+    render();
+    try {
+      const payload = await api('/api/auto-registration-bot', {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled })
+      });
+      state.autoRegistrationBot = payload.autoRegistrationBot || state.autoRegistrationBot;
+      await refreshSyncStatus({ force: true, reason: 'auto-registration-bot toggle' });
+    } catch (error) {
+      console.error('[auto-registration-bot] toggle failed:', error);
+      event.target.checked = !enabled;
+    } finally {
+      state.autoRegistrationBotSaving = false;
+      render();
+    }
+  });
+
   document.querySelector('#searchInput')?.addEventListener('input', (event) => {
     state.query = event.target.value;
     render();
@@ -2438,6 +2580,18 @@ function bindEvents() {
   document.querySelectorAll('[data-reply-id]').forEach((button) => {
     button.addEventListener('click', () => insertQuickReply(Number(button.dataset.replyId)));
   });
+  document.querySelectorAll('[data-ai-draft-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      void handleAiDraftAction(button.dataset.aiDraftAction);
+    });
+  });
+  document.querySelectorAll('[data-ai-feedback]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      void markAiDraftFeedback(button.dataset.aiFeedback, 'feedback');
+    });
+  });
 }
 
 async function selectVisibleIfNeeded() {
@@ -2450,6 +2604,8 @@ async function selectVisibleIfNeeded() {
     state.timeline = [];
     state.automationState = null;
     state.automationLogs = [];
+    state.staffAiDraft = null;
+    state.staffAiApprenticeMode = { enabled: true };
   }
   render();
 }
@@ -2661,6 +2817,54 @@ function handleComposerKeydown(event) {
   void submitOutgoingMessage();
 }
 
+function setComposerDraft(text) {
+  const input = document.querySelector('#messageText');
+  state.draft = text || '';
+  if (input) {
+    input.value = state.draft;
+    input.focus();
+  }
+}
+
+async function handleAiDraftAction(action) {
+  const draft = state.staffAiDraft;
+  if (!draft?.ai_draft_reply) return;
+  const draftTextarea = document.querySelector('#aiSuggestedReplyText');
+  const text = (draftTextarea?.value || draft.ai_draft_reply || '').trim();
+  if (action === 'use' || action === 'edit') {
+    setComposerDraft(text);
+    return;
+  }
+  if (action === 'send') {
+    setComposerDraft(text);
+    await submitOutgoingMessage();
+    return;
+  }
+  if (action === 'save-training') {
+    await markAiDraftFeedback('saved_by_staff', 'saved_training_data');
+    return;
+  }
+  if (action === 'regenerate') {
+    await markAiDraftFeedback('regenerate_requested', 'feedback');
+  }
+}
+
+async function markAiDraftFeedback(reason, outcome = 'feedback') {
+  const draft = state.staffAiDraft;
+  if (!draft?.id || !state.selectedContactId) return;
+  await api(`/api/contacts/${state.selectedContactId}/staff-ai-draft/feedback`, {
+    method: 'POST',
+    body: JSON.stringify({
+      trainingExampleId: draft.id,
+      reason,
+      outcome
+    })
+  });
+  contactDetailCache.delete(Number(state.selectedContactId));
+  await refreshSelectedContact({ force: true, reason: 'ai draft feedback' });
+  render();
+}
+
 async function submitOutgoingMessage() {
   if (sendingMessage) return;
   if (!state.selectedContactId) return;
@@ -2679,7 +2883,8 @@ async function submitOutgoingMessage() {
       body: JSON.stringify({
         text,
         staffName: state.staffName,
-        client_request_id: clientRequestId
+        client_request_id: clientRequestId,
+        trainingExampleId: state.staffAiDraft?.id || null
       })
     });
     state.draft = '';
@@ -2889,6 +3094,11 @@ async function boot() {
     console.error('[boot] startup failed:', error);
   }
 }
+
+socket.on('auto-registration-bot:changed', (payload = {}) => {
+  state.autoRegistrationBot = payload;
+  if (state.section === 'contacts') render();
+});
 
 socket.on('telegram-sync:changed', (payload = {}) => {
   if (payload.contactId) contactDetailCache.delete(Number(payload.contactId));

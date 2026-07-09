@@ -383,6 +383,44 @@ CREATE TABLE IF NOT EXISTS coadmin_settings (
   updated_by TEXT
 );
 
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS auto_registration_bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS auto_registration_bot_enabled_at TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS auto_registration_bot_updated_at TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS auto_registration_bot_updated_by TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_at TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_by TEXT;
+
+CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
+  id BIGSERIAL PRIMARY KEY,
+  contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
+  telegram_user_id TEXT,
+  incoming_message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
+  customer_message TEXT,
+  conversation_context TEXT,
+  detected_intent TEXT,
+  detected_entities_json TEXT NOT NULL DEFAULT '{}',
+  ai_draft_reply TEXT,
+  final_staff_reply TEXT,
+  staff_user_id TEXT,
+  staff_username TEXT,
+  was_edited BOOLEAN NOT NULL DEFAULT FALSE,
+  edit_distance_percent DOUBLE PRECISION,
+  staff_feedback_reason TEXT,
+  outcome TEXT NOT NULL DEFAULT 'drafted',
+  language TEXT,
+  sentiment TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  sent_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings_audit_log (
   id BIGSERIAL PRIMARY KEY,
   settings_key TEXT NOT NULL,
@@ -463,6 +501,8 @@ CREATE INDEX IF NOT EXISTS idx_payment_listener_logs_created ON payment_listener
 CREATE INDEX IF NOT EXISTS idx_account_sync_logs_created ON account_sync_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_registration_info_history_user_created ON registration_info_history(telegram_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created ON settings_audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created ON staff_ai_training_examples(contact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created ON staff_ai_training_examples(outcome, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_telegram_outbound_status_created ON telegram_outbound_messages(status, created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_telegram_outbound_contact_created ON telegram_outbound_messages(contact_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request

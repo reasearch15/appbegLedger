@@ -38,6 +38,19 @@ export async function processPaymentWindowExpiryTick({
       console.log(`[chatbot] registration_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
     }
 
+    const autoBot = await store.getAutoRegistrationBotSettings();
+    if (!autoBot.enabled) {
+      console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${window.contact_id} window=${window.id} reason=payment_window_expiry`);
+      notifiedCount += 1;
+      continue;
+    }
+    const staffAiMode = await store.getStaffAiApprenticeSettings?.();
+    if (staffAiMode) {
+      console.log(`[chatbot] expiry_notification_suppressed contact=${window.contact_id} window=${window.id} staff_ai_mode=${staffAiMode.enabled ? 'apprentice' : 'manual'}`);
+      notifiedCount += 1;
+      continue;
+    }
+
     await sendExpiryMessage({
       store,
       user: contact,

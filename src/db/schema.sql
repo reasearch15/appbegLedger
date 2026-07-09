@@ -400,7 +400,39 @@ CREATE TABLE IF NOT EXISTS coadmin_settings (
   telegram_account_username TEXT,
   telegram_account_id TEXT,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_by TEXT
+  updated_by TEXT,
+  auto_registration_bot_enabled INTEGER NOT NULL DEFAULT 1,
+  auto_registration_bot_enabled_at TEXT,
+  auto_registration_bot_updated_at TEXT,
+  auto_registration_bot_updated_by TEXT,
+  staff_ai_apprentice_mode_enabled INTEGER NOT NULL DEFAULT 1,
+  staff_ai_apprentice_mode_updated_at TEXT,
+  staff_ai_apprentice_mode_updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  contact_id INTEGER NOT NULL,
+  telegram_user_id TEXT,
+  incoming_message_id INTEGER,
+  customer_message TEXT,
+  conversation_context TEXT,
+  detected_intent TEXT,
+  detected_entities_json TEXT NOT NULL DEFAULT '{}',
+  ai_draft_reply TEXT,
+  final_staff_reply TEXT,
+  staff_user_id TEXT,
+  staff_username TEXT,
+  was_edited INTEGER NOT NULL DEFAULT 0,
+  edit_distance_percent REAL,
+  staff_feedback_reason TEXT,
+  outcome TEXT NOT NULL DEFAULT 'drafted',
+  language TEXT,
+  sentiment TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  sent_at TEXT,
+  FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+  FOREIGN KEY (incoming_message_id) REFERENCES messages(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS settings_audit_log (
@@ -527,6 +559,12 @@ CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message
 
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created
   ON settings_audit_log(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created
+  ON staff_ai_training_examples(contact_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created
+  ON staff_ai_training_examples(outcome, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order
   ON payment_methods(is_active, display_order ASC, id ASC);

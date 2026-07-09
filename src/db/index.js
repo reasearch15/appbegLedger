@@ -23,6 +23,7 @@ import {
 } from './defaults.js';
 import { createQueryHelpers } from './query-helpers.js';
 import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '../payments/methodUtils.js';
+import { normalizeAutoRegistrationBotSettings, isMessageAfterBotResumeCheckpoint } from '../telegram/autoRegistrationBot.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -58,6 +59,28 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   const sql = createQueryHelpers(config.dialect);
 
   const nowIso = () => new Date().toISOString();
+
+  function calculateEditDistancePercent(original = '', final = '') {
+    const a = String(original || '').trim();
+    const b = String(final || '').trim();
+    const maxLen = Math.max(a.length, b.length);
+    if (!maxLen) return 0;
+    const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= a.length; i += 1) {
+      let lastDiagonal = previous[0];
+      previous[0] = i;
+      for (let j = 1; j <= b.length; j += 1) {
+        const temp = previous[j];
+        previous[j] = Math.min(
+          previous[j] + 1,
+          previous[j - 1] + 1,
+          lastDiagonal + (a[i - 1] === b[j - 1] ? 0 : 1)
+        );
+        lastDiagonal = temp;
+      }
+    }
+    return Math.round((previous[b.length] / maxLen) * 10000) / 100;
+  }
 
   function normalizeDisplayName(user) {
     const parts = [user.first_name, user.last_name].filter(Boolean);
@@ -705,6 +728,246 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE m.telegram_user_id = ?
       ORDER BY m.sent_at ASC, m.id ASC
     `).all(id);
+  }
+
+  async function buildConversationContextForTraining(contactId, limit = 8) {
+    const rows = await db.prepare(`
+      SELECT direction, sender_type, text, message_type, sent_at
+      FROM messages
+      WHERE telegram_user_id = ?
+      ORDER BY sent_at DESC, id DESC
+      LIMIT ?
+    `).all(contactId, limit);
+    return rows.reverse().map((message) => {
+      const speaker = message.direction === 'incoming'
+        ? 'Customer'
+        : message.sender_type === 'staff'
+          ? 'Staff'
+          : message.sender_type === 'bot'
+            ? 'Bot'
+            : 'System';
+      return `${speaker}: ${message.text || `[${message.message_type || 'message'}]`}`;
+    }).join('\n');
+  }
+
+  async function getStaffAiApprenticeSettings() {
+    const existing = await db.prepare('SELECT id FROM coadmin_settings WHERE id = 1').get();
+    if (!existing) {
+      await db.prepare('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, ?)').run(nowIso());
+    }
+    const row = await db.prepare(`
+      SELECT
+        staff_ai_apprentice_mode_enabled,
+        staff_ai_apprentice_mode_updated_at,
+        staff_ai_apprentice_mode_updated_by
+      FROM coadmin_settings
+      WHERE id = 1
+    `).get();
+    return {
+      enabled: row?.staff_ai_apprentice_mode_enabled === undefined || row?.staff_ai_apprentice_mode_enabled === null
+        ? true
+        : Boolean(row.staff_ai_apprentice_mode_enabled),
+      updated_at: row?.staff_ai_apprentice_mode_updated_at || null,
+      updated_by: row?.staff_ai_apprentice_mode_updated_by || null
+    };
+  }
+
+  async function setStaffAiApprenticeModeEnabled(enabled, actorName = 'Staff') {
+    const current = await getStaffAiApprenticeSettings();
+    const nextEnabled = Boolean(enabled);
+    if (nextEnabled === current.enabled) return current;
+    const updatedAt = nowIso();
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET staff_ai_apprentice_mode_enabled = ?,
+          staff_ai_apprentice_mode_updated_at = ?,
+          staff_ai_apprentice_mode_updated_by = ?,
+          updated_at = ?
+      WHERE id = 1
+    `).run(nextEnabled ? 1 : 0, updatedAt, actorName, updatedAt);
+    await logSettingsAudit({
+      settingsKey: 'staff_ai_apprentice_mode',
+      fieldName: 'enabled',
+      oldValue: current.enabled ? 'true' : 'false',
+      newValue: nextEnabled ? 'true' : 'false',
+      actorName
+    });
+    return await getStaffAiApprenticeSettings();
+  }
+
+  async function createStaffAiTrainingDraft({
+    contactId,
+    telegramUserId = null,
+    incomingMessageId = null,
+    customerMessage = '',
+    conversationContext = null,
+    detectedIntent = null,
+    detectedEntities = {},
+    aiDraftReply = '',
+    language = null,
+    sentiment = null,
+    outcome = 'drafted'
+  }) {
+    const contact = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
+    if (!contact) throw new Error('Contact not found.');
+    const context = conversationContext ?? await buildConversationContextForTraining(contactId);
+    const existing = incomingMessageId
+      ? await db.prepare(`
+        SELECT *
+        FROM staff_ai_training_examples
+        WHERE contact_id = ?
+          AND incoming_message_id = ?
+          AND outcome = 'drafted'
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(contactId, incomingMessageId)
+      : null;
+    const now = nowIso();
+    if (existing) {
+      await db.prepare(`
+        UPDATE staff_ai_training_examples
+        SET telegram_user_id = ?,
+            customer_message = ?,
+            conversation_context = ?,
+            detected_intent = ?,
+            detected_entities_json = ?,
+            ai_draft_reply = ?,
+            language = ?,
+            sentiment = ?,
+            created_at = ?
+        WHERE id = ?
+      `).run(
+        String(telegramUserId || contact.telegram_id || ''),
+        customerMessage || null,
+        context || null,
+        detectedIntent || null,
+        JSON.stringify(detectedEntities || {}),
+        aiDraftReply || null,
+        language || contact.language_code || null,
+        sentiment || null,
+        now,
+        existing.id
+      );
+      return await getStaffAiTrainingExample(existing.id);
+    }
+    const result = await db.prepare(`
+      INSERT INTO staff_ai_training_examples (
+        contact_id, telegram_user_id, incoming_message_id, customer_message, conversation_context,
+        detected_intent, detected_entities_json, ai_draft_reply, outcome, language, sentiment, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      contactId,
+      String(telegramUserId || contact.telegram_id || ''),
+      incomingMessageId || null,
+      customerMessage || null,
+      context || null,
+      detectedIntent || null,
+      JSON.stringify(detectedEntities || {}),
+      aiDraftReply || null,
+      outcome,
+      language || contact.language_code || null,
+      sentiment || null,
+      now
+    );
+    return await getStaffAiTrainingExample(result.lastInsertRowid);
+  }
+
+  async function getStaffAiTrainingExample(id) {
+    const row = await db.prepare('SELECT * FROM staff_ai_training_examples WHERE id = ?').get(id);
+    return row ? hydrateStaffAiTrainingExample(row) : null;
+  }
+
+  async function getLatestStaffAiTrainingDraftForContact(contactId) {
+    const row = await db.prepare(`
+      SELECT *
+      FROM staff_ai_training_examples
+      WHERE contact_id = ?
+        AND outcome = 'drafted'
+        AND final_staff_reply IS NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(contactId);
+    return row ? hydrateStaffAiTrainingExample(row) : null;
+  }
+
+  async function markStaffAiTrainingFeedback(id, {
+    contactId,
+    reason,
+    outcome = 'feedback'
+  } = {}) {
+    const row = await db.prepare('SELECT * FROM staff_ai_training_examples WHERE id = ?').get(id);
+    if (!row || (contactId && Number(row.contact_id) !== Number(contactId))) return null;
+    await db.prepare(`
+      UPDATE staff_ai_training_examples
+      SET staff_feedback_reason = ?,
+          outcome = ?
+      WHERE id = ?
+    `).run(reason || null, outcome || 'feedback', id);
+    return await getStaffAiTrainingExample(id);
+  }
+
+  async function completeStaffAiTrainingExampleOnSend({
+    trainingExampleId = null,
+    contactId,
+    telegramUserId = null,
+    finalStaffReply,
+    staffUserId = null,
+    staffUsername = 'Staff',
+    outcome = 'sent',
+    staffFeedbackReason = null
+  }) {
+    const sentAt = nowIso();
+    const finalText = String(finalStaffReply || '').trim();
+    if (!finalText) return null;
+    let row = trainingExampleId
+      ? await db.prepare('SELECT * FROM staff_ai_training_examples WHERE id = ?').get(trainingExampleId)
+      : await db.prepare(`
+        SELECT *
+        FROM staff_ai_training_examples
+        WHERE contact_id = ?
+          AND outcome = 'drafted'
+          AND final_staff_reply IS NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      `).get(contactId);
+    if (row && Number(row.contact_id) !== Number(contactId)) row = null;
+    if (!row) {
+      row = await createStaffAiTrainingDraft({
+        contactId,
+        telegramUserId,
+        aiDraftReply: null,
+        customerMessage: null,
+        detectedIntent: 'manual_staff_reply',
+        outcome: 'manual'
+      });
+    }
+    const aiDraft = String(row.ai_draft_reply || '').trim();
+    const editDistancePercent = aiDraft ? calculateEditDistancePercent(aiDraft, finalText) : null;
+    const wasEdited = aiDraft ? aiDraft !== finalText : true;
+    await db.prepare(`
+      UPDATE staff_ai_training_examples
+      SET final_staff_reply = ?,
+          staff_user_id = ?,
+          staff_username = ?,
+          was_edited = ?,
+          edit_distance_percent = ?,
+          staff_feedback_reason = COALESCE(?, staff_feedback_reason),
+          outcome = ?,
+          sent_at = ?
+      WHERE id = ?
+    `).run(
+      finalText,
+      staffUserId != null ? String(staffUserId) : null,
+      staffUsername || 'Staff',
+      wasEdited ? 1 : 0,
+      editDistancePercent,
+      staffFeedbackReason || null,
+      outcome,
+      sentAt,
+      row.id
+    );
+    return await getStaffAiTrainingExample(row.id);
   }
 
   async function listNotesForUser(id) {
@@ -2109,6 +2372,129 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(accountId, accountUsername, nowIso(), userId);
   }
 
+  async function getIncomingMessageSentAt(contactId, telegramMessageId = null) {
+    if (telegramMessageId == null || telegramMessageId === '') return null;
+    const row = await db.prepare(`
+      SELECT sent_at
+      FROM messages
+      WHERE telegram_user_id = ?
+        AND telegram_message_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(contactId, telegramMessageId);
+    return row?.sent_at || null;
+  }
+
+  async function getAutoRegistrationBotSettings() {
+    const existing = await db.prepare('SELECT id FROM coadmin_settings WHERE id = 1').get();
+    if (!existing) {
+      await db.prepare('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, ?)').run(nowIso());
+    }
+    const row = await db.prepare(`
+      SELECT
+        auto_registration_bot_enabled,
+        auto_registration_bot_enabled_at,
+        auto_registration_bot_updated_at,
+        auto_registration_bot_updated_by
+      FROM coadmin_settings
+      WHERE id = 1
+    `).get();
+    return normalizeAutoRegistrationBotSettings(row || {});
+  }
+
+  async function isIncomingMessageEligibleForAutoBot(contactId, {
+    telegramMessageId = null,
+    sentAt = null,
+    jobCreatedAt = null
+  } = {}) {
+    const settings = await getAutoRegistrationBotSettings();
+    if (!settings.enabled) {
+      return { eligible: false, reason: 'bot_disabled', settings };
+    }
+
+    let messageSentAt = sentAt || null;
+    if (!messageSentAt && telegramMessageId != null) {
+      messageSentAt = await getIncomingMessageSentAt(contactId, telegramMessageId);
+    }
+    if (!messageSentAt && jobCreatedAt) {
+      messageSentAt = jobCreatedAt;
+    }
+    if (!messageSentAt) {
+      return { eligible: false, reason: 'missing_message_timestamp', settings };
+    }
+
+    if (!isMessageAfterBotResumeCheckpoint(messageSentAt, settings)) {
+      return { eligible: false, reason: 'before_resume_checkpoint', settings, messageSentAt };
+    }
+
+    return { eligible: true, reason: 'eligible', settings, messageSentAt };
+  }
+
+  async function setAutoRegistrationBotEnabled(enabled, actorName = 'Staff') {
+    const current = await getAutoRegistrationBotSettings();
+    const nextEnabled = Boolean(enabled);
+    if (nextEnabled === current.enabled) {
+      return current;
+    }
+
+    const updatedAt = nowIso();
+    const enabledAt = nextEnabled ? updatedAt : current.enabled_at;
+
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET auto_registration_bot_enabled = ?,
+          auto_registration_bot_enabled_at = ?,
+          auto_registration_bot_updated_at = ?,
+          auto_registration_bot_updated_by = ?,
+          updated_at = ?
+      WHERE id = 1
+    `).run(
+      nextEnabled ? 1 : 0,
+      enabledAt,
+      updatedAt,
+      actorName,
+      updatedAt
+    );
+
+    await logSettingsAudit({
+      settingsKey: 'auto_registration_bot',
+      fieldName: 'enabled',
+      oldValue: current.enabled ? 'true' : 'false',
+      newValue: nextEnabled ? 'true' : 'false',
+      actorName
+    });
+
+    if (nextEnabled) {
+      await logAccountSync({
+        eventType: 'auto_registration_bot_enabled',
+        message: 'Auto registration bot enabled.',
+        metadata: { actorName, enabled_at: enabledAt }
+      });
+      await logAccountSync({
+        eventType: 'bot_resume_checkpoint_created',
+        message: 'Auto registration bot resume checkpoint created.',
+        metadata: { enabled_at: enabledAt, actorName }
+      });
+      console.log(`[chatbot] auto_registration_bot_enabled enabled_at=${enabledAt} actor=${actorName}`);
+      console.log(`[chatbot] bot_resume_checkpoint_created enabled_at=${enabledAt}`);
+    } else {
+      await logAccountSync({
+        eventType: 'auto_registration_bot_disabled',
+        message: 'Auto registration bot disabled. Manual staff chat and payment listeners remain active.',
+        metadata: { actorName }
+      });
+      await logAccountSync({
+        eventType: 'payment_listener_still_active',
+        message: 'Payment group listener and routing remain active while auto registration bot is disabled.',
+        metadata: { actorName }
+      });
+      console.log(`[chatbot] auto_registration_bot_disabled actor=${actorName}`);
+      console.log('[payment-router] payment_listener_still_active');
+    }
+
+    return await getAutoRegistrationBotSettings();
+  }
+
   async function getCoadminSettings() {
     let row = await db.prepare('SELECT * FROM coadmin_settings WHERE id = 1').get();
     if (!row) {
@@ -2122,6 +2508,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       appbeg_coadmin_uid: row.appbeg_coadmin_uid || '',
       telegram_account_username: row.telegram_account_username || sync.account_username || '',
       telegram_account_id: row.telegram_account_id || (sync.account_user_id ? String(sync.account_user_id) : ''),
+      staff_ai_apprentice_mode_enabled: row.staff_ai_apprentice_mode_enabled === undefined || row.staff_ai_apprentice_mode_enabled === null
+        ? true
+        : Boolean(row.staff_ai_apprentice_mode_enabled),
+      staff_ai_apprentice_mode_updated_at: row.staff_ai_apprentice_mode_updated_at || null,
+      staff_ai_apprentice_mode_updated_by: row.staff_ai_apprentice_mode_updated_by || '',
       updated_at: row.updated_at,
       updated_by: row.updated_by || ''
     };
@@ -2992,6 +3383,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listAccountSyncLogs,
     getContactPreferredMessageSource,
     getCoadminSettings,
+    getStaffAiApprenticeSettings,
+    setStaffAiApprenticeModeEnabled,
+    createStaffAiTrainingDraft,
+    getStaffAiTrainingExample,
+    getLatestStaffAiTrainingDraftForContact,
+    markStaffAiTrainingFeedback,
+    completeStaffAiTrainingExampleOnSend,
+    getAutoRegistrationBotSettings,
+    setAutoRegistrationBotEnabled,
+    isIncomingMessageEligibleForAutoBot,
+    getIncomingMessageSentAt,
     updateCoadminSettings,
     buildCoadminSnapshot,
     assignCoadminToUser,
@@ -3095,6 +3497,18 @@ function hydrateAutomationState(state) {
     registration_info: parseJsonField(state.registration_info_json, {}),
     intents: parseJsonField(state.intents_json, {}),
     last_auto_welcome_at: state.last_auto_welcome_at
+  };
+}
+
+function hydrateStaffAiTrainingExample(row) {
+  return {
+    ...row,
+    id: row.id != null ? Number(row.id) : row.id,
+    contact_id: row.contact_id != null ? Number(row.contact_id) : row.contact_id,
+    incoming_message_id: row.incoming_message_id != null ? Number(row.incoming_message_id) : row.incoming_message_id,
+    detected_entities: parseJsonField(row.detected_entities_json, {}),
+    was_edited: Boolean(row.was_edited),
+    edit_distance_percent: row.edit_distance_percent == null ? null : Number(row.edit_distance_percent)
   };
 }
 
@@ -3519,7 +3933,43 @@ async function migrate(db) {
       updated_by TEXT
     )
   `);
+  await addColumnIfMissing(db, 'coadmin_settings', 'auto_registration_bot_enabled', 'INTEGER NOT NULL DEFAULT 1');
+  await addColumnIfMissing(db, 'coadmin_settings', 'auto_registration_bot_enabled_at', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'auto_registration_bot_updated_at', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'auto_registration_bot_updated_by', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_enabled', 'INTEGER NOT NULL DEFAULT 1');
+  await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_updated_at', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_updated_by', 'TEXT');
   await db.prepare('INSERT OR IGNORE INTO coadmin_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)').run();
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      telegram_user_id TEXT,
+      incoming_message_id INTEGER,
+      customer_message TEXT,
+      conversation_context TEXT,
+      detected_intent TEXT,
+      detected_entities_json TEXT NOT NULL DEFAULT '{}',
+      ai_draft_reply TEXT,
+      final_staff_reply TEXT,
+      staff_user_id TEXT,
+      staff_username TEXT,
+      was_edited INTEGER NOT NULL DEFAULT 0,
+      edit_distance_percent REAL,
+      staff_feedback_reason TEXT,
+      outcome TEXT NOT NULL DEFAULT 'drafted',
+      language TEXT,
+      sentiment TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sent_at TEXT,
+      FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+      FOREIGN KEY (incoming_message_id) REFERENCES messages(id) ON DELETE SET NULL
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created ON staff_ai_training_examples(contact_id, created_at DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created ON staff_ai_training_examples(outcome, created_at DESC)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings_audit_log (
