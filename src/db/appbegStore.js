@@ -8,8 +8,7 @@ const MAX_CSV_ROWS = 5000;
 const SORTABLE = new Set(['username', 'coin', 'cash', 'created_at', 'updated_at']);
 
 const SELECT_SQL = `
-  p.firebase_id AS player_uid,
-  p.firebase_id,
+  p.uid AS uid,
   p.username,
   p.email,
   p.role,
@@ -30,9 +29,9 @@ const SELECT_SQL = `
 
 function toPublicPlayer(row) {
   return {
-    id: row.firebase_id || row.player_uid,
-    player_uid: row.player_uid ?? null,
-    firebase_id: row.firebase_id ?? null,
+    id: row.uid,
+    uid: row.uid ?? null,
+    player_uid: row.uid ?? null,
     username: row.username ?? null,
     email: row.email ?? null,
     role: row.role ?? null,
@@ -74,7 +73,7 @@ function buildBaseWhere({ showTestData = false } = {}) {
   ];
 
   if (!showTestData) {
-    clauses.push("(p.firebase_id IS NULL OR p.firebase_id NOT LIKE 'codex_%')");
+    clauses.push("(p.uid IS NULL OR p.uid::text NOT LIKE 'codex_%')");
     clauses.push("(p.username IS NULL OR p.username NOT LIKE 'codex_%')");
     clauses.push("(p.email IS NULL OR p.email NOT LIKE '%@example.test')");
     clauses.push("(p.source IS NULL OR p.source NOT LIKE 'codex_%')");
@@ -94,7 +93,7 @@ function buildWhere({ query, status, coadmin, showTestData = false }) {
     clauses.push(`(
       p.username ILIKE $${index}
       OR p.email ILIKE $${index}
-      OR p.firebase_id ILIKE $${index}
+      OR p.uid::text ILIKE $${index}
       OR p.coadmin_uid ILIKE $${index}
       OR p.created_by ILIKE $${index}
     )`);
@@ -194,7 +193,7 @@ export async function createAppBegStore(env = process.env) {
       ${SELECT_SQL}
       ${baseFromSql()}
       ${whereSql}
-      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, p.firebase_id DESC
+      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, p.uid DESC
       LIMIT $${nextIndex}
       OFFSET $${nextIndex + 1}
     `;

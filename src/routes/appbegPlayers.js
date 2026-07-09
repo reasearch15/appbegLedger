@@ -1,6 +1,5 @@
 const CSV_COLUMNS = [
-  ['player_uid', 'UID'],
-  ['firebase_id', 'Firebase ID'],
+  ['uid', 'UID'],
   ['username', 'Username'],
   ['email', 'Email'],
   ['role', 'Role'],

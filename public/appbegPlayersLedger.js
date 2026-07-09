@@ -2,7 +2,7 @@ import { escapeHtml } from './playerUtils.js';
 
 const LEDGER_COLUMNS = [
   { key: 'username', label: 'Username', sortable: 'username', sticky: true },
-  { key: 'player_uid', label: 'UID', mono: true },
+  { key: 'uid', label: 'UID', mono: true },
   { key: 'email', label: 'Email' },
   { key: 'role', label: 'Role' },
   { key: 'status', label: 'Status' },
@@ -168,7 +168,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
     return `
       <aside class="appbeg-detail-drawer ${state.appbegPlayersDrawerOpen ? 'open' : ''}" aria-hidden="${state.appbegPlayersDrawerOpen ? 'false' : 'true'}">
         <div class="appbeg-detail-drawer-header">
-          <strong>${escapeHtml(player.username || player.player_uid || 'Player')}</strong>
+          <strong>${escapeHtml(player.username || player.uid || player.player_uid || 'Player')}</strong>
           <button type="button" class="terminal-btn" id="appbegPlayersDrawerClose" aria-label="Close">✕</button>
         </div>
         <div class="appbeg-detail-drawer-body">
