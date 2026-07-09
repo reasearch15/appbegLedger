@@ -22,6 +22,7 @@ const paymentRoutingFilters = [
   'All',
   'registered_player_deposit',
   'registration_payment_matched',
+  'manual_review',
   'untouched_unmatched',
   'expired_deposit',
   'parse_failed',
@@ -991,7 +992,7 @@ async function refreshPayments({ keepSelection = true } = {}) {
     routingStatus: state.paymentRoutingFilter,
     exceptionsOnly: state.paymentExceptionsOnly ? 'true' : 'false',
     query: state.paymentQuery,
-    limit: '300'
+    limit: '500'
   });
   const [{ payments }, { stats }, { sync }] = await Promise.all([
     api(`/api/payments?${query}`),
@@ -1479,10 +1480,11 @@ function paymentRoutingLabel(routingStatus) {
     case 'registration_payment_matched':
     case 'appbeg_owned':
       return 'Registration Matched';
+    case 'manual_review':
     case 'untouched_unmatched':
       return 'Frozen / Manual Review';
     case 'expired_deposit':
-      return 'Expired Window Match';
+      return 'Expired Registration Window';
     case 'parse_failed':
       return 'Parse Failed';
     case 'ignored':
@@ -1494,10 +1496,30 @@ function paymentRoutingLabel(routingStatus) {
   }
 }
 
+function paymentRoutingReason(payment = {}) {
+  if (payment.routing_reason) return payment.routing_reason;
+  switch (payment.routing_status) {
+    case 'registered_player_deposit':
+      return 'Matched registered player';
+    case 'registration_payment_matched':
+    case 'appbeg_owned':
+      return 'Matched registration payment window';
+    case 'expired_deposit':
+      return 'Registration window expired';
+    case 'parse_failed':
+      return 'Unable to parse payment';
+    case 'manual_review':
+    case 'untouched_unmatched':
+      return 'Waiting for manual review';
+    default:
+      return payment.parse_error ? 'Unable to parse payment' : '—';
+  }
+}
+
 function paymentProcessingLabel(payment = {}) {
   const routing = payment.routing_status;
   if (routing === 'registered_player_deposit') return 'pending_review';
-  if (routing === 'untouched_unmatched') return 'frozen';
+  if (routing === 'manual_review' || routing === 'untouched_unmatched') return 'frozen';
   if (routing === 'registration_payment_matched' || routing === 'appbeg_owned') return 'matched';
   if (routing === 'parse_failed') return 'parse_failed';
   if (routing === 'expired_deposit') return 'expired_window';
@@ -1556,6 +1578,7 @@ function paymentRows() {
       <span class="truncate">${escapeHtml(payment.message_text || '[non-text message]')}</span>
       <span>${payment.telegram_message_id}</span>
       <span class="badge routing-${escapeHtml(payment.routing_status || 'pending')}">${escapeHtml(paymentRoutingLabel(payment.routing_status))}</span>
+      <span class="truncate subtle">${escapeHtml(paymentRoutingReason(payment))}</span>
       <span class="badge status-${escapeHtml(paymentProcessingLabel(payment))}">${escapeHtml(paymentProcessingDisplay(payment))}</span>
     </button>
   `).join('');
@@ -1572,7 +1595,8 @@ function paymentDetailPanel() {
         <div class="card-title">Payment Message</div>
         ${infoRow('Processing', paymentProcessingDisplay(payment))}
         ${infoRow('Routing', paymentRoutingLabel(payment.routing_status))}
-        ${payment.routing_status === 'untouched_unmatched'
+        ${infoRow('Reason', paymentRoutingReason(payment))}
+        ${payment.routing_status === 'manual_review' || payment.routing_status === 'untouched_unmatched'
     ? '<p class="modal-error">This payment is frozen for manual staff review. Do not auto-assign or ignore without review.</p>'
     : ''}
         ${payment.routing_status === 'registered_player_deposit'
@@ -1783,6 +1807,7 @@ function paymentsWorkspace() {
             <span>Preview</span>
             <span>Telegram ID</span>
             <span>Routing</span>
+            <span>Reason</span>
             <span>Status</span>
           </div>
           <div class="payment-table">${paymentRows()}</div>

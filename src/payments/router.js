@@ -4,6 +4,7 @@ import {
   DEPOSIT_STATUS,
   HANDLED_BY_APPBEG_BOT,
   ROUTING_OWNER,
+  ROUTING_REASON,
   ROUTING_STATUS
 } from './constants.js';
 import { amountsMatch, paymentAppsMatch, paymentNamesMatch } from './matchUtils.js';
@@ -32,7 +33,7 @@ async function findExpiredRegistrationMatch(store, parsed) {
   return windows.find((window) => windowMatchesParsed(window, parsed)) || null;
 }
 
-export async function routePaymentEvent(store, paymentId, { force = false, bot = null } = {}) {
+export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null } = {}) {
   const payment = await store.getPaymentEvent(paymentId);
   if (!payment) {
     return { ok: false, error: 'Payment event not found.' };
@@ -60,6 +61,7 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.PARSE_FAILED,
       routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: ROUTING_REASON.UNABLE_TO_PARSE,
       routed_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
@@ -75,8 +77,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     senderName: parsed.payment_sender_name
   });
 
-  console.log(`[payment-router] registered_player_deposit_checked payment=${payment.id}`);
-  await store.logPaymentRouting(payment.id, 'registered_player_deposit_checked', 'Checking registered AppBeg player deposits before registration windows.', {
+  console.log(`[payment-router] registered_player_checked payment=${payment.id}`);
+  await store.logPaymentRouting(payment.id, 'registered_player_checked', 'Checking registered AppBeg players before registration windows.', {
     amount: parsed.amount,
     paymentApp: parsed.payment_app,
     senderName: parsed.payment_sender_name
@@ -84,16 +86,17 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 
   const registeredPlayer = await findRegisteredPlayerMatch(store, parsed);
   if (registeredPlayer) {
-    console.log(`[payment-router] registered_player_deposit_matched payment=${payment.id} contact=${registeredPlayer.id}`);
+    console.log(`[payment-router] registered_player_matched payment=${payment.id} contact=${registeredPlayer.id}`);
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT,
       routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: ROUTING_REASON.MATCHED_REGISTERED_PLAYER,
       contact_id: registeredPlayer.id,
       registration_payment_window_id: null,
       routed_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
-    await store.logPaymentRouting(payment.id, 'registered_player_deposit_matched', 'Payment matched a registered AppBeg player deposit profile.', {
+    await store.logPaymentRouting(payment.id, 'registered_player_matched', 'Payment matched a registered AppBeg player deposit profile.', {
       contactId: registeredPlayer.id,
       appbegUsername: registeredPlayer.appbeg_username || null,
       status: 'pending_review'
@@ -101,8 +104,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT };
   }
 
-  console.log(`[payment-router] payment_registration_window_checked payment=${payment.id}`);
-  await store.logPaymentRouting(payment.id, 'payment_registration_window_checked', 'No registered player match; checking active registration payment windows.', {
+  console.log(`[payment-router] registration_window_checked payment=${payment.id}`);
+  await store.logPaymentRouting(payment.id, 'registration_window_checked', 'No registered player match; checking active registration payment windows.', {
     amount: parsed.amount,
     paymentApp: parsed.payment_app,
     senderName: parsed.payment_sender_name
@@ -110,16 +113,17 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 
   const activeWindow = await findActiveRegistrationMatch(store, parsed);
   if (activeWindow) {
-    console.log(`[payment-router] payment_registration_window_matched payment=${payment.id} window=${activeWindow.id} contact=${activeWindow.contact_id}`);
+    console.log(`[payment-router] registration_window_matched payment=${payment.id} window=${activeWindow.id} contact=${activeWindow.contact_id}`);
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
       routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: ROUTING_REASON.MATCHED_REGISTRATION_WINDOW,
       contact_id: activeWindow.contact_id,
       registration_payment_window_id: activeWindow.id,
       routed_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
-    await store.logPaymentRouting(payment.id, 'registration_payment_matched', 'Payment matched an active registration payment window.', {
+    await store.logPaymentRouting(payment.id, 'registration_window_matched', 'Payment matched an active registration payment window.', {
       contactId: activeWindow.contact_id,
       windowId: activeWindow.id
     });
@@ -128,12 +132,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       contactId: activeWindow.contact_id,
       windowId: activeWindow.id,
       paymentEventId: payment.id,
-      bot
-    });
-
-    await store.logPaymentRouting(payment.id, 'payment_window_completed_from_group_message', 'Registration payment window completed from payment group message.', {
-      contactId: activeWindow.contact_id,
-      windowId: activeWindow.id
+      bot,
+      io
     });
 
     return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED };
@@ -145,6 +145,7 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.EXPIRED_DEPOSIT,
       routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED,
       contact_id: expiredWindow.contact_id,
       registration_payment_window_id: expiredWindow.id,
       routed_at: new Date().toISOString(),
@@ -157,40 +158,42 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.EXPIRED_DEPOSIT };
   }
 
-  console.log(`[payment-router] payment_frozen_unmatched payment=${payment.id}`);
+  const freezeReason = 'No registered player match and no active registration payment window.';
+  console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id}`);
   await store.updatePaymentRouting(payment.id, {
-    routing_status: ROUTING_STATUS.UNTOUCHED_UNMATCHED,
+    routing_status: ROUTING_STATUS.MANUAL_REVIEW,
     routing_owner: ROUTING_OWNER.APPBEG,
+    routing_reason: freezeReason,
     contact_id: null,
     registration_payment_window_id: null,
     routed_at: new Date().toISOString(),
     handled_by: null
   });
-  await store.logPaymentRouting(payment.id, 'payment_frozen_unmatched', 'Payment frozen for manual staff review. No player or registration window matched.', {
+  await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', freezeReason, {
     amount: parsed.amount,
     paymentApp: parsed.payment_app,
     senderName: parsed.payment_sender_name,
     status: 'frozen'
   });
-  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.UNTOUCHED_UNMATCHED };
+  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW };
 }
 
-export async function routeUnprocessedPayments(store, { limit = 50, bot = null } = {}) {
+export async function routeUnprocessedPayments(store, { limit = 50, bot = null, io = null } = {}) {
   const pending = await store.listUnroutedPaymentEvents(limit);
   const results = [];
   for (const payment of pending) {
-    results.push(await routePaymentEvent(store, payment.id, { bot }));
+    results.push(await routePaymentEvent(store, payment.id, { bot, io }));
   }
   return results;
 }
 
-export async function reprocessPaymentEvent(store, paymentId, { bot = null } = {}) {
+export async function reprocessPaymentEvent(store, paymentId, { bot = null, io = null } = {}) {
   await store.resetPaymentRoutingForReprocess(paymentId);
   await store.logPaymentRouting(paymentId, 'reprocess_requested', 'Staff requested payment reprocessing.');
-  return await routePaymentEvent(store, paymentId, { force: true, bot });
+  return await routePaymentEvent(store, paymentId, { force: true, bot, io });
 }
 
-export async function markPaymentAppBegOwned(store, paymentId, { contactId, registrationPaymentWindowId, staffName = 'Staff', bot = null } = {}) {
+export async function markPaymentAppBegOwned(store, paymentId, { contactId, registrationPaymentWindowId, staffName = 'Staff', bot = null, io = null } = {}) {
   if (!contactId || !registrationPaymentWindowId) {
     throw new Error('contactId and registrationPaymentWindowId are required.');
   }
@@ -199,7 +202,8 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
     contactId,
     registrationPaymentWindowId,
     staffName,
-    routingStatus: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED
+    routingStatus: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
+    routingReason: ROUTING_REASON.MATCHED_REGISTRATION_WINDOW
   });
 
   await continueBotRegistrationAfterPayment(store, {
@@ -207,7 +211,8 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
     windowId: registrationPaymentWindowId,
     paymentEventId: paymentId,
     actorName: staffName,
-    bot
+    bot,
+    io
   });
 
   return { ok: true, payment: await store.getPaymentEvent(paymentId) };

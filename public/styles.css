@@ -562,6 +562,7 @@ h2 {
     minmax(0, 1fr)
     minmax(80px, 100px)
     minmax(72px, 94px)
+    minmax(100px, 140px)
     minmax(72px, 94px);
   gap: 10px;
   align-items: center;
@@ -2029,7 +2030,7 @@ textarea {
 
   .payment-table-header,
   .payment-row {
-    grid-template-columns: minmax(0, 130px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 100px) minmax(0, 90px);
+    grid-template-columns: minmax(0, 130px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 100px) minmax(0, 90px) minmax(0, 90px);
   }
 
   .chat-header {

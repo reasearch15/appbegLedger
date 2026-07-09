@@ -468,7 +468,7 @@ app.get('/api/payments/:id', async (req, res) => {
 
 app.post('/api/payments/:id/route', async (req, res) => {
   try {
-    const result = await routePaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null });
+    const result = await routePaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null, io });
     if (!result.ok) return res.status(400).json({ error: result.error || 'Routing failed.' });
     emitPaymentChanged(result.payment);
     res.json(result);
@@ -479,7 +479,7 @@ app.post('/api/payments/:id/route', async (req, res) => {
 
 app.post('/api/payments/:id/reprocess', async (req, res) => {
   try {
-    const result = await reprocessPaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null });
+    const result = await reprocessPaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null, io });
     if (!result.ok) return res.status(400).json({ error: result.error || 'Reprocess failed.' });
     emitPaymentChanged(result.payment);
     res.json(result);
@@ -506,7 +506,8 @@ app.post('/api/payments/:id/mark-owned', async (req, res) => {
       contactId: Number(req.body.contactId),
       registrationPaymentWindowId: Number(req.body.registrationPaymentWindowId),
       staffName: req.body.staffName || 'Staff',
-      bot: globalThis.telegramBot || null
+      bot: globalThis.telegramBot || null,
+      io
     });
     emitPaymentChanged(result.payment);
     if (result.payment?.contact_id) {
@@ -545,7 +546,7 @@ function emitPaymentChanged(payment) {
 
 app.post('/api/payments/route-pending', async (req, res) => {
   try {
-    const results = await routeUnprocessedPayments(store, { limit: req.body?.limit || 50 });
+    const results = await routeUnprocessedPayments(store, { limit: req.body?.limit || 50, bot: globalThis.telegramBot || null, io });
     io.emit('payments:changed');
     res.json({ results });
   } catch (error) {
@@ -701,14 +702,15 @@ app.post('/api/internal/payment-sync/notify', async (req, res) => {
     if (req.body?.type === 'message' && telegramMessageId) {
       const payment = await store.getPaymentEventByTelegramMessageId(telegramMessageId);
       if (payment) {
-        const result = await routePaymentEvent(store, payment.id, { bot: globalThis.telegramBot || null });
+        console.log(`[payment-router] payment_visible_in_ui payment=${payment.id} telegram_message_id=${telegramMessageId}`);
+        const result = await routePaymentEvent(store, payment.id, { bot: globalThis.telegramBot || null, io });
         emitPaymentChanged(result.payment);
         io.emit('payment:routed', { paymentId: payment.id, telegramMessageId });
       }
     }
 
     if (req.body?.type === 'sync_complete') {
-      const results = await routeUnprocessedPayments(store, { limit: 100, bot: globalThis.telegramBot || null });
+      const results = await routeUnprocessedPayments(store, { limit: 100, bot: globalThis.telegramBot || null, io });
       if (results.length) {
         io.emit('payments:changed');
       }

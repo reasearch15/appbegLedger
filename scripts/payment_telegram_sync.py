@@ -297,8 +297,12 @@ async def sync_forever():
         @client.on(events.NewMessage(chats=group))
         async def on_new_message(event):
             try:
+                log_listener(db, "payment_received", "Payment group message received.", metadata={"telegramMessageId": event.message.id})
+                print(f"[payment-router] payment_received telegram_message_id={event.message.id}")
                 sender = await event.message.get_sender()
                 inserted_or_updated = store_payment_message(db, event.message, sender, group)
+                log_listener(db, "payment_saved", "Payment group message saved.", metadata={"telegramMessageId": event.message.id})
+                print(f"[payment-router] payment_saved telegram_message_id={event.message.id}")
                 if inserted_or_updated:
                     log_listener(db, "payment_message_saved", "Payment group message saved.", metadata={"telegramMessageId": event.message.id})
                     notify_node("message", {"telegramMessageId": event.message.id})

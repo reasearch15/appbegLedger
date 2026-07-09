@@ -206,6 +206,11 @@ export async function migratePostgres(driver) {
   await driver.run('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, NOW()::TEXT) ON CONFLICT (id) DO NOTHING');
 
   await driver.exec(`
+    ALTER TABLE payment_events
+      ADD COLUMN IF NOT EXISTS routing_reason TEXT;
+  `);
+
+  await driver.exec(`
     CREATE TABLE IF NOT EXISTS ledger_users (
       id BIGSERIAL PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,

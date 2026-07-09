@@ -1,13 +1,23 @@
 import { queueBotReply } from '../telegram/chatbotProcessor.js';
+import {
+  APPBEG_USERNAME_HELP,
+  validateAppBegUsername
+} from '../registration/appbegValidation.js';
 
-const USERNAME_PROMPT = 'Thanks! We confirmed your payment. What username would you like for your account?';
+const USERNAME_PROMPT = [
+  'Thanks! We confirmed your payment.',
+  'What AppBeg username would you like?',
+  '',
+  APPBEG_USERNAME_HELP
+].join('\n');
 
 export async function continueBotRegistrationAfterPayment(store, {
   contactId,
   windowId,
   paymentEventId = null,
   actorName = 'PaymentGroupListener',
-  bot = null
+  bot = null,
+  io = null
 }) {
   const contact = await store.getUserProfile(contactId);
   if (!contact) throw new Error('Contact not found for registration payment continuation.');
@@ -35,14 +45,11 @@ export async function continueBotRegistrationAfterPayment(store, {
 
   await store.logEvent({
     telegramUserId: contactId,
-    eventType: 'payment_window_completed_from_group_message',
-    title: 'Registration Payment Window Completed',
-    body: 'Payment group message matched and completed the registration payment window.',
+    eventType: 'registration_continued_after_payment_match',
+    title: 'Registration Continued After Payment Match',
+    body: 'Payment group listener confirmed payment and advanced registration to username.',
     actorName,
-    metadata: {
-      windowId,
-      paymentEventId
-    }
+    metadata: { windowId, paymentEventId }
   });
 
   await queueBotReply({
@@ -52,14 +59,27 @@ export async function continueBotRegistrationAfterPayment(store, {
     bot: bot || globalThis.telegramBot || null
   });
 
-  console.log(`[payment-router] bot_registration_continued_after_payment contact=${contactId} window=${windowId}`);
+  console.log(`[payment-router] registration_continued_after_payment_match contact=${contactId} window=${windowId}`);
 
   if (paymentEventId) {
-    await store.logPaymentRouting(paymentEventId, 'bot_registration_continued_after_payment', 'Bot registration advanced to username after payment confirmation.', {
+    await store.logPaymentRouting(paymentEventId, 'registration_continued_after_payment_match', 'Bot registration advanced to username after payment confirmation.', {
       contactId,
       windowId
     });
   }
 
+  if (io) {
+    io.emit('contacts:changed');
+    io.emit('contact:changed', { contactId, userId: contactId });
+  }
+
   return { contact, window };
 }
+
+export function paymentConfirmedRegistrationStep(automationState = {}) {
+  const info = automationState?.registration_info || {};
+  if (!info.payment_confirmed) return 'waiting_for_payment_confirmation';
+  return automationState?.current_step || 'username';
+}
+
+export { validateAppBegUsername };

@@ -244,6 +244,7 @@ CREATE TABLE IF NOT EXISTS payment_events (
   parse_error TEXT,
   routing_status TEXT NOT NULL DEFAULT 'unrouted',
   routing_owner TEXT,
+  routing_reason TEXT,
   contact_id INTEGER REFERENCES telegram_users(id) ON DELETE SET NULL,
   deposit_event_id INTEGER,
   registration_payment_window_id INTEGER,

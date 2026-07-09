@@ -139,14 +139,23 @@ async function run() {
   console.log('ok flow: 25.50 -> QR send');
 
   decision = await decideAndApply(flowStore, contact, 'Done');
-  assertEqual(decision.kind, 'registration_payment_done');
-  assertEqual(decision.statePatch.currentStep, 'username');
-  console.log('ok flow: Done -> username');
+  assertEqual(decision.kind, 'registration_waiting_payment_confirmation');
+  assertEqual(decision.statePatch.currentStep, 'waiting_for_payment_confirmation');
+  assertIncludes(decision.replies[0].text, 'checking your payment');
+  assertEqual(decision.logEvent?.event, 'done_received_waiting_for_confirmation');
+  flowStore.state.current_step = 'username';
+  flowStore.state.registration_info = { ...flowStore.state.registration_info, payment_confirmed: true };
+  console.log('ok flow: Done -> waiting for payment confirmation');
+
+  decision = await decideAndApply(flowStore, contact, 'Rajex01');
+  assertEqual(decision.kind, 'registration_ask_password');
+  assertEqual(decision.statePatch.currentStep, 'password');
+  console.log('ok flow: Rajex01 -> password');
 
   decision = await decideAndApply(flowStore, contact, 'hello');
   assertEqual(decision.kind, 'registration_flow_reminder');
-  assertEqual(decision.statePatch.currentStep, 'username');
-  console.log('ok flow: hello during username -> reminder');
+  assertEqual(decision.statePatch.currentStep, 'password');
+  console.log('ok flow: hello during password -> reminder');
 
   assertEqual(flowStore.state.current_step !== 'welcome', true);
   assertEqual(flowStore.state.current_flow, 'bot_registration');

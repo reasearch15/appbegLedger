@@ -1,11 +1,16 @@
 import {
-  normalizeAppBegUsername,
   normalizePaymentTag,
   isUnregisteredStatus,
   chatbotWelcomeCooldownMs,
   parseFirstDepositAmount,
   isReferralSkipInput
 } from '../registration/utils.js';
+import {
+  APPBEG_PASSWORD_HELP,
+  APPBEG_USERNAME_HELP,
+  validateAppBegPassword,
+  validateAppBegUsername
+} from '../registration/appbegValidation.js';
 import {
   formatDepositAmount,
   parsePaymentMethodSelection,
@@ -21,6 +26,7 @@ export const BOT_REGISTRATION_STEPS = [
   'payment_display_name',
   'first_deposit_amount',
   'await_payment_done',
+  'waiting_for_payment_confirmation',
   'username',
   'password',
   'referral_code',
@@ -520,24 +526,25 @@ async function continueRegistrationDecision({ store, contact, text, action, step
   const paymentPrompt = registrationPaymentAppPrompt(activePaymentMethods);
 
   if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
+    if (!info.payment_confirmed) {
+      return waitingForPaymentConfirmationDecision(info);
+    }
     return {
-      kind: 'registration_ready_to_create_player',
-      replies: [{
-        text: "Perfect — I've saved your details. Our team will create your AppBeg account shortly. 🎉"
-      }],
+      kind: 'registration_create_appbeg_player',
+      replies: [],
+      createAppBegPlayer: true,
       statePatch: {
-        currentFlow: null,
-        currentStep: null,
+        currentFlow: 'bot_registration',
+        currentStep: 'complete',
         registrationInfo: {
           ...info,
           registration_method: 'chatbot',
-          ready_to_create_player: true
+          registration_confirmed: true
         }
       },
-      readyToCreatePlayer: true,
       setStatus: 'Pending Verification',
       escalate: false,
-      logEvent: { event: 'flow_completed', ready_to_create_player: true }
+      logEvent: { event: 'create_player_requested' }
     };
   }
 
@@ -708,32 +715,64 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         logEvent: { event: 'flow_step', step: 'await_payment_done' }
       };
     }
-    return await handleRegistrationPaymentDone({ store, contact, info });
+    return handleRegistrationPaymentDone(info);
+  }
+
+  if (normalizedStep === 'waiting_for_payment_confirmation') {
+    if (info.payment_confirmed) {
+      return {
+        kind: 'registration_ask_username',
+        replies: [{
+          text: [
+            'Thanks! We confirmed your payment.',
+            'What AppBeg username would you like?',
+            '',
+            APPBEG_USERNAME_HELP
+          ].join('\n')
+        }],
+        statePatch: {
+          currentFlow: 'bot_registration',
+          currentStep: 'username',
+          registrationInfo: info
+        },
+        escalate: false,
+        logEvent: { event: 'registration_continued_after_payment_match' }
+      };
+    }
+    return waitingForPaymentConfirmationDecision(info);
   }
 
   if (normalizedStep === 'username') {
-    const usernamePrompt = 'What username would you like for your account?';
+    if (!info.payment_confirmed) {
+      return waitingForPaymentConfirmationDecision(info);
+    }
+
+    const usernamePrompt = [
+      'What AppBeg username would you like?',
+      '',
+      APPBEG_USERNAME_HELP
+    ].join('\n');
     const offTopic = registrationOffTopicGuard(text, usernamePrompt, info, 'username');
     if (offTopic) return offTopic;
 
-    if (!text || text.length < 2) {
+    const usernameResult = validateAppBegUsername(text);
+    if (!usernameResult.ok) {
       return {
         kind: 'registration_ask_username',
-        replies: [{ text: 'I need a username with at least a couple of characters. What username would you like?' }],
+        replies: [{ text: `${usernameResult.error}\n\n${usernameResult.help}` }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'username', registrationInfo: info },
         escalate: false,
-        logEvent: { event: 'flow_step', step: 'username' }
+        logEvent: { event: 'username_validation_failed', input: text || '' }
       };
     }
     const nextInfo = {
       ...info,
-      preferred_appbeg_username: text,
-      preferred_appbeg_username_normalized: normalizeAppBegUsername(text)
+      preferred_appbeg_username: usernameResult.username
     };
     return {
       kind: 'registration_ask_password',
       replies: [{
-        text: 'Choose a password for your AppBeg account (at least 6 characters).'
+        text: `Choose a password for your AppBeg account.\n\n${APPBEG_PASSWORD_HELP}`
       }],
       statePatch: {
         currentFlow: 'bot_registration',
@@ -741,25 +780,30 @@ async function continueRegistrationDecision({ store, contact, text, action, step
         registrationInfo: nextInfo
       },
       escalate: false,
-      logEvent: { event: 'flow_step', step: 'password', username: text }
+      logEvent: { event: 'flow_step', step: 'password', username: usernameResult.username }
     };
   }
 
   if (normalizedStep === 'password') {
-    const passwordPrompt = 'Choose a password for your AppBeg account (at least 6 characters).';
+    if (!info.payment_confirmed) {
+      return waitingForPaymentConfirmationDecision(info);
+    }
+
+    const passwordPrompt = `Choose a password for your AppBeg account.\n\n${APPBEG_PASSWORD_HELP}`;
     const offTopic = registrationOffTopicGuard(text, passwordPrompt, info, 'password');
     if (offTopic) return offTopic;
 
-    if (!text || text.length < 6) {
+    const passwordResult = validateAppBegPassword(text);
+    if (!passwordResult.ok) {
       return {
         kind: 'registration_ask_password',
-        replies: [{ text: 'Please choose a password with at least 6 characters.' }],
+        replies: [{ text: `${passwordResult.error}\n\n${passwordResult.help}` }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'password', registrationInfo: info },
         escalate: false,
-        logEvent: { event: 'flow_step', step: 'password' }
+        logEvent: { event: 'flow_step', step: 'password', reason: 'validation_failed' }
       };
     }
-    const nextInfo = { ...info, appbeg_password: text };
+    const nextInfo = { ...info, appbeg_password: passwordResult.password };
     return {
       kind: 'registration_ask_referral',
       replies: [{
@@ -776,6 +820,10 @@ async function continueRegistrationDecision({ store, contact, text, action, step
   }
 
   if (normalizedStep === 'referral_code') {
+    if (!info.payment_confirmed) {
+      return waitingForPaymentConfirmationDecision(info);
+    }
+
     const referralPrompt = 'Do you have a referral code? Reply with the code, or type Skip if you do not have one.';
     const offTopic = registrationOffTopicGuard(text, referralPrompt, info, 'referral_code');
     if (offTopic) return offTopic;
@@ -865,54 +913,24 @@ async function continueRegistrationDecision({ store, contact, text, action, step
   };
 }
 
-async function handleRegistrationPaymentDone({ store, contact, info }) {
-  const window = await store.getActiveRegistrationPaymentWindow(contact.id);
-  if (!window && info.payment_confirmed) {
-    return {
-      kind: 'registration_payment_done',
-      replies: [{
-        text: 'Thanks! We confirmed your payment. What username would you like for your account?'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'username',
-        registrationInfo: info
-      },
-      escalate: false,
-      logEvent: { event: 'registration_payment_window_completed', source: 'already_confirmed' }
-    };
-  }
-  const expired = !window || new Date(window.expires_at).getTime() <= Date.now();
-  if (expired) {
-    return {
-      kind: 'registration_payment_expired',
-      expirePaymentWindowId: window?.id || null,
-      replies: [{
-        text: 'This payment window has expired. Please type Register to start again.'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'welcome',
-        registrationInfo: info
-      },
-      escalate: false,
-      logEvent: { event: 'registration_payment_window_expired' }
-    };
-  }
+function waitingForPaymentConfirmationDecision(info) {
   return {
-    kind: 'registration_payment_done',
-    completePaymentWindowId: window.id,
+    kind: 'registration_waiting_payment_confirmation',
     replies: [{
-      text: 'Thanks! We noted your payment. What username would you like for your account?'
+      text: "Thanks! We're checking your payment now.\nPlease wait while we verify it."
     }],
     statePatch: {
       currentFlow: 'bot_registration',
-      currentStep: 'username',
+      currentStep: 'waiting_for_payment_confirmation',
       registrationInfo: info
     },
     escalate: false,
-    logEvent: { event: 'registration_payment_window_completed', windowId: window.id }
+    logEvent: { event: 'done_received_waiting_for_confirmation' }
   };
+}
+
+function handleRegistrationPaymentDone(info) {
+  return waitingForPaymentConfirmationDecision(info);
 }
 
 function reviewDecision(info) {

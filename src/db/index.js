@@ -1515,12 +1515,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (routingStatus && routingStatus !== 'All') {
       if (routingStatus === 'registration_payment_matched') {
         where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned')");
+      } else if (routingStatus === 'manual_review') {
+        where.push("routing_status IN ('manual_review', 'untouched_unmatched')");
       } else {
         where.push('routing_status = @routingStatus');
       }
     }
     if (exceptionsOnly) {
-      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched')`);
+      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review')`);
     }
     if (String(query || '').trim()) {
       where.push(`(
@@ -1564,12 +1566,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SUM(CASE WHEN substr(message_date, 1, 10) = @today THEN 1 ELSE 0 END) AS messagesToday,
         SUM(CASE WHEN routing_status = 'registered_player_deposit' THEN 1 ELSE 0 END) AS registeredPlayerDeposits,
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS registrationMatched,
-        SUM(CASE WHEN routing_status = 'untouched_unmatched' THEN 1 ELSE 0 END) AS frozenManualReview,
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS frozenManualReview,
         SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS expiredWindowMatch,
         SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS parseFailed,
         SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ignored,
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched') THEN 1 ELSE 0 END) AS exceptions,
-        SUM(CASE WHEN routing_status = 'untouched_unmatched' THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS exceptions,
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS waiting,
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS failed,
         COUNT(*) AS totalMessages
       FROM payment_events
@@ -1636,6 +1638,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const next = {
       routing_status: patch.routing_status ?? current.routing_status,
       routing_owner: patch.routing_owner ?? current.routing_owner,
+      routing_reason: patch.routing_reason ?? current.routing_reason,
       contact_id: patch.contact_id ?? current.contact_id,
       deposit_event_id: patch.deposit_event_id ?? current.deposit_event_id,
       registration_payment_window_id: patch.registration_payment_window_id ?? current.registration_payment_window_id,
@@ -1647,7 +1650,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     let processingStatus = current.processing_status;
     if (next.routing_status === 'registered_player_deposit') processingStatus = 'Parsed';
     else if (next.routing_status === 'registration_payment_matched' || next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
-    else if (next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
+    else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
     else if (['expired_deposit', 'parse_failed', 'route_failed'].includes(next.routing_status)) processingStatus = 'Failed';
 
@@ -1656,6 +1659,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SET
         routing_status = ?,
         routing_owner = ?,
+        routing_reason = ?,
         contact_id = ?,
         deposit_event_id = ?,
         registration_payment_window_id = ?,
@@ -1669,6 +1673,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(
       next.routing_status,
       next.routing_owner,
+      next.routing_reason,
       next.contact_id,
       next.deposit_event_id,
       next.registration_payment_window_id,
@@ -1708,6 +1713,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       UPDATE payment_events
       SET routing_status = 'unrouted',
           routing_owner = NULL,
+          routing_reason = NULL,
           contact_id = NULL,
           deposit_event_id = NULL,
           registration_payment_window_id = NULL,
@@ -1736,7 +1742,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     contactId = null,
     registrationPaymentWindowId = null,
     staffName = 'Staff',
-    routingStatus = null
+    routingStatus = null,
+    routingReason = null
   } = {}) {
     const patch = {
       contact_id: contactId,
@@ -1744,6 +1751,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       routed_at: new Date().toISOString(),
       handled_by: staffName
     };
+    if (routingReason) patch.routing_reason = routingReason;
     if (contactId && registrationPaymentWindowId) {
       patch.routing_status = routingStatus || 'registration_payment_matched';
       patch.routing_owner = 'appbeg';
@@ -3228,7 +3236,8 @@ async function migrate(db) {
     ['handled_by', 'TEXT'],
     ['parsed_payment_app', 'TEXT'],
     ['parsed_message_time', 'TEXT'],
-    ['registration_payment_window_id', 'INTEGER']
+    ['registration_payment_window_id', 'INTEGER'],
+    ['routing_reason', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
   }

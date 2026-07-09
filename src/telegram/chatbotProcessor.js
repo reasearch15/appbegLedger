@@ -7,6 +7,7 @@ import {
 } from './chatbotEngine.js';
 import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
+import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 
 /**
  * Prefer Bot API for messages that include inline buttons (Telegram user
@@ -249,6 +250,29 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
         actorName: 'Chatbot'
       });
       console.log(`[chatbot] registration completed contact=${contact.id}`);
+    }
+
+    if (decision.createAppBegPlayer) {
+      try {
+        await createAppBegPlayerForContact(store, {
+          contactId: contact.id,
+          actorName: 'Chatbot',
+          io
+        });
+        await store.updateAutomationState(contact.id, {
+          currentFlow: null,
+          currentStep: null
+        });
+        console.log(`[chatbot] create_player_success contact=${contact.id}`);
+      } catch (error) {
+        console.log(`[chatbot] create_player_failed contact=${contact.id} error=${error.message}`);
+        await queueBotReply({
+          store,
+          user: contact,
+          text: `We couldn't create your AppBeg account right now: ${error.message}\n\nPlease reply Staff and our team will help you finish registration.`,
+          bot: bot || globalThis.telegramBot || null
+        });
+      }
     }
 
     if (decision.readyToCreatePlayer) {
