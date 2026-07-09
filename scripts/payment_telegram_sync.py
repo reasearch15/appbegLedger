@@ -10,7 +10,7 @@ from urllib import request
 from telethon import TelegramClient, events
 
 ROOT = Path(__file__).resolve().parents[1]
-SESSION_PATH = Path(os.getenv("PAYMENT_TELEGRAM_SESSION", "./data/telegram-payment.session"))
+SESSION_PATH = Path(os.getenv("PAYMENT_TELEGRAM_SESSION", "./data/appbeg-payment.session"))
 if not SESSION_PATH.is_absolute():
     SESSION_PATH = ROOT / SESSION_PATH
 PAYMENT_GROUP = os.getenv("PAYMENT_TELEGRAM_GROUP") or os.getenv("PAYMENT_GROUP_CHAT_ID")
@@ -125,20 +125,21 @@ def notify_node(event_type, payload=None):
 
 
 def credentials():
-    api_id = os.getenv("PAYMENT_TELEGRAM_API_ID") or os.getenv("TELEGRAM_ACCOUNT_API_ID")
-    api_hash = os.getenv("PAYMENT_TELEGRAM_API_HASH") or os.getenv("TELEGRAM_ACCOUNT_API_HASH")
+    api_id = os.getenv("PAYMENT_TELEGRAM_API_ID")
+    api_hash = os.getenv("PAYMENT_TELEGRAM_API_HASH")
     if not api_id or not api_hash:
-        raise RuntimeError("PAYMENT_TELEGRAM_API_ID/PAYMENT_TELEGRAM_API_HASH or TELEGRAM_ACCOUNT_API_ID/TELEGRAM_ACCOUNT_API_HASH are required.")
+        raise RuntimeError("PAYMENT_TELEGRAM_API_ID and PAYMENT_TELEGRAM_API_HASH are required for the payment group listener.")
     return int(api_id), api_hash
 
 
 def group_ref():
-    if not PAYMENT_GROUP:
-        raise RuntimeError("PAYMENT_TELEGRAM_GROUP is required.")
+    group = os.getenv("PAYMENT_TELEGRAM_GROUP") or os.getenv("PAYMENT_GROUP_CHAT_ID")
+    if not group:
+        raise RuntimeError("PAYMENT_TELEGRAM_GROUP or PAYMENT_GROUP_CHAT_ID is required.")
     try:
-        return int(PAYMENT_GROUP)
+        return int(group)
     except ValueError:
-        return PAYMENT_GROUP
+        return group
 
 
 def sender_name(sender):
@@ -185,8 +186,12 @@ def store_payment_message(db, message, sender, group, edited=False):
     sent_at = utc_iso(message.date)
     edited_at = utc_iso(message.edit_date) if getattr(message, "edit_date", None) else None
     group_id = int(getattr(group, "id"))
+    existing = db.execute(
+        "SELECT id FROM payment_events WHERE telegram_group_id = ? AND telegram_message_id = ?",
+        (group_id, message.id),
+    ).fetchone()
     payload = message_payload(message, sender, group)
-    cursor = db.execute(
+    db.execute(
         payment_event_upsert_sql(),
         (
             message.id,
@@ -206,7 +211,7 @@ def store_payment_message(db, message, sender, group, edited=False):
     )
     set_checkpoint(db, message.id)
     db.commit()
-    return cursor.rowcount > 0
+    return not existing
 
 
 async def sync_history(client, db, group):
@@ -255,7 +260,7 @@ async def sync_forever():
     SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = connect_db()
     update_sync_state(db, status="starting", last_started_at=now_iso(), last_error=None)
-    log_listener(db, "listener_starting", "Payment listener starting.")
+    log_listener(db, "payment_group_listener_started", "Payment group listener starting.")
 
     client = TelegramClient(
         str(SESSION_PATH),
@@ -286,7 +291,7 @@ async def sync_forever():
             telegram_group_title=group_title(group),
             last_error=None,
         )
-        log_listener(db, "connected", "Payment listener connected.", metadata={"accountUserId": me.id, "group": group_title(group)})
+        log_listener(db, "payment_group_connected", "Payment group listener connected.", metadata={"accountUserId": me.id, "group": group_title(group)})
         notify_node("connected", {"accountUserId": me.id, "username": me.username, "group": group_title(group)})
 
         @client.on(events.NewMessage(chats=group))
@@ -295,10 +300,10 @@ async def sync_forever():
                 sender = await event.message.get_sender()
                 inserted_or_updated = store_payment_message(db, event.message, sender, group)
                 if inserted_or_updated:
-                    log_listener(db, "message_received", "New payment message received.", metadata={"telegramMessageId": event.message.id})
+                    log_listener(db, "payment_message_saved", "Payment group message saved.", metadata={"telegramMessageId": event.message.id})
                     notify_node("message", {"telegramMessageId": event.message.id})
                 else:
-                    log_listener(db, "duplicate_ignored", "Duplicate payment message ignored.", metadata={"telegramMessageId": event.message.id})
+                    log_listener(db, "payment_message_duplicate_skipped", "Duplicate payment group message skipped.", metadata={"telegramMessageId": event.message.id})
             except Exception as exc:
                 update_sync_state(db, status="error", last_error=str(exc))
                 log_listener(db, "error", str(exc), level="error")

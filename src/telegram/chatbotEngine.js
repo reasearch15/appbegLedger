@@ -3,7 +3,8 @@ import {
   normalizePaymentTag,
   isUnregisteredStatus,
   chatbotWelcomeCooldownMs,
-  parseFirstDepositAmount
+  parseFirstDepositAmount,
+  isReferralSkipInput
 } from '../registration/utils.js';
 import {
   formatDepositAmount,
@@ -21,6 +22,8 @@ export const BOT_REGISTRATION_STEPS = [
   'first_deposit_amount',
   'await_payment_done',
   'username',
+  'password',
+  'referral_code',
   'payment_app_other',
   'payment_tag',
   'review',
@@ -518,18 +521,23 @@ async function continueRegistrationDecision({ store, contact, text, action, step
 
   if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
     return {
-      kind: 'registration_complete',
+      kind: 'registration_ready_to_create_player',
       replies: [{
-        text: "Perfect — I've saved your details for a quick staff check. You're almost in! 🎉"
+        text: "Perfect — I've saved your details. Our team will create your AppBeg account shortly. 🎉"
       }],
       statePatch: {
         currentFlow: null,
         currentStep: null,
-        registrationInfo: { ...info, registration_method: 'chatbot' }
+        registrationInfo: {
+          ...info,
+          registration_method: 'chatbot',
+          ready_to_create_player: true
+        }
       },
-      completeRegistration: true,
+      readyToCreatePlayer: true,
+      setStatus: 'Pending Verification',
       escalate: false,
-      logEvent: { event: 'flow_completed' }
+      logEvent: { event: 'flow_completed', ready_to_create_player: true }
     };
   }
 
@@ -722,18 +730,61 @@ async function continueRegistrationDecision({ store, contact, text, action, step
       preferred_appbeg_username: text,
       preferred_appbeg_username_normalized: normalizeAppBegUsername(text)
     };
-    if (nextInfo.payment_display_name && nextInfo.first_deposit_amount) {
-      return reviewDecision(nextInfo);
-    }
     return {
-      kind: 'registration_ask_payment_app',
+      kind: 'registration_ask_password',
       replies: [{
-        text: paymentAppPrompt(text, activePaymentMethods)
+        text: 'Choose a password for your AppBeg account (at least 6 characters).'
       }],
-      statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: nextInfo },
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'password',
+        registrationInfo: nextInfo
+      },
       escalate: false,
-      logEvent: { event: 'flow_step', step: 'payment_app', username: text }
+      logEvent: { event: 'flow_step', step: 'password', username: text }
     };
+  }
+
+  if (normalizedStep === 'password') {
+    const passwordPrompt = 'Choose a password for your AppBeg account (at least 6 characters).';
+    const offTopic = registrationOffTopicGuard(text, passwordPrompt, info, 'password');
+    if (offTopic) return offTopic;
+
+    if (!text || text.length < 6) {
+      return {
+        kind: 'registration_ask_password',
+        replies: [{ text: 'Please choose a password with at least 6 characters.' }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'password', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'flow_step', step: 'password' }
+      };
+    }
+    const nextInfo = { ...info, appbeg_password: text };
+    return {
+      kind: 'registration_ask_referral',
+      replies: [{
+        text: 'Do you have a referral code? Reply with the code, or type Skip if you do not have one.'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'referral_code',
+        registrationInfo: nextInfo
+      },
+      escalate: false,
+      logEvent: { event: 'flow_step', step: 'referral_code' }
+    };
+  }
+
+  if (normalizedStep === 'referral_code') {
+    const referralPrompt = 'Do you have a referral code? Reply with the code, or type Skip if you do not have one.';
+    const offTopic = registrationOffTopicGuard(text, referralPrompt, info, 'referral_code');
+    if (offTopic) return offTopic;
+
+    const nextInfo = {
+      ...info,
+      referral_code: isReferralSkipInput(text) ? null : String(text || '').trim()
+    };
+    return reviewDecision(nextInfo);
   }
 
   if (normalizedStep === 'payment_app_other') {
@@ -777,7 +828,19 @@ async function continueRegistrationDecision({ store, contact, text, action, step
       payment_tag: text,
       payment_tag_normalized: normalizePaymentTag(text)
     };
-    return reviewDecision(nextInfo);
+    return {
+      kind: 'registration_ask_password',
+      replies: [{
+        text: 'Choose a password for your AppBeg account (at least 6 characters).'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'password',
+        registrationInfo: nextInfo
+      },
+      escalate: false,
+      logEvent: { event: 'flow_step', step: 'password' }
+    };
   }
 
   if (normalizedStep === 'review' || normalizedStep === 'complete') {
@@ -804,6 +867,21 @@ async function continueRegistrationDecision({ store, contact, text, action, step
 
 async function handleRegistrationPaymentDone({ store, contact, info }) {
   const window = await store.getActiveRegistrationPaymentWindow(contact.id);
+  if (!window && info.payment_confirmed) {
+    return {
+      kind: 'registration_payment_done',
+      replies: [{
+        text: 'Thanks! We confirmed your payment. What username would you like for your account?'
+      }],
+      statePatch: {
+        currentFlow: 'bot_registration',
+        currentStep: 'username',
+        registrationInfo: info
+      },
+      escalate: false,
+      logEvent: { event: 'registration_payment_window_completed', source: 'already_confirmed' }
+    };
+  }
   const expired = !window || new Date(window.expires_at).getTime() <= Date.now();
   if (expired) {
     return {
@@ -851,6 +929,8 @@ function reviewDecision(info) {
   const summary = [
     'Please confirm these details:',
     `• Username: ${info.preferred_appbeg_username || '—'}`,
+    `• Password: ${info.appbeg_password ? '••••••••' : '—'}`,
+    `• Referral code: ${info.referral_code || 'None'}`,
     ...paymentLines,
     '',
     'Reply with one of:',

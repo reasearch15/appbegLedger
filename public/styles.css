@@ -325,6 +325,11 @@ h2 {
   border-color: #fcd34d;
 }
 
+.status-card-info {
+  background: linear-gradient(160deg, #eff6ff 0%, #dbeafe 40%, #ffffff 100%);
+  border-color: #93c5fd;
+}
+
 .status-card-icon {
   font-size: 28px;
   line-height: 1;
@@ -549,7 +554,15 @@ h2 {
 .payment-table-header,
 .payment-row {
   display: grid;
-  grid-template-columns: minmax(110px, 145px) minmax(100px, 150px) minmax(0, 1fr) minmax(80px, 116px) minmax(72px, 94px) minmax(72px, 94px);
+  grid-template-columns:
+    minmax(110px, 145px)
+    minmax(90px, 130px)
+    minmax(56px, 72px)
+    minmax(80px, 110px)
+    minmax(0, 1fr)
+    minmax(80px, 100px)
+    minmax(72px, 94px)
+    minmax(72px, 94px);
   gap: 10px;
   align-items: center;
 }
@@ -591,6 +604,17 @@ h2 {
   gap: 12px;
   padding: 12px;
   overflow-y: auto;
+}
+
+.payment-detail-actions {
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.payment-link-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .payload-box {

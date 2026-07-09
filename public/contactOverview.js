@@ -1,5 +1,15 @@
 import { escapeHtml, statusBadge } from './playerUtils.js';
 
+function isReadyToCreateAppBegPlayer(contact, info = {}) {
+  if (!info || info.appbeg_creation_complete) return false;
+  if (contact?.registration_status === 'Registered') return false;
+  return Boolean(
+    info.ready_to_create_player
+    && String(info.preferred_appbeg_username || '').trim()
+    && String(info.appbeg_password || '').trim()
+  );
+}
+
 export const REGISTRATION_WIZARD_STEPS = [
   {
     key: 'welcome',
@@ -54,7 +64,7 @@ export function registrationWizardIndex(stepKey) {
   return index >= 0 ? index : 0;
 }
 
-export function renderContactOverview({ contact, automationState, wizard, coadminSettings = {}, loading = false }) {
+export function renderContactOverview({ contact, automationState, wizard, coadminSettings = {}, loading = false, appbegCreateState = null }) {
   if (loading && !contact) {
     return `
       <section class="contact-overview-panel">
@@ -82,6 +92,7 @@ export function renderContactOverview({ contact, automationState, wizard, coadmi
 
   const registered = isRegistrationComplete(contact);
   const info = automationState?.registration_info || {};
+  const readyToCreate = isReadyToCreateAppBegPlayer(contact, info);
 
   return `
     <section class="contact-overview-panel">
@@ -94,7 +105,11 @@ export function renderContactOverview({ contact, automationState, wizard, coadmi
         </div>
       </header>
 
-      ${registered ? renderRegisteredCard(contact, info) : renderUnregisteredCard(contact, info)}
+      ${registered
+    ? renderRegisteredCard(contact, info)
+    : readyToCreate
+      ? renderReadyToCreateCard(contact, info, coadminSettings, appbegCreateState)
+      : renderUnregisteredCard(contact, info)}
 
       <section class="card overview-meta-card">
         <div class="card-title">Quick context</div>
@@ -117,10 +132,55 @@ function renderRegisteredCard(contact, info) {
         <div class="status-card-meta">
           ${infoRow('Registered at', contact.registered_at ? formatShort(contact.registered_at) : '—')}
           ${infoRow('AppBeg', info.preferred_appbeg_username || contact.appbeg_account_id || '—')}
+          ${info.appbeg_player_uid ? infoRow('Player UID', info.appbeg_player_uid) : ''}
         </div>
         <div class="status-card-actions">
           <button type="button" class="button" data-overview-action="open-chat">Open Conversation</button>
           <button type="button" class="button secondary" data-overview-action="view-profile">View Player Profile</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderReadyToCreateCard(contact, info, coadminSettings, appbegCreateState) {
+  const creating = Boolean(appbegCreateState?.creating);
+  const error = appbegCreateState?.error || '';
+  const coadminUid = String(coadminSettings?.appbeg_coadmin_uid || info.appbeg_coadmin_uid || '').trim();
+  const paymentLines = info.payment_display_name
+    ? [
+      infoRow('Payment app', info.payment_method_name || info.payment_app || '—'),
+      infoRow('Payment name', info.payment_display_name),
+      infoRow('First deposit', info.first_deposit_amount ? `$${info.first_deposit_amount}` : '—')
+    ].join('')
+    : [
+      infoRow('Payment app', info.payment_app || info.preferred_game || '—'),
+      infoRow('Payment tag', info.payment_tag || '—')
+    ].join('');
+
+  return `
+    <section class="status-card status-card-info">
+      <div class="status-card-icon" aria-hidden="true">📝</div>
+      <div class="status-card-body">
+        <h3>Ready to create AppBeg player</h3>
+        <p>Telegram registration is complete. Review the details below, then create the AppBeg account.</p>
+        <div class="status-card-meta wizard-review">
+          ${infoRow('AppBeg username', info.preferred_appbeg_username || '—')}
+          ${infoRow('Password', info.appbeg_password ? '••••••••' : '—')}
+          ${infoRow('Referral code', info.referral_code || 'None')}
+          ${paymentLines}
+          ${infoRow('Coadmin UID', coadminUid || 'Not configured')}
+        </div>
+        ${!coadminUid ? '<p class="modal-error">Configure AppBeg coadmin UID in Settings before creating a player.</p>' : ''}
+        ${error ? `<div class="modal-error">${escapeHtml(error)}</div>` : ''}
+        <div class="status-card-actions">
+          <button
+            type="button"
+            class="button"
+            data-overview-action="create-appbeg-player"
+            ${creating || !coadminUid ? 'disabled' : ''}
+          >${creating ? 'Creating…' : 'Create AppBeg Player'}</button>
+          <button type="button" class="button secondary" data-overview-action="open-chat">Open Conversation</button>
         </div>
       </div>
     </section>
@@ -239,9 +299,11 @@ function renderWizardStepBody({ step, form, info, contact, coadminSettings, savi
 }
 
 function summarizeProgress(info, contact) {
+  if (isReadyToCreateAppBegPlayer(contact, info)) return 'Ready to create AppBeg player';
   const hasUsername = Boolean(info.preferred_appbeg_username || contact.appbeg_account_id);
-  const hasTag = Boolean(info.payment_tag);
-  if (hasUsername && hasTag) return 'Ready to review';
+  const hasPassword = Boolean(info.appbeg_password);
+  const hasTag = Boolean(info.payment_tag || info.payment_display_name);
+  if (hasUsername && hasPassword && hasTag) return 'Awaiting staff review';
   if (hasUsername || hasTag) return 'In progress';
   return 'Not started';
 }

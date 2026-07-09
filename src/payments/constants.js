@@ -5,6 +5,7 @@ export const ROUTING_STATUS = {
   NOT_OUR_APPBEG: 'not_our_appbeg',
   EXPIRED_DEPOSIT: 'expired_deposit',
   DUPLICATE_IGNORED: 'duplicate_ignored',
+  IGNORED: 'ignored',
   PARSE_FAILED: 'parse_failed',
   ROUTE_FAILED: 'route_failed'
 };

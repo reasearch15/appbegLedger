@@ -58,6 +58,15 @@ function parseDatetime(groups) {
   );
 }
 
+export function detectPaymentApp(rawText = '') {
+  const text = String(rawText || '').toLowerCase();
+  if (text.includes('cash app')) return 'Cash App';
+  if (text.includes('apple pay')) return 'Apple Pay';
+  if (text.includes('zelle')) return 'Zelle';
+  if (text.includes('chime') || PAYMENT_MESSAGE_PATTERN.test(String(rawText || '').trim())) return 'Chime';
+  return null;
+}
+
 export function parsePaymentMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text) return null;
@@ -81,7 +90,8 @@ export function parsePaymentMessage(rawText) {
       payment_sender_name: match.groups.payment_sender_name.trim(),
       payment_datetime: parseDatetime(match.groups).toISOString(),
       total_in: totalIn,
-      total_out: totalOut
+      total_out: totalOut,
+      payment_app: detectPaymentApp(text)
     };
   } catch {
     return null;

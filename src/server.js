@@ -19,7 +19,13 @@ import { startPaymentWindowExpiryWorker } from './telegram/paymentWindowExpiryWo
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
 import { startPaymentTelegramSync, stopPaymentTelegramSync } from './telegram/paymentSyncProcess.js';
 import { listenerRoles } from './config/listeners.js';
-import { routePaymentEvent, routeUnprocessedPayments, startDepositEventForContact } from './payments/router.js';
+import {
+  routePaymentEvent,
+  routeUnprocessedPayments,
+  reprocessPaymentEvent,
+  markPaymentAppBegOwned,
+  startDepositEventForContact
+} from './payments/router.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { wrapAsyncHandlers, notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { createSessionMiddleware, isAuthExemptPath, isAuthenticated, requireAuth, requireAdmin } from './middleware/auth.js';
@@ -27,6 +33,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
 import { registerAppBegPlayerRoutes } from './routes/appbegPlayers.js';
+import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
 
@@ -373,6 +380,20 @@ app.post('/api/contacts/:id/registration/manual', async (req, res) => {
   }
 });
 
+app.post('/api/contacts/:id/appbeg/create-player', async (req, res) => {
+  try {
+    const result = await createAppBegPlayerForContact(store, {
+      contactId: Number(req.params.id),
+      actorName: req.body.staffName || req.session?.user?.display_name || 'Staff',
+      io
+    });
+    res.json(result);
+  } catch (error) {
+    const status = error.status && error.status >= 400 && error.status < 600 ? error.status : 400;
+    res.status(status).json({ error: error.message });
+  }
+});
+
 app.patch('/api/contacts/:id/registration-status', async (req, res) => {
   try {
     const contact = await store.updateRegistrationStatus(
@@ -432,8 +453,13 @@ app.get('/api/payments/exceptions', async (req, res) => {
 app.get('/api/payments/:id', async (req, res) => {
   const payment = await store.getPaymentEvent(Number(req.params.id));
   if (!payment) return res.status(404).json({ error: 'Payment event not found.' });
+  let registrationWindow = null;
+  if (payment.registration_payment_window_id) {
+    registrationWindow = await store.getRegistrationPaymentWindow(payment.registration_payment_window_id);
+  }
   res.json({
     payment,
+    registrationWindow,
     sync: await store.getPaymentSyncState(),
     logs: await store.listPaymentListenerLogs(50),
     routingLogs: await store.listPaymentRoutingLogs(payment.id, 100)
@@ -442,14 +468,80 @@ app.get('/api/payments/:id', async (req, res) => {
 
 app.post('/api/payments/:id/route', async (req, res) => {
   try {
-    const result = await routePaymentEvent(store, Number(req.params.id));
+    const result = await routePaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null });
     if (!result.ok) return res.status(400).json({ error: result.error || 'Routing failed.' });
-    io.emit('payments:changed');
+    emitPaymentChanged(result.payment);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.post('/api/payments/:id/reprocess', async (req, res) => {
+  try {
+    const result = await reprocessPaymentEvent(store, Number(req.params.id), { bot: globalThis.telegramBot || null });
+    if (!result.ok) return res.status(400).json({ error: result.error || 'Reprocess failed.' });
+    emitPaymentChanged(result.payment);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/payments/:id/ignore', async (req, res) => {
+  try {
+    const payment = await store.markPaymentIgnored(Number(req.params.id), {
+      staffName: req.body.staffName || 'Staff'
+    });
+    io.emit('payments:changed');
+    res.json({ payment });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/payments/:id/mark-owned', async (req, res) => {
+  try {
+    const result = await markPaymentAppBegOwned(store, Number(req.params.id), {
+      contactId: Number(req.body.contactId),
+      registrationPaymentWindowId: Number(req.body.registrationPaymentWindowId),
+      staffName: req.body.staffName || 'Staff',
+      bot: globalThis.telegramBot || null
+    });
+    emitPaymentChanged(result.payment);
+    if (result.payment?.contact_id) {
+      io.emit('contact:changed', { contactId: result.payment.contact_id, userId: result.payment.contact_id });
+      io.emit('contacts:changed');
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/payments/:id/link', async (req, res) => {
+  try {
+    const payment = await store.manuallyLinkPaymentEvent(Number(req.params.id), {
+      contactId: req.body.contactId ? Number(req.body.contactId) : null,
+      registrationPaymentWindowId: req.body.registrationPaymentWindowId
+        ? Number(req.body.registrationPaymentWindowId)
+        : null,
+      staffName: req.body.staffName || 'Staff'
+    });
+    io.emit('payments:changed');
+    res.json({ payment });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+function emitPaymentChanged(payment) {
+  io.emit('payments:changed');
+  if (payment?.contact_id) {
+    io.emit('contact:changed', { contactId: payment.contact_id, userId: payment.contact_id });
+    io.emit('contacts:changed');
+  }
+}
 
 app.post('/api/payments/route-pending', async (req, res) => {
   try {
@@ -609,14 +701,14 @@ app.post('/api/internal/payment-sync/notify', async (req, res) => {
     if (req.body?.type === 'message' && telegramMessageId) {
       const payment = await store.getPaymentEventByTelegramMessageId(telegramMessageId);
       if (payment) {
-        await routePaymentEvent(store, payment.id);
-        io.emit('payments:changed');
+        const result = await routePaymentEvent(store, payment.id, { bot: globalThis.telegramBot || null });
+        emitPaymentChanged(result.payment);
         io.emit('payment:routed', { paymentId: payment.id, telegramMessageId });
       }
     }
 
     if (req.body?.type === 'sync_complete') {
-      const results = await routeUnprocessedPayments(store, { limit: 100 });
+      const results = await routeUnprocessedPayments(store, { limit: 100, bot: globalThis.telegramBot || null });
       if (results.length) {
         io.emit('payments:changed');
       }

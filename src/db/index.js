@@ -1199,6 +1199,49 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getUserProfile(userId);
   }
 
+  async function markAppBegPlayerCreated({
+    userId,
+    playerUid,
+    username,
+    registrationInfo,
+    actorName = 'Staff'
+  }) {
+    const user = await getUserProfile(userId);
+    if (!user) throw new Error('Contact not found.');
+
+    const mergedInfo = {
+      ...((await getAutomationState(userId))?.registration_info || {}),
+      ...(registrationInfo || {}),
+      appbeg_player_uid: playerUid || null,
+      appbeg_creation_complete: true,
+      ready_to_create_player: false
+    };
+    await updateRegistrationInfo(userId, mergedInfo, actorName);
+    await db.prepare(`
+      UPDATE telegram_users
+      SET registration_method = COALESCE(registration_method, 'chatbot'),
+          appbeg_account_id = ?,
+          registration_status = 'Registered',
+          registered_at = COALESCE(registered_at, ?),
+          updated_at = ?
+      WHERE id = ?
+    `).run(playerUid || username, nowIso(), nowIso(), userId);
+
+    await logEvent({
+      telegramUserId: userId,
+      eventType: 'registration_completed',
+      title: 'Registration Completed',
+      body: 'AppBeg player created and contact marked Registered.',
+      actorName,
+      metadata: {
+        playerUid,
+        username
+      }
+    });
+
+    return await getUserProfile(userId);
+  }
+
   async function manualRegister({ userId, appbegUsername, paymentTag, registrationStatus, notes, staffName = 'Staff', allowDuplicate = false }) {
     const duplicateError = await checkRegistrationDuplicates({
       appbegUsername,
@@ -1511,9 +1554,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SUM(CASE WHEN processing_status = 'New' THEN 1 ELSE 0 END) AS newMessages,
         SUM(CASE WHEN processing_status = 'Parsed' THEN 1 ELSE 0 END) AS parsed,
         SUM(CASE WHEN routing_status = 'appbeg_owned' THEN 1 ELSE 0 END) AS appbegOwned,
-        SUM(CASE WHEN routing_status = 'not_our_appbeg' THEN 1 ELSE 0 END) AS teleledgerPending,
+        SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ignored,
+        SUM(CASE WHEN routing_status = 'unrouted' THEN 1 ELSE 0 END) AS unrouted,
         SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed') THEN 1 ELSE 0 END) AS exceptions,
-        SUM(CASE WHEN processing_status IN ('New', 'Parsed', 'Matched') AND routing_status IN ('unrouted', 'duplicate_ignored') THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN routing_status = 'unrouted' OR processing_status = 'New' THEN 1 ELSE 0 END) AS waiting,
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS failed,
         COUNT(*) AS totalMessages
       FROM payment_events
@@ -1525,7 +1569,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return (await db.prepare(`
       SELECT *
       FROM payment_events
-      WHERE COALESCE(routing_status, 'unrouted') = 'unrouted'
+      WHERE routed_at IS NULL
       ORDER BY message_date ASC, id ASC
       LIMIT ?
     `).all(Math.min(Math.max(Number(limit) || 50, 1), 500))).map(hydratePaymentEvent);
@@ -1551,6 +1595,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         parsed_payment_datetime = ?,
         parsed_total_in = ?,
         parsed_total_out = ?,
+        parsed_payment_app = ?,
         parse_error = ?,
         processing_status = ?,
         updated_at = ?
@@ -1563,6 +1608,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       parsed?.payment_datetime ?? null,
       parsed?.total_in ?? null,
       parsed?.total_out ?? null,
+      parsed?.payment_app ?? null,
       parseError,
       processingStatus,
       nowIso(),
@@ -1578,6 +1624,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       routing_owner: patch.routing_owner ?? current.routing_owner,
       contact_id: patch.contact_id ?? current.contact_id,
       deposit_event_id: patch.deposit_event_id ?? current.deposit_event_id,
+      registration_payment_window_id: patch.registration_payment_window_id ?? current.registration_payment_window_id,
       teleledger_payment_id: patch.teleledger_payment_id ?? current.teleledger_payment_id,
       teleledger_sync_status: patch.teleledger_sync_status ?? current.teleledger_sync_status,
       routed_at: patch.routed_at ?? current.routed_at,
@@ -1585,7 +1632,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
     let processingStatus = current.processing_status;
     if (next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
-    else if (next.routing_status === 'not_our_appbeg') processingStatus = 'Parsed';
+    else if (next.routing_status === 'ignored') processingStatus = 'Failed';
     else if (['expired_deposit', 'parse_failed', 'route_failed'].includes(next.routing_status)) processingStatus = 'Failed';
 
     await db.prepare(`
@@ -1595,6 +1642,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         routing_owner = ?,
         contact_id = ?,
         deposit_event_id = ?,
+        registration_payment_window_id = ?,
         teleledger_payment_id = ?,
         teleledger_sync_status = ?,
         routed_at = ?,
@@ -1607,6 +1655,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       next.routing_owner,
       next.contact_id,
       next.deposit_event_id,
+      next.registration_payment_window_id,
       next.teleledger_payment_id,
       next.teleledger_sync_status,
       next.routed_at,
@@ -1636,6 +1685,55 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ...row,
       metadata: JSON.parse(row.metadata_json || '{}')
     }));
+  }
+
+  async function resetPaymentRoutingForReprocess(paymentEventId) {
+    await db.prepare(`
+      UPDATE payment_events
+      SET routing_status = 'unrouted',
+          routing_owner = NULL,
+          contact_id = NULL,
+          deposit_event_id = NULL,
+          registration_payment_window_id = NULL,
+          teleledger_payment_id = NULL,
+          teleledger_sync_status = NULL,
+          routed_at = NULL,
+          handled_by = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `).run(nowIso(), paymentEventId);
+    return await getPaymentEvent(paymentEventId);
+  }
+
+  async function markPaymentIgnored(paymentEventId, { staffName = 'Staff' } = {}) {
+    await updatePaymentRouting(paymentEventId, {
+      routing_status: 'ignored',
+      routing_owner: 'appbeg',
+      routed_at: new Date().toISOString(),
+      handled_by: staffName
+    });
+    await logPaymentRouting(paymentEventId, 'ignored', 'Payment message marked ignored by staff.', { staffName });
+    return await getPaymentEvent(paymentEventId);
+  }
+
+  async function manuallyLinkPaymentEvent(paymentEventId, { contactId = null, registrationPaymentWindowId = null, staffName = 'Staff' } = {}) {
+    const patch = {
+      contact_id: contactId,
+      registration_payment_window_id: registrationPaymentWindowId,
+      routed_at: new Date().toISOString(),
+      handled_by: staffName
+    };
+    if (contactId && registrationPaymentWindowId) {
+      patch.routing_status = 'appbeg_owned';
+      patch.routing_owner = 'appbeg';
+    }
+    const payment = await updatePaymentRouting(paymentEventId, patch);
+    await logPaymentRouting(paymentEventId, 'manual_link', 'Payment message manually linked by staff.', {
+      contactId,
+      registrationPaymentWindowId,
+      staffName
+    });
+    return payment;
   }
 
   async function createDepositEvent({ contactId, paymentTag, paymentTagNormalized, startedBy = 'Staff', notes = '' }) {
@@ -2537,6 +2635,36 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).get(contactId);
   }
 
+  async function getRegistrationPaymentWindow(windowId) {
+    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+  }
+
+  async function listActiveRegistrationPaymentWindows(limit = 200) {
+    const now = nowIso();
+    return await db.prepare(`
+      SELECT w.*, pm.name AS payment_method_name, pm.key AS payment_method_key
+      FROM registration_payment_windows w
+      LEFT JOIN payment_methods pm ON pm.id = w.payment_method_id
+      WHERE w.status = 'active'
+        AND w.expires_at >= ?
+      ORDER BY w.id DESC
+      LIMIT ?
+    `).all(now, Math.min(Math.max(Number(limit) || 200, 1), 1000));
+  }
+
+  async function listExpiredRegistrationPaymentWindowsForMatch(limit = 200) {
+    const now = nowIso();
+    return await db.prepare(`
+      SELECT w.*, pm.name AS payment_method_name, pm.key AS payment_method_key
+      FROM registration_payment_windows w
+      LEFT JOIN payment_methods pm ON pm.id = w.payment_method_id
+      WHERE w.status IN ('active', 'expired')
+        AND w.expires_at < ?
+      ORDER BY w.expires_at DESC, w.id DESC
+      LIMIT ?
+    `).all(now, Math.min(Math.max(Number(limit) || 200, 1), 1000));
+  }
+
   async function completeRegistrationPaymentWindow(windowId) {
     const now = nowIso();
     await db.prepare(`
@@ -2742,6 +2870,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     markAutoWelcomeSent,
     checkRegistrationDuplicates,
     completeRegistration,
+    markAppBegPlayerCreated,
     manualRegister,
     listPlayers,
     getPlayerStats,
@@ -2784,6 +2913,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     ensurePaymentIdempotencyKey,
     applyPaymentParseResult,
     updatePaymentRouting,
+    resetPaymentRoutingForReprocess,
+    markPaymentIgnored,
+    manuallyLinkPaymentEvent,
     logPaymentRouting,
     listPaymentRoutingLogs,
     createDepositEvent,
@@ -2826,6 +2958,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     deletePaymentQrCode,
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
+    getRegistrationPaymentWindow,
+    listActiveRegistrationPaymentWindows,
+    listExpiredRegistrationPaymentWindowsForMatch,
     completeRegistrationPaymentWindow,
     expireRegistrationPaymentWindow,
     listDueRegistrationPaymentWindows,
@@ -3068,7 +3203,9 @@ async function migrate(db) {
     ['teleledger_sync_status', 'TEXT'],
     ['idempotency_key', 'TEXT'],
     ['routed_at', 'TEXT'],
-    ['handled_by', 'TEXT']
+    ['handled_by', 'TEXT'],
+    ['parsed_payment_app', 'TEXT'],
+    ['registration_payment_window_id', 'INTEGER']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
   }

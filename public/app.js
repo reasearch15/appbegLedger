@@ -18,7 +18,7 @@ const socket = io({ withCredentials: true });
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
 const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
 const paymentStatusFilters = ['All', 'New', 'Parsed', 'Matched', 'Failed'];
-const paymentRoutingFilters = ['All', 'appbeg_owned', 'not_our_appbeg', 'expired_deposit', 'parse_failed', 'route_failed', 'unrouted'];
+const paymentRoutingFilters = ['All', 'appbeg_owned', 'unrouted', 'expired_deposit', 'parse_failed', 'route_failed', 'ignored'];
 
 let state = {
   section: 'contacts',
@@ -77,6 +77,7 @@ let state = {
   settingsError: null,
   registrationModal: null,
   registrationWizard: null,
+  appbegCreateState: null,
   paymentMethods: [],
   paymentMethodsLoading: false,
   selectedPaymentMethodId: null,
@@ -89,6 +90,8 @@ let state = {
   showAddPaymentMethod: false,
   paymentInfoError: null,
   paymentInfoSuccess: null,
+  paymentActionBusy: false,
+  registrationWindow: null,
   authUser: null,
   ledgerUsers: [],
   ledgerUsersLoading: false,
@@ -390,6 +393,7 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
   state.draft = '';
   if (changed) {
     state.registrationWizard = null;
+    state.appbegCreateState = null;
   }
   if (!changed && state.contact?.id === id) {
     render();
@@ -580,6 +584,28 @@ async function completeRegistrationWizard() {
   }
 }
 
+async function createAppBegPlayerForContact() {
+  const id = state.selectedContactId;
+  if (!id || state.appbegCreateState?.creating) return;
+
+  state.appbegCreateState = { creating: true, error: null };
+  render();
+
+  try {
+    await api(`/api/contacts/${id}/appbeg/create-player`, {
+      method: 'POST',
+      body: JSON.stringify({ staffName: state.staffName })
+    });
+    state.appbegCreateState = null;
+    await refreshSelectedContact({ reason: 'appbeg player created' });
+    await refreshPlayers({ keepSelection: true, silent: true });
+    render();
+  } catch (error) {
+    state.appbegCreateState = { creating: false, error: error.message || 'Failed to create AppBeg player.' };
+    render();
+  }
+}
+
 async function handleOverviewAction(action) {
   if (!action) return;
   if (action === 'open-chat') {
@@ -618,6 +644,10 @@ async function handleOverviewAction(action) {
   }
   if (action === 'wizard-complete') {
     await completeRegistrationWizard();
+    return;
+  }
+  if (action === 'create-appbeg-player') {
+    await createAppBegPlayerForContact();
   }
 }
 
@@ -976,6 +1006,7 @@ async function refreshSelectedPayment() {
   }
   const data = await api(`/api/payments/${state.selectedPaymentId}`);
   state.payment = data.payment;
+  state.registrationWindow = data.registrationWindow || null;
   state.paymentSync = data.sync;
   state.paymentLogs = data.logs || [];
   state.paymentRoutingLogs = data.routingLogs || [];
@@ -1432,9 +1463,9 @@ function paymentStatCards() {
   const cards = [
     ['Messages Today', state.paymentStats.messagesToday || 0],
     ['AppBeg Owned', state.paymentStats.appbegOwned || 0],
-    ['TeleLedger Queue', state.paymentStats.teleledgerPending || 0],
     ['Exceptions', state.paymentStats.exceptions || 0],
-    ['Unrouted', state.paymentStats.waiting || 0],
+    ['Unrouted', state.paymentStats.unrouted || 0],
+    ['Ignored', state.paymentStats.ignored || 0],
     ['Total', state.paymentStats.totalMessages || 0]
   ];
   return cards.map(([label, value]) => `
@@ -1462,6 +1493,8 @@ function paymentRows() {
     <button class="payment-row ${state.selectedPaymentId === payment.id ? 'selected' : ''}" data-payment-id="${payment.id}">
       <span>${fmtDateTime(payment.message_date)}</span>
       <span class="truncate">${escapeHtml(payment.sender_name || payment.sender_username || 'Unknown')}</span>
+      <span>${payment.parsed_amount != null ? `$${payment.parsed_amount}` : '—'}</span>
+      <span class="truncate">${escapeHtml(payment.parsed_payment_app || '—')}</span>
       <span class="truncate">${escapeHtml(payment.message_text || '[non-text message]')}</span>
       <span>${payment.telegram_message_id}</span>
       <span class="badge ${escapeHtml(payment.routing_status || 'unrouted')}">${escapeHtml(payment.routing_status || 'unrouted')}</span>
@@ -1473,6 +1506,8 @@ function paymentRows() {
 function paymentDetailPanel() {
   const payment = state.payment;
   if (!payment) return '<aside class="payment-detail"><section class="chat-empty-panel">Select a payment message to inspect it.</section></aside>';
+  const busy = state.paymentActionBusy;
+  const window = state.registrationWindow;
   return `
     <aside class="payment-detail">
       <section class="card">
@@ -1482,13 +1517,19 @@ function paymentDetailPanel() {
         ${infoRow('Owner', payment.routing_owner || '-')}
         ${infoRow('Handled By', payment.handled_by || '-')}
         ${infoRow('Matched Contact', payment.contact_id || '-')}
-        ${infoRow('Deposit Event', payment.deposit_event_id || '-')}
-        ${infoRow('TeleLedger Payment', payment.teleledger_payment_id || '-')}
+        ${infoRow('Payment Window', payment.registration_payment_window_id || '-')}
         ${infoRow('Sender', payment.sender_name || payment.sender_username || 'Unknown')}
         ${infoRow('Timestamp', fmtDateTime(payment.message_date))}
         ${infoRow('Group', payment.telegram_group_title || payment.telegram_group_id)}
         ${infoRow('Telegram Message ID', payment.telegram_message_id)}
         ${infoRow('Edited', payment.is_edited ? 'Yes' : 'No')}
+        <div class="status-card-actions payment-detail-actions">
+          <button type="button" class="button secondary" data-payment-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>
+          <button type="button" class="button secondary" data-payment-action="ignore" ${busy ? 'disabled' : ''}>Ignore</button>
+          ${payment.contact_id
+    ? `<button type="button" class="button secondary" data-payment-action="open-contact" data-contact-id="${payment.contact_id}">Open Contact</button>`
+    : ''}
+        </div>
       </section>
 
       <section class="card">
@@ -1499,10 +1540,39 @@ function paymentDetailPanel() {
       <section class="card">
         <div class="card-title">Parsed Payment</div>
         ${infoRow('Amount', payment.parsed_amount != null ? `$${payment.parsed_amount}` : 'Not parsed')}
-        ${infoRow('Payment Tag', payment.parsed_recipient_tag || 'Not parsed')}
-        ${infoRow('Sender Name', payment.parsed_sender_name || '-')}
+        ${infoRow('Payment Name', payment.parsed_sender_name || 'Not parsed')}
+        ${infoRow('Payment App', payment.parsed_payment_app || 'Not detected')}
+        ${infoRow('Payment Tag', payment.parsed_recipient_tag || '-')}
         ${infoRow('Payment Time', payment.parsed_payment_datetime ? fmtDateTime(payment.parsed_payment_datetime) : '-')}
         ${infoRow('Parse Error', payment.parse_error || '-')}
+      </section>
+
+      <section class="card">
+        <div class="card-title">Registration Match</div>
+        ${window
+    ? `
+          ${infoRow('Window ID', window.id)}
+          ${infoRow('Contact', window.contact_id)}
+          ${infoRow('Display Name', window.payment_display_name || '-')}
+          ${infoRow('Expected Amount', window.first_deposit_amount != null ? `$${window.first_deposit_amount}` : '-')}
+          ${infoRow('Window Status', window.status)}
+          ${infoRow('Expires', window.expires_at ? fmtDateTime(window.expires_at) : '-')}
+        `
+    : '<div class="subtle">No registration payment window linked.</div>'}
+        <div class="payment-link-form">
+          <label class="field-label">
+            <span>Contact ID</span>
+            <input id="paymentLinkContactId" value="${escapeHtml(String(payment.contact_id || ''))}" placeholder="Ledger contact id" ${busy ? 'disabled' : ''} />
+          </label>
+          <label class="field-label">
+            <span>Payment Window ID</span>
+            <input id="paymentLinkWindowId" value="${escapeHtml(String(payment.registration_payment_window_id || ''))}" placeholder="Registration window id" ${busy ? 'disabled' : ''} />
+          </label>
+          <div class="status-card-actions payment-detail-actions">
+            <button type="button" class="button secondary" data-payment-action="link" ${busy ? 'disabled' : ''}>Link</button>
+            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark AppBeg Owned</button>
+          </div>
+        </div>
       </section>
 
       <section class="card">
@@ -1519,12 +1589,6 @@ function paymentDetailPanel() {
           </article>
         `).join('')
     : '<div class="empty-state">No routing audit entries yet.</div>'}
-      </section>
-
-      <section class="card">
-        <div class="card-title">Balance Loading</div>
-        ${infoRow('AppBeg Username', 'Not loaded yet')}
-        ${infoRow('Balance Update', 'Not implemented')}
       </section>
 
       <section class="card">
@@ -1561,7 +1625,8 @@ function contactsWorkspace() {
     automationState: state.automationState,
     wizard: state.registrationWizard,
     coadminSettings: state.coadminSettings,
-    loading: state.contactLoading
+    loading: state.contactLoading,
+    appbegCreateState: state.appbegCreateState
   });
   const wizardActive = Boolean(state.registrationWizard?.active);
   return `
@@ -1649,6 +1714,8 @@ function paymentsWorkspace() {
           <div class="payment-table-header">
             <span>Time</span>
             <span>Sender</span>
+            <span>Amount</span>
+            <span>Payment App</span>
             <span>Preview</span>
             <span>Telegram ID</span>
             <span>Routing</span>
@@ -1789,6 +1856,64 @@ function settingsAuditRows() {
       </div>
     </article>
   `).join('');
+}
+
+async function handlePaymentAction(action, button) {
+  if (!state.selectedPaymentId || state.paymentActionBusy) return;
+  const paymentId = state.selectedPaymentId;
+
+  if (action === 'open-contact') {
+    const contactId = Number(button?.dataset?.contactId);
+    if (contactId) await openContactById(contactId, { pane: 'overview' });
+    return;
+  }
+
+  state.paymentActionBusy = true;
+  render();
+
+  try {
+    if (action === 'reprocess') {
+      await api(`/api/payments/${paymentId}/reprocess`, { method: 'POST' });
+    } else if (action === 'ignore') {
+      await api(`/api/payments/${paymentId}/ignore`, {
+        method: 'POST',
+        body: JSON.stringify({ staffName: state.staffName })
+      });
+    } else if (action === 'link') {
+      const contactId = Number(document.querySelector('#paymentLinkContactId')?.value || 0);
+      const registrationPaymentWindowId = Number(document.querySelector('#paymentLinkWindowId')?.value || 0);
+      await api(`/api/payments/${paymentId}/link`, {
+        method: 'POST',
+        body: JSON.stringify({
+          contactId: contactId || null,
+          registrationPaymentWindowId: registrationPaymentWindowId || null,
+          staffName: state.staffName
+        })
+      });
+    } else if (action === 'mark-owned') {
+      const contactId = Number(document.querySelector('#paymentLinkContactId')?.value || 0);
+      const registrationPaymentWindowId = Number(document.querySelector('#paymentLinkWindowId')?.value || 0);
+      if (!contactId || !registrationPaymentWindowId) {
+        throw new Error('Contact ID and Payment Window ID are required to mark AppBeg owned.');
+      }
+      await api(`/api/payments/${paymentId}/mark-owned`, {
+        method: 'POST',
+        body: JSON.stringify({
+          contactId,
+          registrationPaymentWindowId,
+          staffName: state.staffName
+        })
+      });
+    }
+    await refreshPayments({ keepSelection: true });
+    await refreshSelectedPayment();
+  } catch (error) {
+    console.error('[payments] action failed:', error);
+    alert(error.message || 'Payment action failed.');
+  } finally {
+    state.paymentActionBusy = false;
+    render();
+  }
 }
 
 function render() {
@@ -2010,6 +2135,11 @@ function bindEvents() {
         state.settingsSuccess = null;
         await refreshLedgerUsers();
       }
+      if (state.section === 'payments') {
+        state.mobilePaymentsPane = 'list';
+        await refreshPayments({ keepSelection: true });
+        await refreshSelectedPayment();
+      }
       if (state.section === 'players') {
         await refreshPlayers({ keepSelection: true });
       }
@@ -2160,6 +2290,14 @@ function bindEvents() {
       state.mobilePaymentsPane = 'detail';
       await refreshSelectedPayment();
       render();
+    });
+  });
+
+  document.querySelectorAll('[data-payment-action]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void handlePaymentAction(button.dataset.paymentAction, button);
     });
   });
 
@@ -2667,10 +2805,27 @@ socket.on('players:changed', () => {});
 
 socket.on('player:updated', () => {});
 
-socket.on('payments:changed', () => {});
+socket.on('payments:changed', () => {
+  if (state.section !== 'payments') return;
+  void refreshPayments({ keepSelection: true })
+    .then(() => refreshSelectedPayment())
+    .then(() => render());
+});
 
-socket.on('payment:new', () => {});
+socket.on('payment:new', () => {
+  if (state.section !== 'payments') return;
+  void refreshPayments({ keepSelection: true })
+    .then(() => refreshSelectedPayment())
+    .then(() => render());
+});
 
-socket.on('payment-sync:changed', () => {});
+socket.on('payment-sync:changed', () => {
+  if (state.section !== 'payments') return;
+  void api('/api/payment-sync/status')
+    .then(({ sync }) => {
+      state.paymentSync = sync;
+      render();
+    });
+});
 
 boot();

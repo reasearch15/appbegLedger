@@ -24,6 +24,21 @@ export function isUnregisteredStatus(status) {
   return ['New', 'Collecting Info', 'Pending', 'Pending Verification'].includes(status);
 }
 
+export function isReadyToCreateAppBegPlayer(contact, info = {}) {
+  if (!info || info.appbeg_creation_complete) return false;
+  if (contact?.registration_status === 'Registered') return false;
+  return Boolean(
+    info.ready_to_create_player
+    && String(info.preferred_appbeg_username || '').trim()
+    && String(info.appbeg_password || '').trim()
+  );
+}
+
+export function isReferralSkipInput(text = '') {
+  const value = String(text || '').trim().toLowerCase();
+  return !value || ['skip', 'none', 'no', 'n/a', 'na', '-'].includes(value);
+}
+
 export function registrationCompletionStatus() {
   const configured = process.env.REGISTRATION_FLOW_COMPLETION_STATUS || 'Pending Verification';
   return configured === 'Registered' ? 'Registered' : 'Pending Verification';

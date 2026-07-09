@@ -251,6 +251,10 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
       console.log(`[chatbot] registration completed contact=${contact.id}`);
     }
 
+    if (decision.readyToCreatePlayer) {
+      console.log(`[chatbot] ready_to_create_player contact=${contact.id}`);
+    }
+
     const afterState = await store.getAutomationState(contact.id);
     console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
 
