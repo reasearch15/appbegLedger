@@ -1170,6 +1170,7 @@ async function sendTelegramMessage(req, res) {
       finalStaffReply: text,
       staffUserId: req.ledgerUser?.id || null,
       staffUsername: req.ledgerUser?.username || req.body.staffName || 'Staff',
+      replyUsed: req.body.replyUsed || null,
       staffFeedbackReason: req.body.staffFeedbackReason || null
     });
     if (trainingExample) {

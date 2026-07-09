@@ -157,16 +157,22 @@ export async function migratePostgres(driver) {
       incoming_message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
       customer_message TEXT,
       conversation_context TEXT,
+      conversation_history TEXT,
       detected_intent TEXT,
       detected_entities_json TEXT NOT NULL DEFAULT '{}',
+      entities_json TEXT NOT NULL DEFAULT '{}',
       ai_draft_reply TEXT,
+      ai_reply TEXT,
       final_staff_reply TEXT,
+      staff_reply TEXT,
+      reply_used TEXT,
       staff_user_id TEXT,
       staff_username TEXT,
       was_edited BOOLEAN NOT NULL DEFAULT FALSE,
       edit_distance_percent DOUBLE PRECISION,
       staff_feedback_reason TEXT,
       outcome TEXT NOT NULL DEFAULT 'drafted',
+      confidence DOUBLE PRECISION,
       language TEXT,
       sentiment TEXT,
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
@@ -176,6 +182,12 @@ export async function migratePostgres(driver) {
       ON staff_ai_training_examples(contact_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created
       ON staff_ai_training_examples(outcome, created_at DESC);
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS conversation_history TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS entities_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS ai_reply TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS staff_reply TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS reply_used TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
   `);
 
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);

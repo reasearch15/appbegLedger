@@ -60,6 +60,7 @@ let state = {
   automationLogs: [],
   staffAiDraft: null,
   staffAiApprenticeMode: { enabled: true },
+  staffAiBadDraftId: null,
   allTags: [],
   quickReplies: [],
   query: '',
@@ -1289,7 +1290,7 @@ function staffAiSuggestedReplyPanel() {
         <div class="ai-suggested-header">
           <div>
             <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">Apprentice mode is OFF. Manual replies only.</div>
+            <div class="subtle">Train Mode is off. Manual replies only.</div>
           </div>
         </div>
       </section>
@@ -1301,21 +1302,14 @@ function staffAiSuggestedReplyPanel() {
         <div class="ai-suggested-header">
           <div>
             <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">Waiting for the next customer message draft.</div>
+            <div class="subtle">Waiting for the next customer support draft.</div>
           </div>
-          <span class="badge">Apprentice</span>
+          <span class="badge">Train</span>
         </div>
       </section>
     `;
   }
-  const feedbackButtons = [
-    ['wrong_intent', 'Mark Wrong Intent'],
-    ['needs_staff', 'Needs Staff'],
-    ['too_formal', 'Too Formal'],
-    ['too_long', 'Too Long'],
-    ['wrong_info', 'Wrong Info'],
-    ['better_wording', 'Better Wording']
-  ];
+  const badOpen = Number(state.staffAiBadDraftId) === Number(draft.id);
   return `
     <section class="ai-suggested-reply-panel">
       <div class="ai-suggested-header">
@@ -1326,33 +1320,31 @@ function staffAiSuggestedReplyPanel() {
             ${draft.created_at ? fmtDateTime(draft.created_at) : 'Private draft'}
           </div>
         </div>
-        <span class="badge">Apprentice</span>
+        <span class="badge">Train</span>
       </div>
       ${draft.customer_message ? `
         <div class="ai-context-block">
-          <span>Customer</span>
+          <span>Customer message</span>
           <p>${escapeHtml(draft.customer_message)}</p>
         </div>
       ` : ''}
-      ${draft.conversation_context ? `
-        <details class="ai-context-details">
-          <summary>Conversation context</summary>
-          <pre>${escapeHtml(draft.conversation_context)}</pre>
-        </details>
-      ` : ''}
-      <textarea id="aiSuggestedReplyText" class="ai-suggested-text">${escapeHtml(draft.ai_draft_reply)}</textarea>
+      <div class="ai-context-block">
+        <span>AI suggested reply</span>
+        <p>${escapeHtml(draft.ai_draft_reply)}</p>
+      </div>
       <div class="ai-suggested-actions">
-        <button type="button" class="button secondary small" data-ai-draft-action="use">Use Reply</button>
-        <button type="button" class="button secondary small" data-ai-draft-action="edit">Edit</button>
-        <button type="button" class="button small" data-ai-draft-action="send">Send</button>
-        <button type="button" class="button secondary small" data-ai-draft-action="save-training">Save as Training Data</button>
-        <button type="button" class="button secondary small" data-ai-draft-action="regenerate">Regenerate</button>
+        <button type="button" class="button small" data-ai-draft-action="good">GOOD</button>
+        <button type="button" class="button secondary small" data-ai-draft-action="bad">BAD</button>
       </div>
-      <div class="ai-feedback-actions">
-        ${feedbackButtons.map(([reason, label]) => `
-          <button type="button" class="quick-reply" data-ai-feedback="${reason}">${escapeHtml(label)}</button>
-        `).join('')}
-      </div>
+      ${badOpen ? `
+        <div class="ai-bad-reply-form">
+          <label class="field-label">
+            <span>Correct reply</span>
+            <textarea id="aiCorrectReplyText" class="ai-suggested-text" placeholder="Write the correct reply"></textarea>
+          </label>
+          <button type="button" class="button small" data-ai-draft-action="send-bad">SEND</button>
+        </div>
+      ` : ''}
     </section>
   `;
 }
@@ -1998,18 +1990,30 @@ function settingsWorkspace() {
               <span>Telegram Account ID</span>
               <input id="telegramAccountId" value="${escapeHtml(settings.telegram_account_id || '')}" placeholder="Numeric Telegram user ID" />
             </label>
-            <div class="form-section-label">Staff AI</div>
-            <label class="settings-toggle-row">
-              <input
-                id="staffAiApprenticeMode"
-                type="checkbox"
-                ${settings.staff_ai_apprentice_mode_enabled !== false ? 'checked' : ''}
-              />
-              <span>
-                <strong>AI Apprentice Mode</strong>
-                <small>AI drafts privately. Staff reviews and sends every Telegram reply.</small>
-              </span>
-            </label>
+            <div class="form-section-label">AI Mode</div>
+            <div class="settings-radio-group">
+              <label class="settings-toggle-row">
+                <input id="staffAiApprenticeMode" name="aiMode" type="radio" value="train" checked />
+                <span>
+                  <strong>Train</strong>
+                  <small>AI drafts one support reply. Staff chooses GOOD or BAD.</small>
+                </span>
+              </label>
+              <label class="settings-toggle-row is-disabled">
+                <input name="aiMode" type="radio" value="review" disabled />
+                <span>
+                  <strong>Review</strong>
+                  <small>Prepared for later. Not enabled yet.</small>
+                </span>
+              </label>
+              <label class="settings-toggle-row is-disabled">
+                <input name="aiMode" type="radio" value="auto" disabled />
+                <span>
+                  <strong>Auto</strong>
+                  <small>Prepared for later. Not enabled yet.</small>
+                </span>
+              </label>
+            </div>
             <div class="settings-meta subtle">
               Last updated ${settings.updated_at ? fmtDateTime(settings.updated_at) : 'never'}
               ${settings.updated_by ? ` by ${escapeHtml(settings.updated_by)}` : ''}
@@ -2586,12 +2590,6 @@ function bindEvents() {
       void handleAiDraftAction(button.dataset.aiDraftAction);
     });
   });
-  document.querySelectorAll('[data-ai-feedback]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.disabled) return;
-      void markAiDraftFeedback(button.dataset.aiFeedback, 'feedback');
-    });
-  });
 }
 
 async function selectVisibleIfNeeded() {
@@ -2829,40 +2827,58 @@ function setComposerDraft(text) {
 async function handleAiDraftAction(action) {
   const draft = state.staffAiDraft;
   if (!draft?.ai_draft_reply) return;
-  const draftTextarea = document.querySelector('#aiSuggestedReplyText');
-  const text = (draftTextarea?.value || draft.ai_draft_reply || '').trim();
-  if (action === 'use' || action === 'edit') {
-    setComposerDraft(text);
+  if (action === 'good') {
+    await sendStaffAiTrainingReply(draft.ai_draft_reply, 'good');
     return;
   }
-  if (action === 'send') {
-    setComposerDraft(text);
-    await submitOutgoingMessage();
+  if (action === 'bad') {
+    state.staffAiBadDraftId = draft.id;
+    render();
     return;
   }
-  if (action === 'save-training') {
-    await markAiDraftFeedback('saved_by_staff', 'saved_training_data');
-    return;
-  }
-  if (action === 'regenerate') {
-    await markAiDraftFeedback('regenerate_requested', 'feedback');
+  if (action === 'send-bad') {
+    const text = document.querySelector('#aiCorrectReplyText')?.value?.trim() || '';
+    if (!text) {
+      document.querySelector('#aiCorrectReplyText')?.focus();
+      return;
+    }
+    await sendStaffAiTrainingReply(text, 'bad');
   }
 }
 
-async function markAiDraftFeedback(reason, outcome = 'feedback') {
-  const draft = state.staffAiDraft;
-  if (!draft?.id || !state.selectedContactId) return;
-  await api(`/api/contacts/${state.selectedContactId}/staff-ai-draft/feedback`, {
-    method: 'POST',
-    body: JSON.stringify({
-      trainingExampleId: draft.id,
-      reason,
-      outcome
-    })
-  });
-  contactDetailCache.delete(Number(state.selectedContactId));
-  await refreshSelectedContact({ force: true, reason: 'ai draft feedback' });
-  render();
+async function sendStaffAiTrainingReply(text, replyUsed) {
+  if (sendingMessage || !state.selectedContactId) return;
+  const finalText = String(text || '').trim();
+  if (!finalText) return;
+
+  const clientRequestId = crypto.randomUUID();
+  sendingMessage = true;
+  setComposerSending(true);
+  try {
+    await api(`/api/contacts/${state.selectedContactId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        text: finalText,
+        staffName: state.staffName,
+        client_request_id: clientRequestId,
+        trainingExampleId: state.staffAiDraft?.id || null,
+        replyUsed,
+        staffFeedbackReason: replyUsed
+      })
+    });
+    state.draft = '';
+    state.staffAiBadDraftId = null;
+    contactDetailCache.delete(Number(state.selectedContactId));
+    await refreshContacts({ force: true, reason: 'ai training reply sent' });
+    render();
+  } catch (error) {
+    alert(error.message);
+    setComposerSending(false);
+  } finally {
+    sendingMessage = false;
+    state.sendingMessage = false;
+    setComposerSending(false);
+  }
 }
 
 async function submitOutgoingMessage() {
@@ -2884,7 +2900,9 @@ async function submitOutgoingMessage() {
         text,
         staffName: state.staffName,
         client_request_id: clientRequestId,
-        trainingExampleId: state.staffAiDraft?.id || null
+        trainingExampleId: state.staffAiDraft?.id || null,
+        replyUsed: state.staffAiDraft?.id ? 'bad' : null,
+        staffFeedbackReason: state.staffAiDraft?.id ? 'manual_override' : null
       })
     });
     state.draft = '';

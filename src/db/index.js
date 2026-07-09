@@ -806,6 +806,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     aiDraftReply = '',
     language = null,
     sentiment = null,
+    confidence = null,
     outcome = 'drafted'
   }) {
     const contact = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
@@ -829,9 +830,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SET telegram_user_id = ?,
             customer_message = ?,
             conversation_context = ?,
+            conversation_history = ?,
             detected_intent = ?,
             detected_entities_json = ?,
+            entities_json = ?,
             ai_draft_reply = ?,
+            ai_reply = ?,
+            confidence = ?,
             language = ?,
             sentiment = ?,
             created_at = ?
@@ -840,9 +845,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         String(telegramUserId || contact.telegram_id || ''),
         customerMessage || null,
         context || null,
+        context || null,
         detectedIntent || null,
         JSON.stringify(detectedEntities || {}),
+        JSON.stringify(detectedEntities || {}),
         aiDraftReply || null,
+        aiDraftReply || null,
+        confidence == null ? null : Number(confidence),
         language || contact.language_code || null,
         sentiment || null,
         now,
@@ -853,19 +862,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const result = await db.prepare(`
       INSERT INTO staff_ai_training_examples (
         contact_id, telegram_user_id, incoming_message_id, customer_message, conversation_context,
-        detected_intent, detected_entities_json, ai_draft_reply, outcome, language, sentiment, created_at
+        conversation_history, detected_intent, detected_entities_json, entities_json, ai_draft_reply,
+        ai_reply, outcome, confidence, language, sentiment, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId || contact.telegram_id || ''),
       incomingMessageId || null,
       customerMessage || null,
       context || null,
+      context || null,
       detectedIntent || null,
       JSON.stringify(detectedEntities || {}),
+      JSON.stringify(detectedEntities || {}),
+      aiDraftReply || null,
       aiDraftReply || null,
       outcome,
+      confidence == null ? null : Number(confidence),
       language || contact.language_code || null,
       sentiment || null,
       now
@@ -915,6 +929,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     staffUserId = null,
     staffUsername = 'Staff',
     outcome = 'sent',
+    replyUsed = null,
     staffFeedbackReason = null
   }) {
     const sentAt = nowIso();
@@ -948,20 +963,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     await db.prepare(`
       UPDATE staff_ai_training_examples
       SET final_staff_reply = ?,
+          staff_reply = ?,
           staff_user_id = ?,
           staff_username = ?,
           was_edited = ?,
           edit_distance_percent = ?,
+          reply_used = ?,
           staff_feedback_reason = COALESCE(?, staff_feedback_reason),
           outcome = ?,
           sent_at = ?
       WHERE id = ?
     `).run(
       finalText,
+      finalText,
       staffUserId != null ? String(staffUserId) : null,
       staffUsername || 'Staff',
       wasEdited ? 1 : 0,
       editDistancePercent,
+      replyUsed || (wasEdited ? 'bad' : 'good'),
       staffFeedbackReason || null,
       outcome,
       sentAt,
@@ -3507,8 +3526,13 @@ function hydrateStaffAiTrainingExample(row) {
     contact_id: row.contact_id != null ? Number(row.contact_id) : row.contact_id,
     incoming_message_id: row.incoming_message_id != null ? Number(row.incoming_message_id) : row.incoming_message_id,
     detected_entities: parseJsonField(row.detected_entities_json, {}),
+    conversation_history: row.conversation_history || row.conversation_context || '',
+    entities: parseJsonField(row.entities_json || row.detected_entities_json, {}),
+    ai_reply: row.ai_reply || row.ai_draft_reply || '',
+    staff_reply: row.staff_reply || row.final_staff_reply || '',
     was_edited: Boolean(row.was_edited),
-    edit_distance_percent: row.edit_distance_percent == null ? null : Number(row.edit_distance_percent)
+    edit_distance_percent: row.edit_distance_percent == null ? null : Number(row.edit_distance_percent),
+    confidence: row.confidence == null ? null : Number(row.confidence)
   };
 }
 
@@ -3970,6 +3994,12 @@ async function migrate(db) {
   `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created ON staff_ai_training_examples(contact_id, created_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created ON staff_ai_training_examples(outcome, created_at DESC)');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'conversation_history', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'entities_json', "TEXT NOT NULL DEFAULT '{}'");
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'ai_reply', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'staff_reply', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'reply_used', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'confidence', 'REAL');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings_audit_log (

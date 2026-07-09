@@ -8,6 +8,7 @@ import {
 import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
+import { generateCustomerSupportDraft } from './customerSupportAi.js';
 
 /**
  * Prefer Bot API for messages that include inline buttons (Telegram user
@@ -235,6 +236,46 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
       return { ok: true, skipped: true, reason: 'manual_mode_suppressed' };
     }
 
+    if (apprenticeMode?.enabled) {
+      const supportDraft = await generateCustomerSupportDraft({
+        store,
+        contact,
+        messageText: job.input_text || ''
+      });
+      await store.createStaffAiTrainingDraft({
+        contactId: contact.id,
+        telegramUserId: contact.telegram_id,
+        incomingMessageId: job.message_id || null,
+        customerMessage: job.input_text || '',
+        conversationContext: supportDraft.context,
+        detectedIntent: supportDraft.kind,
+        detectedEntities: supportDraft.entities,
+        aiDraftReply: supportDraft.reply,
+        language: contact.language_code || null,
+        sentiment: null,
+        confidence: supportDraft.confidence
+      });
+      await store.logAutomationDecision({
+        userId: contact.id,
+        messageId: job.message_id,
+        incomingTelegramMessageId: job.incoming_telegram_message_id,
+        actionTaken: `support_train_draft:${supportDraft.kind}`,
+        responseSent: supportDraft.reply,
+        metadata: {
+          jobId: job.id,
+          trainMode: true,
+          autoSendSuppressed: true,
+          backendActionsSuppressed: true,
+          confidence: supportDraft.confidence,
+          intent: supportDraft.kind
+        }
+      });
+      console.log(`[support-ai] train_draft_saved contact=${contact.id} job=${job.id} intent=${supportDraft.kind}`);
+      await store.completeBotJob(job.id, { status: 'completed', errorText: 'Train Mode: support draft saved, auto-send suppressed' });
+      emitUpdates(io, contact);
+      return { ok: true, supportDraft, trainMode: true };
+    }
+
     const decision = await decideBotReply({
       store,
       contact,
@@ -248,53 +289,6 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
       if (logEvent?.event) {
         console.log(`[chatbot] ${logEvent.event} contact=${contact.id}${formatLogExtra(logEvent)}`);
       }
-    }
-
-    if (apprenticeMode?.enabled) {
-      const draftReply = (decision.replies || [])
-        .map((reply) => reply?.text)
-        .filter(Boolean)
-        .join('\n\n');
-      if (draftReply) {
-        await store.createStaffAiTrainingDraft({
-          contactId: contact.id,
-          telegramUserId: contact.telegram_id,
-          incomingMessageId: job.message_id || null,
-          customerMessage: job.input_text || '',
-          detectedIntent: decision.kind || job.action || 'unknown',
-          detectedEntities: {
-            action: job.action || null,
-            currentFlow: beforeState?.current_flow || null,
-            currentStep: beforeState?.current_step || null,
-            decisionKind: decision.kind || null,
-            buttons: (decision.replies || []).flatMap((reply) => reply.buttons || [])
-          },
-          aiDraftReply: draftReply,
-          language: contact.language_code || null,
-          sentiment: null
-        });
-        console.log(`[chatbot] apprentice_draft_saved contact=${contact.id} job=${job.id} kind=${decision.kind}`);
-      } else {
-        console.log(`[chatbot] apprentice_no_draft contact=${contact.id} job=${job.id} kind=${decision.kind}`);
-      }
-      await store.logAutomationDecision({
-        userId: contact.id,
-        messageId: job.message_id,
-        incomingTelegramMessageId: job.incoming_telegram_message_id,
-        actionTaken: `apprentice_draft:${decision.kind}`,
-        responseSent: draftReply,
-        metadata: {
-          jobId: job.id,
-          apprenticeMode: true,
-          autoSendSuppressed: true,
-          moneyAndAccountActionsSuppressed: true,
-          kind: decision.kind,
-          action: job.action || null
-        }
-      });
-      await store.completeBotJob(job.id, { status: 'completed', errorText: 'Apprentice mode: draft saved, auto-send suppressed' });
-      emitUpdates(io, contact);
-      return { ok: true, decision, apprenticeMode: true };
     }
 
     if (decision.setStatus) {
