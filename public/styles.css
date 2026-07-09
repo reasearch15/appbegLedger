@@ -1211,6 +1211,38 @@ h2 {
   gap: 10px;
 }
 
+.train-bot-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.train-bot-toggle input {
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
+.train-bot-toggle.is-readonly {
+  border-color: var(--line);
+  background: #f8fafc;
+  color: var(--muted);
+}
+
+.train-bot-toggle input:disabled {
+  cursor: not-allowed;
+}
+
 .ai-suggested-reply-panel:not(.is-empty):not(.is-muted) .ai-suggested-header .subtle {
   display: none;
 }

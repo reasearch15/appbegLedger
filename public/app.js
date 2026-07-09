@@ -61,6 +61,7 @@ let state = {
   staffAiDraft: null,
   staffAiApprenticeMode: { enabled: true },
   staffAiBadDraftId: null,
+  trainBotSaving: false,
   allTags: [],
   quickReplies: [],
   query: '',
@@ -883,8 +884,7 @@ function readCoadminFormValues() {
     coadmin_code: document.querySelector('#coadminCode')?.value?.trim() ?? state.coadminSettings.coadmin_code ?? '',
     appbeg_coadmin_uid: document.querySelector('#appbegCoadminUid')?.value?.trim() ?? state.coadminSettings.appbeg_coadmin_uid ?? '',
     telegram_account_username: document.querySelector('#telegramAccountUsername')?.value?.trim() ?? state.coadminSettings.telegram_account_username ?? '',
-    telegram_account_id: document.querySelector('#telegramAccountId')?.value?.trim() ?? state.coadminSettings.telegram_account_id ?? '',
-    staff_ai_apprentice_mode_enabled: document.querySelector('#staffAiApprenticeMode')?.checked ?? state.coadminSettings.staff_ai_apprentice_mode_enabled ?? true
+    telegram_account_id: document.querySelector('#telegramAccountId')?.value?.trim() ?? state.coadminSettings.telegram_account_id ?? ''
   };
 }
 
@@ -1284,6 +1284,20 @@ function staffAiSuggestedReplyPanel() {
   if (!state.contact) return '';
   const mode = state.staffAiApprenticeMode || { enabled: true };
   const draft = state.staffAiDraft;
+  const trainEnabled = mode.enabled !== false;
+  const canToggleTrainBot = isAdmin();
+  const toggle = `
+    <label class="train-bot-toggle ${canToggleTrainBot ? '' : 'is-readonly'}">
+      <span>Train Bot: <strong>${trainEnabled ? 'ON' : 'OFF'}</strong></span>
+      <input
+        id="trainBotToggle"
+        type="checkbox"
+        ${trainEnabled ? 'checked' : ''}
+        ${state.trainBotSaving || !canToggleTrainBot ? 'disabled' : ''}
+        aria-label="Train Bot ${trainEnabled ? 'ON' : 'OFF'}"
+      />
+    </label>
+  `;
   if (!mode.enabled) {
     return `
       <section class="ai-suggested-reply-panel is-muted">
@@ -1292,6 +1306,7 @@ function staffAiSuggestedReplyPanel() {
             <div class="card-title">AI Suggested Reply</div>
             <div class="subtle">Train Mode is off. Manual replies only.</div>
           </div>
+          ${toggle}
         </div>
       </section>
     `;
@@ -1304,7 +1319,7 @@ function staffAiSuggestedReplyPanel() {
             <div class="card-title">AI Suggested Reply</div>
             <div class="subtle">Waiting for the next customer support draft.</div>
           </div>
-          <span class="badge">Train</span>
+          ${toggle}
         </div>
       </section>
     `;
@@ -1320,7 +1335,7 @@ function staffAiSuggestedReplyPanel() {
             ${draft.created_at ? fmtDateTime(draft.created_at) : 'Private draft'}
           </div>
         </div>
-        <span class="badge">Train</span>
+        ${toggle}
       </div>
       ${draft.customer_message ? `
         <div class="ai-context-block">
@@ -2590,6 +2605,10 @@ function bindEvents() {
       void handleAiDraftAction(button.dataset.aiDraftAction);
     });
   });
+  document.querySelector('#trainBotToggle')?.addEventListener('change', (event) => {
+    if (event.target.disabled) return;
+    void setTrainBotEnabled(Boolean(event.target.checked));
+  });
 }
 
 async function selectVisibleIfNeeded() {
@@ -2881,6 +2900,41 @@ async function sendStaffAiTrainingReply(text, replyUsed) {
   }
 }
 
+async function setTrainBotEnabled(enabled) {
+  state.trainBotSaving = true;
+  state.staffAiApprenticeMode = {
+    ...state.staffAiApprenticeMode,
+    enabled
+  };
+  if (!enabled) {
+    state.staffAiBadDraftId = null;
+  }
+  render();
+  try {
+    const payload = await api('/api/settings/staff-ai-apprentice-mode', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        enabled,
+        staffName: state.staffName
+      })
+    });
+    state.staffAiApprenticeMode = payload.staffAiApprenticeMode || state.staffAiApprenticeMode;
+    contactDetailCache.clear();
+    if (state.selectedContactId) {
+      await refreshSelectedContact({ force: true, reason: 'train bot toggle' });
+    }
+  } catch (error) {
+    alert(error.message || 'Could not update Train Bot.');
+    state.staffAiApprenticeMode = {
+      ...state.staffAiApprenticeMode,
+      enabled: !enabled
+    };
+  } finally {
+    state.trainBotSaving = false;
+    render();
+  }
+}
+
 async function submitOutgoingMessage() {
   if (sendingMessage) return;
   if (!state.selectedContactId) return;
@@ -3115,6 +3169,19 @@ async function boot() {
 
 socket.on('auto-registration-bot:changed', (payload = {}) => {
   state.autoRegistrationBot = payload;
+  if (state.section === 'contacts') render();
+});
+
+socket.on('staff-ai-apprentice-mode:changed', async (payload = {}) => {
+  state.staffAiApprenticeMode = payload;
+  contactDetailCache.clear();
+  if (state.selectedContactId) {
+    try {
+      await refreshSelectedContact({ force: true, reason: 'train bot changed' });
+    } catch (error) {
+      console.warn('[train-bot] selected contact refresh failed:', error);
+    }
+  }
   if (state.section === 'contacts') render();
 });
 

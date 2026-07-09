@@ -452,6 +452,7 @@ app.patch('/api/settings/staff-ai-apprentice-mode', requireAdmin, async (req, re
     const staffAiApprenticeMode = await store.setStaffAiApprenticeModeEnabled(enabled, actorName);
     io.emit('settings:changed');
     io.emit('staff-ai-apprentice-mode:changed', staffAiApprenticeMode);
+    io.emit('contacts:changed');
     res.json({ staffAiApprenticeMode });
   } catch (error) {
     res.status(400).json({ error: error.message });
