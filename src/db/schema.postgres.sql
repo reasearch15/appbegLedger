@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS payment_events (
   parsed_total_in DOUBLE PRECISION,
   parsed_total_out DOUBLE PRECISION,
   parsed_payment_app TEXT,
+  parsed_message_time TEXT,
   parse_error TEXT,
   routing_status TEXT NOT NULL DEFAULT 'unrouted',
   routing_owner TEXT,

@@ -865,6 +865,17 @@ h2 {
 .badge.Matched { color: #0369a1; background: #e0f2fe; }
 .badge.Completed { color: var(--registered); background: #ccfbf1; }
 .badge.Failed { color: var(--suspended); background: #fee2e2; }
+.badge.status-pending_review { color: #854d0e; background: #fef9c3; }
+.badge.status-frozen { color: #9a3412; background: #ffedd5; font-weight: 800; }
+.badge.status-matched { color: #047857; background: #d1fae5; }
+.badge.status-parse_failed { color: var(--suspended); background: #fee2e2; }
+.badge.status-expired_window { color: #b45309; background: #fef3c7; }
+.badge.routing-registered_player_deposit { color: #1d4ed8; background: #dbeafe; }
+.badge.routing-registration_payment_matched,
+.badge.routing-appbeg_owned { color: #047857; background: #d1fae5; }
+.badge.routing-untouched_unmatched { color: #9a3412; background: #ffedd5; font-weight: 800; }
+.badge.routing-expired_deposit { color: #b45309; background: #fef3c7; }
+.badge.routing-parse_failed { color: var(--suspended); background: #fee2e2; }
 
 .status-badge {
   display: inline-flex;

@@ -18,7 +18,15 @@ const socket = io({ withCredentials: true });
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
 const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
 const paymentStatusFilters = ['All', 'New', 'Parsed', 'Matched', 'Failed'];
-const paymentRoutingFilters = ['All', 'appbeg_owned', 'unrouted', 'expired_deposit', 'parse_failed', 'route_failed', 'ignored'];
+const paymentRoutingFilters = [
+  'All',
+  'registered_player_deposit',
+  'registration_payment_matched',
+  'untouched_unmatched',
+  'expired_deposit',
+  'parse_failed',
+  'ignored'
+];
 
 let state = {
   section: 'contacts',
@@ -1086,9 +1094,14 @@ function syncStatus() {
 }
 
 function filterButtons(items, active, attr) {
-  return items.map((item) => `
-    <button class="filter-chip ${active === item ? 'active' : ''}" data-${attr}="${item}">${item}</button>
-  `).join('');
+  return items.map((item) => {
+    const label = attr === 'payment-routing'
+      ? (item === 'All' ? 'All' : paymentRoutingLabel(item))
+      : item;
+    return `
+    <button class="filter-chip ${active === item ? 'active' : ''}" data-${attr}="${item}">${escapeHtml(label)}</button>
+  `;
+  }).join('');
 }
 
 function contactRows() {
@@ -1459,13 +1472,58 @@ function automationLogItems() {
   `).join('');
 }
 
+function paymentRoutingLabel(routingStatus) {
+  switch (routingStatus) {
+    case 'registered_player_deposit':
+      return 'Registered Player Deposit';
+    case 'registration_payment_matched':
+    case 'appbeg_owned':
+      return 'Registration Matched';
+    case 'untouched_unmatched':
+      return 'Frozen / Manual Review';
+    case 'expired_deposit':
+      return 'Expired Window Match';
+    case 'parse_failed':
+      return 'Parse Failed';
+    case 'ignored':
+      return 'Ignored';
+    case 'duplicate_ignored':
+      return 'Duplicate Skipped';
+    default:
+      return routingStatus || 'Pending';
+  }
+}
+
+function paymentProcessingLabel(payment = {}) {
+  const routing = payment.routing_status;
+  if (routing === 'registered_player_deposit') return 'pending_review';
+  if (routing === 'untouched_unmatched') return 'frozen';
+  if (routing === 'registration_payment_matched' || routing === 'appbeg_owned') return 'matched';
+  if (routing === 'parse_failed') return 'parse_failed';
+  if (routing === 'expired_deposit') return 'expired_window';
+  return String(payment.processing_status || 'new').toLowerCase();
+}
+
+function paymentProcessingDisplay(payment = {}) {
+  const label = paymentProcessingLabel(payment);
+  switch (label) {
+    case 'pending_review': return 'Pending Review';
+    case 'frozen': return 'Frozen';
+    case 'matched': return 'Matched';
+    case 'parse_failed': return 'Parse Failed';
+    case 'expired_window': return 'Expired Window';
+    default: return label;
+  }
+}
+
 function paymentStatCards() {
   const cards = [
     ['Messages Today', state.paymentStats.messagesToday || 0],
-    ['AppBeg Owned', state.paymentStats.appbegOwned || 0],
-    ['Exceptions', state.paymentStats.exceptions || 0],
-    ['Unrouted', state.paymentStats.unrouted || 0],
-    ['Ignored', state.paymentStats.ignored || 0],
+    ['Registered Deposits', state.paymentStats.registeredPlayerDeposits || 0],
+    ['Registration Matched', state.paymentStats.registrationMatched || 0],
+    ['Frozen / Review', state.paymentStats.frozenManualReview || 0],
+    ['Expired Window', state.paymentStats.expiredWindowMatch || 0],
+    ['Parse Failed', state.paymentStats.parseFailed || 0],
     ['Total', state.paymentStats.totalMessages || 0]
   ];
   return cards.map(([label, value]) => `
@@ -1493,12 +1551,12 @@ function paymentRows() {
     <button class="payment-row ${state.selectedPaymentId === payment.id ? 'selected' : ''}" data-payment-id="${payment.id}">
       <span>${fmtDateTime(payment.message_date)}</span>
       <span class="truncate">${escapeHtml(payment.sender_name || payment.sender_username || 'Unknown')}</span>
-      <span>${payment.parsed_amount != null ? `$${payment.parsed_amount}` : '—'}</span>
+      <span>${payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : '—'}</span>
       <span class="truncate">${escapeHtml(payment.parsed_payment_app || '—')}</span>
       <span class="truncate">${escapeHtml(payment.message_text || '[non-text message]')}</span>
       <span>${payment.telegram_message_id}</span>
-      <span class="badge ${escapeHtml(payment.routing_status || 'unrouted')}">${escapeHtml(payment.routing_status || 'unrouted')}</span>
-      <span class="badge ${escapeHtml(payment.processing_status)}">${escapeHtml(payment.processing_status)}</span>
+      <span class="badge routing-${escapeHtml(payment.routing_status || 'pending')}">${escapeHtml(paymentRoutingLabel(payment.routing_status))}</span>
+      <span class="badge status-${escapeHtml(paymentProcessingLabel(payment))}">${escapeHtml(paymentProcessingDisplay(payment))}</span>
     </button>
   `).join('');
 }
@@ -1512,8 +1570,14 @@ function paymentDetailPanel() {
     <aside class="payment-detail">
       <section class="card">
         <div class="card-title">Payment Message</div>
-        ${infoRow('Processing', payment.processing_status)}
-        ${infoRow('Routing', payment.routing_status || 'unrouted')}
+        ${infoRow('Processing', paymentProcessingDisplay(payment))}
+        ${infoRow('Routing', paymentRoutingLabel(payment.routing_status))}
+        ${payment.routing_status === 'untouched_unmatched'
+    ? '<p class="modal-error">This payment is frozen for manual staff review. Do not auto-assign or ignore without review.</p>'
+    : ''}
+        ${payment.routing_status === 'registered_player_deposit'
+    ? '<p class="subtle">Registered player deposit — pending staff review. Balance is not auto-credited.</p>'
+    : ''}
         ${infoRow('Owner', payment.routing_owner || '-')}
         ${infoRow('Handled By', payment.handled_by || '-')}
         ${infoRow('Matched Contact', payment.contact_id || '-')}
@@ -1543,7 +1607,7 @@ function paymentDetailPanel() {
         ${infoRow('Payment Name', payment.parsed_sender_name || 'Not parsed')}
         ${infoRow('Payment App', payment.parsed_payment_app || 'Not detected')}
         ${infoRow('Payment Tag', payment.parsed_recipient_tag || '-')}
-        ${infoRow('Payment Time', payment.parsed_payment_datetime ? fmtDateTime(payment.parsed_payment_datetime) : '-')}
+        ${infoRow('Payment Time', payment.parsed_message_time || (payment.parsed_payment_datetime ? fmtDateTime(payment.parsed_payment_datetime) : '-'))}
         ${infoRow('Parse Error', payment.parse_error || '-')}
       </section>
 
@@ -1708,7 +1772,7 @@ function paymentsWorkspace() {
             <div class="filter-row">${filterButtons(paymentRoutingFilters, state.paymentRoutingFilter, 'payment-routing')}</div>
             <label class="checkbox-inline">
               <input id="paymentExceptionsOnly" type="checkbox" ${state.paymentExceptionsOnly ? 'checked' : ''} />
-              Exceptions only
+              Exceptions &amp; frozen only
             </label>
           </div>
           <div class="payment-table-header">

@@ -1,14 +1,3 @@
-const UNKNOWN_RECIPIENT_TAG = 'unknown';
-
-const MONEY_PATTERN = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?`;
-const OPTIONAL_MARKER = String.raw`(?:[^\w\s$]{1,3}[ \t]*)?`;
-const OPTIONAL_GREETING = String.raw`[ \t]*(?:${OPTIONAL_MARKER})?Hi[ \t]+\$?(?<recipient_tag>[A-Za-z0-9_]+),[ \t]*\r?\n[ \t]*\r?\n`;
-
-const PAYMENT_MESSAGE_PATTERN = new RegExp(
-  String.raw`^(?:${OPTIONAL_GREETING})?[ \t]*You[ \t]+received[ \t]+\$(?<amount>${MONEY_PATTERN})[ \t]+from[ \t]+(?<payment_sender_name>[^\r\n]+?)\.[ \t]*\r?\n[ \t]*\r?\n[ \t]*(?<hour>\d{1,2}):(?<minute>\d{2})[ \t]+(?<meridiem>AM|PM)[ \t]+-[ \t]+(?<day>\d{1,2})[ \t]+(?<month>[A-Za-z]{3})[ \t]+(?<year>\d{4})[ \t]*\r?\n[ \t]*(?:${OPTIONAL_MARKER})?Total[ \t]+In[ \t]*:[ \t]*(?<total_in>${MONEY_PATTERN})\$[ \t]*\r?\n[ \t]*(?:${OPTIONAL_MARKER})?Total[ \t]+Out[ \t]*:[ \t]*(?<total_out>${MONEY_PATTERN})\$[ \t]*(?:\r?\n[\s\S]*)?$`,
-  'i'
-);
-
 const MONTHS = {
   jan: 1,
   feb: 2,
@@ -24,33 +13,40 @@ const MONTHS = {
   dec: 12
 };
 
+const AMOUNT_LINE = /You\s+received\s+\$(?<amount>\d+(?:\.\d+)?)\s+from\s+(?<payment_sender_name>.+?)\s*(?:\r?\n|$)/i;
+const MESSAGE_TIME_LINE = /(?<message_time>\d{1,2}:\d{2}\s+(?:AM|PM)\s+-\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4})/i;
+const RECIPIENT_LINE = /Hi\s+\$?(?<recipient_tag>[A-Za-z0-9_.-]+)/i;
+
 function parseDecimal(value) {
   return Number.parseFloat(String(value).replace(/,/g, ''));
 }
 
-function parseDatetime(groups) {
-  let hour = Number.parseInt(groups.hour, 10);
-  const minute = Number.parseInt(groups.minute, 10);
-  const meridiem = String(groups.meridiem).toUpperCase();
+function roundAmount(value) {
+  return Math.round(value * 100) / 100;
+}
 
-  if (!Number.isInteger(hour) || hour < 1 || hour > 12 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
-    throw new Error('Invalid payment time');
+export function parseMessageTime(messageTime) {
+  const match = String(messageTime || '').trim().match(
+    /(\d{1,2}):(\d{2})\s+(AM|PM)\s+-\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/i
+  );
+  if (!match) return null;
+
+  let hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  const meridiem = String(match[3]).toUpperCase();
+  const month = MONTHS[String(match[5]).toLowerCase()];
+
+  if (!Number.isInteger(hour) || hour < 1 || hour > 12 || !Number.isInteger(minute) || minute < 0 || minute > 59 || !month) {
+    return null;
   }
 
   hour %= 12;
-  if (meridiem === 'PM') {
-    hour += 12;
-  }
-
-  const month = MONTHS[String(groups.month).toLowerCase()];
-  if (!month) {
-    throw new Error('Invalid payment month');
-  }
+  if (meridiem === 'PM') hour += 12;
 
   return new Date(
-    Number.parseInt(groups.year, 10),
+    Number.parseInt(match[6], 10),
     month - 1,
-    Number.parseInt(groups.day, 10),
+    Number.parseInt(match[4], 10),
     hour,
     minute,
     0,
@@ -58,42 +54,48 @@ function parseDatetime(groups) {
   );
 }
 
+export function isChimePaymentMessage(rawText = '') {
+  const text = String(rawText || '').trim();
+  return AMOUNT_LINE.test(text) && MESSAGE_TIME_LINE.test(text);
+}
+
 export function detectPaymentApp(rawText = '') {
+  if (isChimePaymentMessage(rawText)) return 'Chime';
   const text = String(rawText || '').toLowerCase();
   if (text.includes('cash app')) return 'Cash App';
   if (text.includes('apple pay')) return 'Apple Pay';
   if (text.includes('zelle')) return 'Zelle';
-  if (text.includes('chime') || PAYMENT_MESSAGE_PATTERN.test(String(rawText || '').trim())) return 'Chime';
+  if (text.includes('chime')) return 'Chime';
   return null;
 }
 
 export function parsePaymentMessage(rawText) {
-  const text = String(rawText || '').trim();
-  if (!text) return null;
+  const raw_text = String(rawText || '').trim();
+  if (!raw_text) return null;
 
-  const match = text.match(PAYMENT_MESSAGE_PATTERN);
-  if (!match?.groups) return null;
+  const amountMatch = raw_text.match(AMOUNT_LINE);
+  const timeMatch = raw_text.match(MESSAGE_TIME_LINE);
+  if (!amountMatch?.groups || !timeMatch?.groups) return null;
 
-  try {
-    const recipientTag = match.groups.recipient_tag || UNKNOWN_RECIPIENT_TAG;
-    const amount = parseDecimal(match.groups.amount);
-    const totalIn = parseDecimal(match.groups.total_in);
-    const totalOut = parseDecimal(match.groups.total_out);
-    if (!Number.isFinite(amount) || !Number.isFinite(totalIn) || !Number.isFinite(totalOut)) {
-      return null;
-    }
+  const amount = roundAmount(parseDecimal(amountMatch.groups.amount));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
 
-    return {
-      recipient_tag: recipientTag,
-      recipient_tag_normalized: recipientTag.toLowerCase(),
-      amount,
-      payment_sender_name: match.groups.payment_sender_name.trim(),
-      payment_datetime: parseDatetime(match.groups).toISOString(),
-      total_in: totalIn,
-      total_out: totalOut,
-      payment_app: detectPaymentApp(text)
-    };
-  } catch {
-    return null;
-  }
+  const payment_sender_name = String(amountMatch.groups.payment_sender_name || '').trim().replace(/\s+/g, ' ');
+  const message_time = String(timeMatch.groups.message_time || '').trim();
+  if (!payment_sender_name || !message_time) return null;
+
+  const recipientMatch = raw_text.match(RECIPIENT_LINE);
+  const recipient_tag = recipientMatch?.groups?.recipient_tag || null;
+  const payment_datetime = parseMessageTime(message_time);
+
+  return {
+    raw_text,
+    payment_app: 'Chime',
+    amount,
+    payment_sender_name,
+    message_time,
+    payment_datetime: payment_datetime ? payment_datetime.toISOString() : null,
+    recipient_tag,
+    recipient_tag_normalized: recipient_tag ? recipient_tag.toLowerCase() : null
+  };
 }

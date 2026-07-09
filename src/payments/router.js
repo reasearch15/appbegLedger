@@ -7,6 +7,7 @@ import {
   ROUTING_STATUS
 } from './constants.js';
 import { amountsMatch, paymentAppsMatch, paymentNamesMatch } from './matchUtils.js';
+import { findRegisteredPlayerMatch } from './registeredPlayerMatcher.js';
 import { continueBotRegistrationAfterPayment } from './registrationPaymentFlow.js';
 
 function isAlreadyRouted(payment) {
@@ -74,11 +75,44 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     senderName: parsed.payment_sender_name
   });
 
+  console.log(`[payment-router] registered_player_deposit_checked payment=${payment.id}`);
+  await store.logPaymentRouting(payment.id, 'registered_player_deposit_checked', 'Checking registered AppBeg player deposits before registration windows.', {
+    amount: parsed.amount,
+    paymentApp: parsed.payment_app,
+    senderName: parsed.payment_sender_name
+  });
+
+  const registeredPlayer = await findRegisteredPlayerMatch(store, parsed);
+  if (registeredPlayer) {
+    console.log(`[payment-router] registered_player_deposit_matched payment=${payment.id} contact=${registeredPlayer.id}`);
+    await store.updatePaymentRouting(payment.id, {
+      routing_status: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT,
+      routing_owner: ROUTING_OWNER.APPBEG,
+      contact_id: registeredPlayer.id,
+      registration_payment_window_id: null,
+      routed_at: new Date().toISOString(),
+      handled_by: HANDLED_BY_APPBEG_BOT
+    });
+    await store.logPaymentRouting(payment.id, 'registered_player_deposit_matched', 'Payment matched a registered AppBeg player deposit profile.', {
+      contactId: registeredPlayer.id,
+      appbegUsername: registeredPlayer.appbeg_username || null,
+      status: 'pending_review'
+    });
+    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT };
+  }
+
+  console.log(`[payment-router] payment_registration_window_checked payment=${payment.id}`);
+  await store.logPaymentRouting(payment.id, 'payment_registration_window_checked', 'No registered player match; checking active registration payment windows.', {
+    amount: parsed.amount,
+    paymentApp: parsed.payment_app,
+    senderName: parsed.payment_sender_name
+  });
+
   const activeWindow = await findActiveRegistrationMatch(store, parsed);
   if (activeWindow) {
-    console.log(`[payment-router] registration_payment_matched payment=${payment.id} window=${activeWindow.id} contact=${activeWindow.contact_id}`);
+    console.log(`[payment-router] payment_registration_window_matched payment=${payment.id} window=${activeWindow.id} contact=${activeWindow.contact_id}`);
     await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.APPBEG_OWNED,
+      routing_status: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
       routing_owner: ROUTING_OWNER.APPBEG,
       contact_id: activeWindow.contact_id,
       registration_payment_window_id: activeWindow.id,
@@ -102,7 +136,7 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       windowId: activeWindow.id
     });
 
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.APPBEG_OWNED };
+    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED };
   }
 
   const expiredWindow = await findExpiredRegistrationMatch(store, parsed);
@@ -123,15 +157,22 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.EXPIRED_DEPOSIT };
   }
 
-  console.log(`[payment-router] registration_payment_unrouted payment=${payment.id}`);
+  console.log(`[payment-router] payment_frozen_unmatched payment=${payment.id}`);
   await store.updatePaymentRouting(payment.id, {
-    routing_status: ROUTING_STATUS.UNROUTED,
+    routing_status: ROUTING_STATUS.UNTOUCHED_UNMATCHED,
     routing_owner: ROUTING_OWNER.APPBEG,
+    contact_id: null,
+    registration_payment_window_id: null,
     routed_at: new Date().toISOString(),
     handled_by: null
   });
-  await store.logPaymentRouting(payment.id, 'registration_payment_unrouted', 'No active registration payment window matched this payment.');
-  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.UNROUTED };
+  await store.logPaymentRouting(payment.id, 'payment_frozen_unmatched', 'Payment frozen for manual staff review. No player or registration window matched.', {
+    amount: parsed.amount,
+    paymentApp: parsed.payment_app,
+    senderName: parsed.payment_sender_name,
+    status: 'frozen'
+  });
+  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.UNTOUCHED_UNMATCHED };
 }
 
 export async function routeUnprocessedPayments(store, { limit = 50, bot = null } = {}) {
@@ -157,7 +198,8 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
   await store.manuallyLinkPaymentEvent(paymentId, {
     contactId,
     registrationPaymentWindowId,
-    staffName
+    staffName,
+    routingStatus: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED
   });
 
   await continueBotRegistrationAfterPayment(store, {

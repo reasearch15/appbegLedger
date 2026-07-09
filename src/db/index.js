@@ -1324,6 +1324,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return players.filter((player) => playerMatchesFilter(player, status) && playerMatchesQuery(player, normalizedQuery));
   }
 
+  async function listRegisteredPlayersForPaymentMatch(limit = 5000) {
+    const players = await listPlayers({ status: 'Registered', query: '' });
+    return players.slice(0, Math.min(Math.max(Number(limit) || 5000, 1), 5000));
+  }
+
   async function getPlayerStats() {
     const players = await listPlayers({ status: 'All', query: '' });
     return computePlayerStats(players);
@@ -1507,9 +1512,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
     const where = [];
     if (status && status !== 'All') where.push('processing_status = @status');
-    if (routingStatus && routingStatus !== 'All') where.push('routing_status = @routingStatus');
+    if (routingStatus && routingStatus !== 'All') {
+      if (routingStatus === 'registration_payment_matched') {
+        where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned')");
+      } else {
+        where.push('routing_status = @routingStatus');
+      }
+    }
     if (exceptionsOnly) {
-      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed')`);
+      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched')`);
     }
     if (String(query || '').trim()) {
       where.push(`(
@@ -1551,13 +1562,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const row = await db.prepare(`
       SELECT
         SUM(CASE WHEN substr(message_date, 1, 10) = @today THEN 1 ELSE 0 END) AS messagesToday,
-        SUM(CASE WHEN processing_status = 'New' THEN 1 ELSE 0 END) AS newMessages,
-        SUM(CASE WHEN processing_status = 'Parsed' THEN 1 ELSE 0 END) AS parsed,
-        SUM(CASE WHEN routing_status = 'appbeg_owned' THEN 1 ELSE 0 END) AS appbegOwned,
+        SUM(CASE WHEN routing_status = 'registered_player_deposit' THEN 1 ELSE 0 END) AS registeredPlayerDeposits,
+        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS registrationMatched,
+        SUM(CASE WHEN routing_status = 'untouched_unmatched' THEN 1 ELSE 0 END) AS frozenManualReview,
+        SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS expiredWindowMatch,
+        SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS parseFailed,
         SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ignored,
-        SUM(CASE WHEN routing_status = 'unrouted' THEN 1 ELSE 0 END) AS unrouted,
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed') THEN 1 ELSE 0 END) AS exceptions,
-        SUM(CASE WHEN routing_status = 'unrouted' OR processing_status = 'New' THEN 1 ELSE 0 END) AS waiting,
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched') THEN 1 ELSE 0 END) AS exceptions,
+        SUM(CASE WHEN routing_status = 'untouched_unmatched' THEN 1 ELSE 0 END) AS waiting,
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS failed,
         COUNT(*) AS totalMessages
       FROM payment_events
@@ -1596,6 +1608,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         parsed_total_in = ?,
         parsed_total_out = ?,
         parsed_payment_app = ?,
+        parsed_message_time = ?,
         parse_error = ?,
         processing_status = ?,
         updated_at = ?
@@ -1609,6 +1622,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       parsed?.total_in ?? null,
       parsed?.total_out ?? null,
       parsed?.payment_app ?? null,
+      parsed?.message_time ?? null,
       parseError,
       processingStatus,
       nowIso(),
@@ -1631,7 +1645,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       handled_by: patch.handled_by ?? current.handled_by
     };
     let processingStatus = current.processing_status;
-    if (next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
+    if (next.routing_status === 'registered_player_deposit') processingStatus = 'Parsed';
+    else if (next.routing_status === 'registration_payment_matched' || next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
+    else if (next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
     else if (['expired_deposit', 'parse_failed', 'route_failed'].includes(next.routing_status)) processingStatus = 'Failed';
 
@@ -1716,7 +1732,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getPaymentEvent(paymentEventId);
   }
 
-  async function manuallyLinkPaymentEvent(paymentEventId, { contactId = null, registrationPaymentWindowId = null, staffName = 'Staff' } = {}) {
+  async function manuallyLinkPaymentEvent(paymentEventId, {
+    contactId = null,
+    registrationPaymentWindowId = null,
+    staffName = 'Staff',
+    routingStatus = null
+  } = {}) {
     const patch = {
       contact_id: contactId,
       registration_payment_window_id: registrationPaymentWindowId,
@@ -1724,7 +1745,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       handled_by: staffName
     };
     if (contactId && registrationPaymentWindowId) {
-      patch.routing_status = 'appbeg_owned';
+      patch.routing_status = routingStatus || 'registration_payment_matched';
       patch.routing_owner = 'appbeg';
     }
     const payment = await updatePaymentRouting(paymentEventId, patch);
@@ -2873,6 +2894,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     markAppBegPlayerCreated,
     manualRegister,
     listPlayers,
+    listRegisteredPlayersForPaymentMatch,
     getPlayerStats,
     getPlayerDetail,
     approvePlayer,
@@ -3205,6 +3227,7 @@ async function migrate(db) {
     ['routed_at', 'TEXT'],
     ['handled_by', 'TEXT'],
     ['parsed_payment_app', 'TEXT'],
+    ['parsed_message_time', 'TEXT'],
     ['registration_payment_window_id', 'INTEGER']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
