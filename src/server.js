@@ -22,6 +22,8 @@ import { listenerRoles } from './config/listeners.js';
 import { routePaymentEvent, routeUnprocessedPayments, startDepositEventForContact } from './payments/router.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { wrapAsyncHandlers, notFoundHandler, errorHandler } from './middleware/errorHandler.js';
+import { createSessionMiddleware, isAuthExemptPath, isAuthenticated, requireAuth, requireAdmin } from './middleware/auth.js';
+import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
 import { isDebugEnabled } from './config/debug.js';
@@ -32,6 +34,9 @@ const publicDir = path.join(rootDir, 'public');
 const mediaDir = path.join(rootDir, 'data', 'media');
 const port = Number(process.env.PORT || 4300);
 const app = express();
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 wrapAsyncHandlers(app);
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
@@ -56,17 +61,44 @@ async function initStore() {
 
 await initStore();
 
-app.use(cors());
+const sessionMiddleware = createSessionMiddleware();
+
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
 app.use(helmet({
   contentSecurityPolicy: false
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use(sessionMiddleware);
 app.use(requestLogger());
-app.use(express.static(publicDir));
-app.use('/media', express.static(mediaDir));
+
+registerAuthRoutes(app, { store });
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  if (isAuthExemptPath(req.path, req.method)) return next();
+  return requireAuth(store)(req, res, next);
+});
+
+app.get('/login', (req, res) => {
+  if (isAuthenticated(req)) return res.redirect('/');
+  return res.sendFile(path.join(publicDir, 'login.html'));
+});
+
+app.get('/', (req, res) => {
+  if (!isAuthenticated(req)) return res.redirect('/login');
+  return res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+app.use(express.static(publicDir, { index: false }));
+app.use('/media', (req, res, next) => {
+  requireAuth(store)(req, res, () => express.static(mediaDir)(req, res, next));
+});
 
 registerHealthRoutes(app, { store });
-registerPaymentMethodRoutes(app, { store, rootDir });
+registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });
@@ -259,14 +291,14 @@ async function handleCoadminSettingsApply(req, res) {
 }
 
 app.get('/api/coadmin-settings', handleCoadminSettingsGet);
-app.post('/api/coadmin-settings', handleCoadminSettingsSave);
-app.post('/api/coadmin-settings/apply', handleCoadminSettingsApply);
+app.post('/api/coadmin-settings', requireAdmin, handleCoadminSettingsSave);
+app.post('/api/coadmin-settings/apply', requireAdmin, handleCoadminSettingsApply);
 
 app.get('/api/settings/coadmin', handleCoadminSettingsGet);
-app.patch('/api/settings/coadmin', handleCoadminSettingsSave);
-app.post('/api/settings/coadmin/apply', handleCoadminSettingsApply);
+app.patch('/api/settings/coadmin', requireAdmin, handleCoadminSettingsSave);
+app.post('/api/settings/coadmin/apply', requireAdmin, handleCoadminSettingsApply);
 
-app.get('/api/settings/audit-log', async (req, res) => {
+app.get('/api/settings/audit-log', requireAdmin, async (req, res) => {
   res.json({ auditLog: await store.listSettingsAuditLog(Number(req.query.limit || 50)) });
 });
 
@@ -946,7 +978,15 @@ app.post('/api/users/:id/messages', sendTelegramMessage);
 app.post('/api/contacts/:id/messages', sendTelegramMessage);
 
 app.get('*', (req, res) => {
+  if (!isAuthenticated(req)) return res.redirect('/login');
   res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+io.engine.use(sessionMiddleware);
+io.use((socket, next) => {
+  const userId = socket.request.session?.ledgerUserId;
+  if (!userId) return next(new Error('Authentication required'));
+  return next();
 });
 
 io.on('connection', (socket) => {

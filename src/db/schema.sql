@@ -532,3 +532,16 @@ CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
 
 CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
   ON registration_payment_windows(contact_id, status, expires_at DESC);
+
+CREATE TABLE IF NOT EXISTS ledger_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_users_username
+  ON ledger_users(username);

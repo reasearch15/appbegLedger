@@ -80,7 +80,8 @@ function parseId(value) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-export function registerPaymentMethodRoutes(app, { store, rootDir }) {
+export function registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin }) {
+  const adminOnly = requireAdmin || ((_req, _res, next) => next());
   const uploadDir = path.join(rootDir, 'data', 'media', 'payment-qr');
   const upload = createUploadMiddleware(uploadDir);
 
@@ -89,7 +90,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     res.json({ methods });
   });
 
-  app.post('/api/payment-methods', async (req, res) => {
+  app.post('/api/payment-methods', adminOnly, async (req, res) => {
     try {
       const name = String(req.body?.name || '').trim();
       const key = req.body?.key ? String(req.body.key).trim().toLowerCase() : slugifyPaymentMethodKey(name);
@@ -105,7 +106,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     }
   });
 
-  app.patch('/api/payment-methods/:id', async (req, res) => {
+  app.patch('/api/payment-methods/:id', adminOnly, async (req, res) => {
     try {
       const id = parseId(req.params.id);
       if (!id) return res.status(400).json({ error: 'Invalid payment method id.' });
@@ -121,7 +122,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     }
   });
 
-  app.delete('/api/payment-methods/:id', async (req, res) => {
+  app.delete('/api/payment-methods/:id', adminOnly, async (req, res) => {
     try {
       const id = parseId(req.params.id);
       if (!id) return res.status(400).json({ error: 'Invalid payment method id.' });
@@ -147,7 +148,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     res.json({ method, qrs });
   });
 
-  app.post('/api/payment-methods/:id/qrs', (req, res) => {
+  app.post('/api/payment-methods/:id/qrs', adminOnly, (req, res) => {
     upload.single('file')(req, res, async (uploadError) => {
       if (uploadError) {
         const message = uploadError.code === 'LIMIT_FILE_SIZE'
@@ -181,7 +182,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     });
   });
 
-  app.patch('/api/payment-qrs/:id', async (req, res) => {
+  app.patch('/api/payment-qrs/:id', adminOnly, async (req, res) => {
     try {
       const id = parseId(req.params.id);
       if (!id) return res.status(400).json({ error: 'Invalid QR id.' });
@@ -197,7 +198,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     }
   });
 
-  app.post('/api/payment-qrs/:id/default', async (req, res) => {
+  app.post('/api/payment-qrs/:id/default', adminOnly, async (req, res) => {
     try {
       const id = parseId(req.params.id);
       if (!id) return res.status(400).json({ error: 'Invalid QR id.' });
@@ -209,7 +210,7 @@ export function registerPaymentMethodRoutes(app, { store, rootDir }) {
     }
   });
 
-  app.delete('/api/payment-qrs/:id', async (req, res) => {
+  app.delete('/api/payment-qrs/:id', adminOnly, async (req, res) => {
     try {
       const id = parseId(req.params.id);
       if (!id) return res.status(400).json({ error: 'Invalid QR id.' });

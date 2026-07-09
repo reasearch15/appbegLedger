@@ -12,7 +12,7 @@ import {
 } from './contactOverview.js';
 
 const app = document.querySelector('#app');
-const socket = io();
+const socket = io({ withCredentials: true });
 
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
 const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
@@ -87,7 +87,12 @@ let state = {
   paymentInfoActionId: null,
   showAddPaymentMethod: false,
   paymentInfoError: null,
-  paymentInfoSuccess: null
+  paymentInfoSuccess: null,
+  authUser: null,
+  ledgerUsers: [],
+  ledgerUsersLoading: false,
+  ledgerUserForm: null,
+  ledgerUserSaving: false
 };
 
 let playersController;
@@ -243,7 +248,8 @@ async function api(path, options = {}) {
   try {
     response = await fetch(path, {
       ...options,
-      headers
+      headers,
+      credentials: 'include'
     });
   } catch (networkError) {
     const error = new ApiError({
@@ -267,6 +273,15 @@ async function api(path, options = {}) {
   }
 
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/api/auth/login')) {
+      window.location.href = '/login';
+      throw new ApiError({
+        path,
+        status: response.status,
+        message: 'Session expired.',
+        body: data
+      });
+    }
     const error = new ApiError({
       path,
       status: response.status,
@@ -278,6 +293,42 @@ async function api(path, options = {}) {
   }
 
   return data;
+}
+
+function isAdmin() {
+  return state.authUser?.role === 'admin';
+}
+
+async function loadAuthUser() {
+  const payload = await api('/api/auth/me');
+  state.authUser = payload.user || null;
+  if (state.authUser?.username) {
+    state.staffName = state.authUser.username;
+    localStorage.setItem('staffName', state.staffName);
+  }
+  return state.authUser;
+}
+
+async function logout() {
+  try {
+    await api('/api/auth/logout', { method: 'POST' });
+  } catch (error) {
+    console.warn('[auth] logout failed:', error);
+  }
+  window.location.href = '/login';
+}
+
+async function refreshLedgerUsers() {
+  if (!isAdmin()) return;
+  state.ledgerUsersLoading = true;
+  try {
+    const payload = await api('/api/auth/users');
+    state.ledgerUsers = payload.users || [];
+  } catch (error) {
+    state.settingsError = error.message || 'Could not load staff users.';
+  } finally {
+    state.ledgerUsersLoading = false;
+  }
 }
 
 playersController = createPlayersController({
@@ -1650,6 +1701,46 @@ function settingsWorkspace() {
           <div class="card-title">Settings Audit Log</div>
           <div class="settings-audit-list">${settingsAuditRows()}</div>
         </section>
+        <section class="card settings-form-card">
+          <div class="card-title">Staff Users</div>
+          ${state.ledgerUsersLoading ? '<div class="subtle">Loading users…</div>' : ''}
+          <div class="user-management-list">
+            ${(state.ledgerUsers || []).map((user) => `
+              <div class="user-management-row">
+                <div>
+                  <div class="strong">${escapeHtml(user.username)}</div>
+                  <div class="subtle">${escapeHtml(user.role)}${user.is_active ? '' : ' · inactive'}</div>
+                </div>
+                ${user.id !== state.authUser?.id ? `
+                  <button type="button" class="button secondary small" data-ledger-user-toggle="${user.id}" data-ledger-user-active="${user.is_active ? '1' : '0'}">
+                    ${user.is_active ? 'Deactivate' : 'Activate'}
+                  </button>
+                ` : '<span class="subtle">Current user</span>'}
+              </div>
+            `).join('') || '<div class="subtle">No staff users yet.</div>'}
+          </div>
+          <form id="createLedgerUserForm" class="settings-form" style="margin-top: 16px;">
+            <div class="form-section-label">Add Staff User</div>
+            <label class="field-label">
+              <span>Username</span>
+              <input id="newLedgerUsername" required minlength="3" />
+            </label>
+            <label class="field-label">
+              <span>Password</span>
+              <input id="newLedgerPassword" type="password" required minlength="8" />
+            </label>
+            <label class="field-label">
+              <span>Role</span>
+              <select id="newLedgerRole">
+                <option value="staff">Staff</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button class="button secondary" type="submit" ${state.ledgerUserSaving ? 'disabled' : ''}>
+              ${state.ledgerUserSaving ? 'Creating…' : 'Create User'}
+            </button>
+          </form>
+        </section>
       </section>
     </main>
   `;
@@ -1678,8 +1769,8 @@ function render() {
     { id: 'players', label: 'Players', icon: '👥' },
     { id: 'payments', label: 'Payments', icon: '💳' },
     { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
-    { id: 'settings', label: 'Settings', icon: '⚙️' }
-  ];
+    { id: 'settings', label: 'Settings', icon: '⚙️', adminOnly: true }
+  ].filter((item) => !item.adminOnly || isAdmin());
   const navHtml = items.map((item) => `
     <button class="nav-item ${state.section === item.id ? 'active' : ''}" data-section="${item.id}" type="button">
       <span class="nav-icon" aria-hidden="true">${item.icon}</span>
@@ -1688,12 +1779,23 @@ function render() {
   `).join('');
   const sectionTitle = items.find((item) => item.id === state.section)?.label || 'Operations';
 
+  if (state.section === 'settings' && !isAdmin()) {
+    state.section = 'contacts';
+  }
+
   app.innerHTML = `
     <div class="ops-shell section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
       <button type="button" class="nav-drawer-backdrop" data-nav-close aria-label="Close menu"></button>
       <aside class="sidebar" id="appSidebar">
         <div class="brand">Royal VIP Coadmin</div>
         ${navHtml}
+        <div class="user-bar">
+          <div class="user-bar-meta">
+            <div class="user-bar-name">${escapeHtml(state.authUser?.username || 'Staff')}</div>
+            <div class="user-bar-role">${escapeHtml(state.authUser?.role || 'staff')}</div>
+          </div>
+          <button type="button" class="button secondary small" id="logoutButton">Log out</button>
+        </div>
       </aside>
       <div class="mobile-topbar mobile-only">
         <button type="button" class="menu-toggle" data-nav-toggle aria-label="Open menu">☰</button>
@@ -1872,6 +1974,7 @@ function bindEvents() {
       if (state.section === 'settings') {
         state.settingsError = null;
         state.settingsSuccess = null;
+        await refreshLedgerUsers();
       }
       if (state.section === 'players') {
         await refreshPlayers({ keepSelection: true });
@@ -1883,6 +1986,26 @@ function bindEvents() {
         await paymentInfoController.refreshPaymentMethods();
       }
       render();
+    });
+  });
+
+  document.querySelector('#logoutButton')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    void logout();
+  });
+
+  document.querySelector('#createLedgerUserForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void createLedgerUser(event.target);
+  });
+
+  document.querySelectorAll('[data-ledger-user-toggle]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      void toggleLedgerUser(
+        Number(button.dataset.ledgerUserToggle),
+        button.dataset.ledgerUserActive !== '1'
+      );
     });
   });
 
@@ -2398,10 +2521,51 @@ function startGlobalPolling() {
   }, CONTACTS_POLL_MS);
 }
 
+async function createLedgerUser(form) {
+  state.ledgerUserSaving = true;
+  state.settingsError = null;
+  state.settingsSuccess = null;
+  render();
+  try {
+    const username = form.querySelector('#newLedgerUsername')?.value?.trim();
+    const password = form.querySelector('#newLedgerPassword')?.value || '';
+    const role = form.querySelector('#newLedgerRole')?.value || 'staff';
+    await api('/api/auth/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, role })
+    });
+    form.reset();
+    state.settingsSuccess = `User ${username} created.`;
+    await refreshLedgerUsers();
+  } catch (error) {
+    state.settingsError = error.message || 'Could not create user.';
+  } finally {
+    state.ledgerUserSaving = false;
+    render();
+  }
+}
+
+async function toggleLedgerUser(userId, isActive) {
+  state.settingsError = null;
+  state.settingsSuccess = null;
+  try {
+    await api(`/api/auth/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_active: isActive })
+    });
+    state.settingsSuccess = isActive ? 'User activated.' : 'User deactivated.';
+    await refreshLedgerUsers();
+  } catch (error) {
+    state.settingsError = error.message || 'Could not update user.';
+  }
+  render();
+}
+
 async function boot() {
   bindPersistentEvents();
   setupMobileViewport();
   try {
+    await loadAuthUser();
     await Promise.all([
       refreshContacts({ keepSelection: false, force: true, reason: 'startup' }),
       refreshStats({ force: true, reason: 'startup' }),
@@ -2412,6 +2576,10 @@ async function boot() {
     render();
     startGlobalPolling();
   } catch (error) {
+    if (error.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
     const detail = error.toDisplayString?.() || error.message || 'Unknown startup error';
     const route = error.path ? `<p><strong>API:</strong> <code>${escapeHtml(error.path)}</code></p>` : '';
     const status = error.status !== undefined ? `<p><strong>Status:</strong> ${escapeHtml(String(error.status))}</p>` : '';

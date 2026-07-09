@@ -475,3 +475,15 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO payment_sync_state (id, status, updated_at)
 VALUES (1, 'disabled', NOW()::TEXT)
 ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS ledger_users (
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_users_username ON ledger_users(username);

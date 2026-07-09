@@ -13,13 +13,16 @@
     "telegram:sync": "python scripts/telegram_account_sync.py sync",
     "telegram:test-buttons": "python scripts/test_welcome_buttons.py",
     "payment:login": "python scripts/payment_telegram_sync.py login",
-    "payment:sync": "python scripts/payment_telegram_sync.py sync"
+    "payment:sync": "python scripts/payment_telegram_sync.py sync",
+    "create-admin": "node scripts/create-admin.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "express-session": "^1.19.0",
     "helmet": "^8.0.0",
     "multer": "^2.2.0",
     "pg": "^8.22.0",

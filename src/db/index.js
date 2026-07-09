@@ -2623,6 +2623,91 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     });
   }
 
+  function toPublicLedgerUser(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      username: row.username,
+      role: row.role,
+      is_active: row.is_active === undefined || row.is_active === null
+        ? true
+        : (typeof row.is_active === 'boolean' ? row.is_active : Boolean(row.is_active)),
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    };
+  }
+
+  async function getLedgerUserByUsername(username) {
+    const normalized = String(username || '').trim().toLowerCase();
+    if (!normalized) return null;
+    return (await db.prepare('SELECT * FROM ledger_users WHERE LOWER(username) = ?').get(normalized)) || null;
+  }
+
+  async function getLedgerUserById(id) {
+    const userId = Number(id);
+    if (!Number.isInteger(userId) || userId <= 0) return null;
+    const row = await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(userId);
+    return row ? toPublicLedgerUser(row) : null;
+  }
+
+  async function listLedgerUsers() {
+    const rows = await db.prepare(`
+      SELECT id, username, role, is_active, created_at, updated_at
+      FROM ledger_users
+      ORDER BY username ASC
+    `).all();
+    return rows.map((row) => toPublicLedgerUser(row));
+  }
+
+  async function createLedgerUser({ username, passwordHash, role = 'staff', isActive = true }) {
+    const normalized = String(username || '').trim().toLowerCase();
+    if (!normalized) throw new Error('Username is required.');
+    if (!passwordHash) throw new Error('Password hash is required.');
+    const safeRole = role === 'admin' ? 'admin' : 'staff';
+    const timestamp = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO ledger_users (username, password_hash, role, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      normalized,
+      passwordHash,
+      safeRole,
+      isActive ? 1 : 0,
+      timestamp,
+      timestamp
+    );
+    return toPublicLedgerUser(await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(result.lastInsertRowid));
+  }
+
+  async function updateLedgerUser(id, patch = {}) {
+    const userId = Number(id);
+    if (!Number.isInteger(userId) || userId <= 0) return null;
+    const current = await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(userId);
+    if (!current) return null;
+
+    const fields = [];
+    const values = [];
+    if (patch.role !== undefined) {
+      fields.push('role = ?');
+      values.push(patch.role === 'admin' ? 'admin' : 'staff');
+    }
+    if (patch.is_active !== undefined) {
+      fields.push('is_active = ?');
+      values.push(patch.is_active ? 1 : 0);
+    }
+    if (patch.password_hash) {
+      fields.push('password_hash = ?');
+      values.push(patch.password_hash);
+    }
+    if (!fields.length) return toPublicLedgerUser(current);
+
+    fields.push('updated_at = ?');
+    values.push(nowIso());
+    values.push(userId);
+    await db.prepare(`UPDATE ledger_users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return toPublicLedgerUser(await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(userId));
+  }
+
   return {
     db,
     upsertTelegramUser,
@@ -2747,7 +2832,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listRegistrationPaymentWindowsForExpiryWorker,
     expireRegistrationPaymentWindowIfDue,
     claimRegistrationPaymentWindowExpiryNotification,
-    resetRegistrationFlowToIdle
+    resetRegistrationFlowToIdle,
+    getLedgerUserByUsername,
+    getLedgerUserById,
+    listLedgerUsers,
+    createLedgerUser,
+    updateLedgerUser,
+    toPublicLedgerUser
   };
 }
 
@@ -3260,6 +3351,19 @@ async function migrate(db) {
   await db.exec(`INSERT INTO payment_sync_state (id, status, updated_at)
     VALUES (1, 'disabled', CURRENT_TIMESTAMP)
     ON CONFLICT(id) DO NOTHING`);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ledger_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_ledger_users_username ON ledger_users(username)');
 
   const users = await db.prepare('SELECT id, created_at, first_seen FROM telegram_users').all();
   const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM activity_events WHERE telegram_user_id = ? AND event_type = ?');

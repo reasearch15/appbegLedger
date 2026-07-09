@@ -205,5 +205,18 @@ export async function migratePostgres(driver) {
 
   await driver.run('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, NOW()::TEXT) ON CONFLICT (id) DO NOTHING');
 
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS ledger_users (
+      id BIGSERIAL PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ledger_users_username ON ledger_users(username);
+  `);
+
   await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
 }

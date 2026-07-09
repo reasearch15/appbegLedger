@@ -42,18 +42,23 @@ export function createPaymentInfoController({ api, getState, setState, render, f
     return '🟡';
   }
 
+  function canManagePaymentInfo() {
+    return getState().authUser?.role === 'admin';
+  }
+
   function renderMethodsList(state) {
     const methods = state.paymentMethods || [];
     const missingDefault = methods.some((method) => method.is_active && !method.has_active_default);
+    const admin = canManagePaymentInfo();
 
     return `
       <section class="payment-info-methods-panel card">
         <div class="payment-info-panel-header">
           <div class="card-title">Payment Methods</div>
-          <button type="button" class="button secondary small" data-payment-info-action="show-add-method">+ Add Payment Method</button>
+          ${admin ? '<button type="button" class="button secondary small" data-payment-info-action="show-add-method">+ Add Payment Method</button>' : ''}
         </div>
         ${missingDefault ? '<div class="payment-info-warning">Some active payment methods do not have a default QR. Registration will skip those methods until a default QR is set.</div>' : ''}
-        ${state.showAddPaymentMethod ? renderAddMethodForm(state) : ''}
+        ${state.showAddPaymentMethod && admin ? renderAddMethodForm(state) : ''}
         ${state.paymentMethodsLoading && !methods.length ? '<div class="subtle">Loading payment methods…</div>' : ''}
         ${!state.paymentMethodsLoading && !methods.length
           ? '<div class="payment-info-empty">No payment methods yet. Add one to enable registration payments.</div>'
@@ -66,7 +71,9 @@ export function createPaymentInfoController({ api, getState, setState, render, f
                 <div class="subtle">${method.qr_count} QR Code${method.qr_count === 1 ? '' : 's'}</div>
                 <div class="subtle">${method.default_qr_label ? `Default: ${escapeHtml(method.default_qr_label)}` : 'No default QR'}</div>
               </div>
-              <button type="button" class="button secondary small" data-payment-info-action="manage" data-payment-method-id="${method.id}">Manage</button>
+              <button type="button" class="button secondary small" data-payment-info-action="manage" data-payment-method-id="${method.id}">
+                ${canManagePaymentInfo() ? 'Manage' : 'View'}
+              </button>
             </article>
           `).join('')}
         </div>
@@ -97,6 +104,7 @@ export function createPaymentInfoController({ api, getState, setState, render, f
   function renderManageView(state) {
     const method = state.selectedPaymentMethod;
     const qrs = state.paymentMethodQrs || [];
+    const admin = canManagePaymentInfo();
     if (!method) return '';
 
     return `
@@ -105,10 +113,11 @@ export function createPaymentInfoController({ api, getState, setState, render, f
           <button type="button" class="button secondary small" data-payment-info-action="back">← Back</button>
           <div>
             <div class="card-title">${escapeHtml(method.name)}</div>
-            <div class="subtle">Manage QR codes for this payment method.</div>
+            <div class="subtle">${admin ? 'Manage QR codes for this payment method.' : 'View QR codes for this payment method.'}</div>
           </div>
         </div>
 
+        ${admin ? `
         <details class="payment-info-upload-details" open>
           <summary>Upload QR</summary>
           <form id="paymentQrUploadForm" class="settings-form">
@@ -128,6 +137,7 @@ export function createPaymentInfoController({ api, getState, setState, render, f
             </div>
           </form>
         </details>
+        ` : ''}
 
         ${!method.has_active_default
           ? '<div class="payment-info-warning">This payment method has no active default QR. Registration will show it as unavailable until you set a default.</div>'
@@ -142,6 +152,7 @@ export function createPaymentInfoController({ api, getState, setState, render, f
 
   function renderQrCard(qr, state) {
     const busy = state.paymentInfoActionId === qr.id;
+    const admin = canManagePaymentInfo();
     return `
       <article class="payment-info-card ${qr.is_active ? 'active' : 'inactive'}">
         <div class="payment-info-preview-wrap">
@@ -155,11 +166,13 @@ export function createPaymentInfoController({ api, getState, setState, render, f
             ${qr.in_use ? '<span class="badge badge-muted">In use</span>' : ''}
           </div>
           <div class="subtle payment-info-meta">Created ${fmtDateTime(qr.created_at)}</div>
+          ${admin ? `
           <div class="payment-info-actions">
             ${!qr.is_default ? `<button type="button" class="button secondary small" data-payment-qr-action="default" data-payment-qr-id="${qr.id}" ${busy || !qr.is_active ? 'disabled' : ''}>Set Default</button>` : ''}
             <button type="button" class="button secondary small" data-payment-qr-action="toggle" data-payment-qr-id="${qr.id}" ${busy ? 'disabled' : ''}>${qr.is_active ? 'Deactivate' : 'Activate'}</button>
             <button type="button" class="button danger small" data-payment-qr-action="delete" data-payment-qr-id="${qr.id}" ${busy ? 'disabled' : ''}>Delete</button>
           </div>
+          ` : ''}
         </div>
       </article>
     `;
