@@ -802,9 +802,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (nextMode === 'auto') {
       await db.prepare(`
         UPDATE telegram_users
-        SET ai_auto_paused = 0,
+        SET ai_auto_paused = ${sql.boolFalse},
             updated_at = ?
-        WHERE ai_auto_paused = 1
+        WHERE ai_auto_paused = ${sql.boolTrue}
       `).run(updatedAt);
     }
     await logSettingsAudit({
@@ -867,7 +867,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const updatedAt = nowIso();
     await db.prepare(`
       UPDATE telegram_users
-      SET ai_auto_paused = 1,
+      SET ai_auto_paused = ${sql.boolTrue},
           ai_mode_updated_at = ?,
           ai_mode_updated_by = ?,
           updated_at = ?
