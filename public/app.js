@@ -60,7 +60,6 @@ let state = {
   automationLogs: [],
   staffAiDraft: null,
   staffAiBadDraftId: null,
-  aiModeSaving: false,
   allTags: [],
   quickReplies: [],
   query: '',
@@ -105,6 +104,8 @@ let state = {
   paymentActionBusy: false,
   autoRegistrationBot: { enabled: true, enabled_at: null },
   autoRegistrationBotSaving: false,
+  customerSupportAi: { mode: 'train' },
+  customerSupportAiSaving: false,
   registrationWindow: null,
   authUser: null,
   ledgerUsers: [],
@@ -936,6 +937,7 @@ async function refreshSyncStatus({ force = false, reason = 'manual' } = {}) {
     state.sync = syncPayload.sync || syncPayload;
     state.syncLogs = syncPayload.logs || [];
     state.autoRegistrationBot = syncPayload.autoRegistrationBot || state.autoRegistrationBot;
+    state.customerSupportAi = syncPayload.customerSupportAi || state.customerSupportAi;
     lastSyncStatusRefreshAt = Date.now();
   })();
 
@@ -1118,7 +1120,9 @@ function syncStatus() {
   const bot = state.autoRegistrationBot || {};
   const botEnabled = bot.enabled !== false;
   const botStatusClass = botEnabled ? 'enabled' : 'disabled';
-  const botStatusLabel = botEnabled ? '🟢 Enabled' : '🔴 Disabled';
+  const botStatusLabel = botEnabled ? 'Enabled' : 'Disabled';
+  const supportAi = state.customerSupportAi || { mode: 'train' };
+  const supportMode = supportAi.mode === 'auto' ? 'auto' : 'train';
   return `
     <div class="sync-status-wrap">
       <div class="sync-status ${escapeHtml(sync.status || 'disabled')}">
@@ -1126,22 +1130,46 @@ function syncStatus() {
         <span>${escapeHtml(sync.status || 'disabled')}</span>
         <span class="subtle">Connected ${escapeHtml(accountLabel)} · ${Number(sync.imported_contacts || 0)} contacts / ${Number(sync.imported_messages || 0)} messages</span>
       </div>
-      <div class="auto-registration-bot-status">
-        <div class="auto-registration-bot-copy">
-          <div class="auto-registration-bot-title">Auto Registration Bot</div>
-          <div class="auto-registration-bot-pill ${botStatusClass}">${botStatusLabel}</div>
+      <div class="contacts-top-controls">
+        <div class="auto-registration-bot-status">
+          <div class="auto-registration-bot-copy">
+            <div class="auto-registration-bot-title">Auto Registration Bot</div>
+            <div class="auto-registration-bot-pill ${botStatusClass}">${botStatusLabel}</div>
+          </div>
+          ${isAdmin() ? `
+            <label class="auto-registration-bot-toggle">
+              <input
+                type="checkbox"
+                id="autoRegistrationBotToggle"
+                ${botEnabled ? 'checked' : ''}
+                ${state.autoRegistrationBotSaving ? 'disabled' : ''}
+              />
+              <span>${botEnabled ? 'Disable bot' : 'Enable bot'}</span>
+            </label>
+          ` : ''}
         </div>
-        ${isAdmin() ? `
-          <label class="auto-registration-bot-toggle">
-            <input
-              type="checkbox"
-              id="autoRegistrationBotToggle"
-              ${botEnabled ? 'checked' : ''}
-              ${state.autoRegistrationBotSaving ? 'disabled' : ''}
-            />
-            <span>${botEnabled ? 'Disable bot' : 'Enable bot'}</span>
-          </label>
-        ` : ''}
+        <div class="customer-support-ai-status">
+          <div class="customer-support-ai-copy">
+            <div class="customer-support-ai-title">Customer Support AI</div>
+          </div>
+          <div class="customer-support-ai-mode">
+            <span class="ai-mode-label">AI Mode:</span>
+            <div class="ai-mode-selector" role="group" aria-label="Customer Support AI Mode">
+              <button
+                type="button"
+                class="ai-mode-btn ${supportMode === 'train' ? 'is-active' : ''}"
+                data-global-ai-mode="train"
+                ${state.customerSupportAiSaving ? 'disabled' : ''}
+              >Train</button>
+              <button
+                type="button"
+                class="ai-mode-btn ${supportMode === 'auto' ? 'is-active' : ''}"
+                data-global-ai-mode="auto"
+                ${state.customerSupportAiSaving ? 'disabled' : ''}
+              >Auto</button>
+            </div>
+          </div>
+        </div>
       </div>
       ${latestLog ? `<div class="sync-log-preview subtle">${escapeHtml(latestLog.message)}</div>` : ''}
     </div>
@@ -1194,33 +1222,6 @@ function contactRows() {
 function isActiveToday(value) {
   if (!value) return false;
   return dayKey(value) === new Date().toISOString().slice(0, 10);
-}
-
-function contactAiModeBar() {
-  if (!state.contact) return '';
-  const mode = state.contact.ai_mode === 'auto' ? 'auto' : 'train';
-  const paused = Boolean(state.contact.ai_auto_paused);
-  const saving = state.aiModeSaving;
-  return `
-    <div class="ai-mode-bar">
-      <span class="ai-mode-label">AI Mode:</span>
-      <div class="ai-mode-selector" role="group" aria-label="AI Mode">
-        <button
-          type="button"
-          class="ai-mode-btn ${mode === 'train' ? 'is-active' : ''}"
-          data-ai-mode="train"
-          ${saving ? 'disabled' : ''}
-        >Train</button>
-        <button
-          type="button"
-          class="ai-mode-btn ${mode === 'auto' ? 'is-active' : ''}"
-          data-ai-mode="auto"
-          ${saving ? 'disabled' : ''}
-        >Auto</button>
-      </div>
-      ${mode === 'auto' && paused ? '<span class="ai-mode-paused">Paused — staff took over</span>' : ''}
-    </div>
-  `;
 }
 
 function conversationHeader() {
@@ -1306,14 +1307,17 @@ function quickReplyBar() {
 
 function staffAiSuggestedReplyPanel() {
   if (!state.contact) return '';
-  const mode = state.contact.ai_mode === 'auto' ? 'auto' : 'train';
+  const mode = state.customerSupportAi?.mode === 'auto' ? 'auto' : 'train';
+  const paused = Boolean(state.contact.ai_auto_paused);
   if (mode !== 'train') {
     return `
       <section class="ai-suggested-reply-panel is-muted">
         <div class="ai-suggested-header">
           <div>
             <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">Auto mode is on. Replies send automatically using saved training.</div>
+            <div class="subtle">${paused
+              ? 'Auto mode is on, but paused for this contact after a staff reply.'
+              : 'Auto mode is on. Replies send automatically using saved training.'}</div>
           </div>
         </div>
       </section>
@@ -1908,7 +1912,6 @@ function contactsWorkspace() {
           </section>
           <section class="chat-panel ${pane === 'chat' ? 'is-primary' : ''}">
             ${conversationHeader()}
-            ${contactAiModeBar()}
             <div id="chatLog" class="chat-log">${messageList()}</div>
             ${composer()}
           </section>
@@ -2589,12 +2592,12 @@ function bindEvents() {
       void handleAiDraftAction(button.dataset.aiDraftAction);
     });
   });
-  document.querySelectorAll('[data-ai-mode]').forEach((button) => {
+  document.querySelectorAll('[data-global-ai-mode]').forEach((button) => {
     button.addEventListener('click', () => {
-      if (button.disabled || state.aiModeSaving) return;
-      const mode = button.dataset.aiMode;
-      if (!mode || mode === state.contact?.ai_mode) return;
-      void setContactAiMode(mode);
+      if (button.disabled || state.customerSupportAiSaving) return;
+      const mode = button.dataset.globalAiMode;
+      if (!mode || mode === state.customerSupportAi?.mode) return;
+      void setCustomerSupportAiMode(mode);
     });
   });
 }
@@ -2888,46 +2891,36 @@ async function sendStaffAiTrainingReply(text, replyUsed) {
   }
 }
 
-async function setContactAiMode(mode) {
-  if (!state.selectedContactId || state.aiModeSaving) return;
+async function setCustomerSupportAiMode(mode) {
+  if (state.customerSupportAiSaving) return;
   const nextMode = mode === 'auto' ? 'auto' : 'train';
-  state.aiModeSaving = true;
-  if (state.contact) {
-    state.contact = {
-      ...state.contact,
-      ai_mode: nextMode,
-      ai_auto_paused: nextMode === 'auto' ? false : state.contact.ai_auto_paused
-    };
-  }
+  state.customerSupportAiSaving = true;
+  state.customerSupportAi = {
+    ...state.customerSupportAi,
+    mode: nextMode
+  };
   if (nextMode === 'train') {
     state.staffAiBadDraftId = null;
   }
   render();
   try {
-    const payload = await api(`/api/contacts/${state.selectedContactId}/ai-mode`, {
+    const payload = await api('/api/customer-support-ai-mode', {
       method: 'PATCH',
       body: JSON.stringify({
         mode: nextMode,
         staffName: state.staffName
       })
     });
-    if (payload.contact) {
-      state.contact = normalizeContact(payload.contact);
-    } else if (payload.aiMode) {
-      state.contact = {
-        ...state.contact,
-        ai_mode: payload.aiMode.mode,
-        ai_auto_paused: payload.aiMode.auto_paused
-      };
+    state.customerSupportAi = payload.customerSupportAi || state.customerSupportAi;
+    contactDetailCache.clear();
+    if (state.selectedContactId) {
+      await refreshSelectedContact({ force: true, reason: 'customer support ai mode changed' });
     }
-    contactDetailCache.delete(Number(state.selectedContactId));
-    await refreshSelectedContact({ force: true, reason: 'ai mode changed' });
   } catch (error) {
-    alert(error.message || 'Could not update AI mode.');
-    contactDetailCache.delete(Number(state.selectedContactId));
-    await refreshSelectedContact({ force: true, reason: 'ai mode change failed' });
+    alert(error.message || 'Could not update Customer Support AI mode.');
+    await refreshSyncStatus({ force: true, reason: 'customer support ai mode change failed' });
   } finally {
-    state.aiModeSaving = false;
+    state.customerSupportAiSaving = false;
     render();
   }
 }
@@ -3169,24 +3162,30 @@ socket.on('auto-registration-bot:changed', (payload = {}) => {
   if (state.section === 'contacts') render();
 });
 
-socket.on('contact:ai-mode:changed', async ({ contactId, aiMode } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (id) contactDetailCache.delete(id);
-  if (state.contact && normalizeContactId(state.contact.id) === id && aiMode) {
-    state.contact = {
-      ...state.contact,
-      ai_mode: aiMode.mode,
-      ai_auto_paused: aiMode.auto_paused
-    };
-  }
-  if (state.selectedContactId === id) {
+socket.on('customer-support-ai-mode:changed', async (payload = {}) => {
+  state.customerSupportAi = payload;
+  contactDetailCache.clear();
+  if (state.selectedContactId) {
     try {
-      await refreshSelectedContact({ force: true, reason: 'ai mode changed' });
+      await refreshSelectedContact({ force: true, reason: 'customer support ai mode changed' });
     } catch (error) {
-      console.warn('[ai-mode] selected contact refresh failed:', error);
+      console.warn('[customer-support-ai] selected contact refresh failed:', error);
     }
   }
   if (state.section === 'contacts') render();
+});
+
+socket.on('contact:ai-auto-paused:changed', async ({ contactId } = {}) => {
+  const id = normalizeContactId(contactId);
+  if (id) contactDetailCache.delete(id);
+  if (state.selectedContactId === id) {
+    try {
+      await refreshSelectedContact({ force: true, reason: 'contact ai auto paused' });
+      render();
+    } catch (error) {
+      console.warn('[customer-support-ai] contact pause refresh failed:', error);
+    }
+  }
 });
 
 socket.on('staff-ai-apprentice-mode:changed', () => {});

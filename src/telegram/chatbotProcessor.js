@@ -115,12 +115,12 @@ async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot 
 }
 
 async function processSupportAiJob({ store, contact, job, io, bot }) {
-  const contactAi = store.hydrateContactAiSettings
-    ? store.hydrateContactAiSettings(contact)
-    : {
-      mode: contact.ai_mode === 'auto' ? 'auto' : 'train',
-      auto_paused: Boolean(contact.ai_auto_paused)
-    };
+  const globalAi = await store.getCustomerSupportAiSettings?.()
+    || { mode: 'train', auto_paused: false };
+  const contactAi = {
+    mode: globalAi.mode === 'auto' ? 'auto' : 'train',
+    auto_paused: Boolean(contact.ai_auto_paused)
+  };
 
   if (job.job_type !== 'inbound_message' || !String(job.input_text || '').trim()) {
     await store.completeBotJob(job.id, { status: 'completed', errorText: 'Support AI skipped: no inbound text' });

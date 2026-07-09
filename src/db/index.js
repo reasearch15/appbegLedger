@@ -750,6 +750,73 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     }).join('\n');
   }
 
+  async function getCustomerSupportAiSettings() {
+    const existing = await db.prepare('SELECT id FROM coadmin_settings WHERE id = 1').get();
+    if (!existing) {
+      await db.prepare('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, ?)').run(nowIso());
+    }
+    const row = await db.prepare(`
+      SELECT
+        customer_support_ai_mode,
+        customer_support_ai_mode_updated_at,
+        customer_support_ai_mode_updated_by,
+        staff_ai_apprentice_mode_enabled
+      FROM coadmin_settings
+      WHERE id = 1
+    `).get();
+    let mode = normalizeContactAiMode(row?.customer_support_ai_mode);
+    if (!row?.customer_support_ai_mode && row?.staff_ai_apprentice_mode_enabled === false) {
+      mode = 'train';
+    }
+    return {
+      mode,
+      updated_at: row?.customer_support_ai_mode_updated_at || null,
+      updated_by: row?.customer_support_ai_mode_updated_by || null
+    };
+  }
+
+  async function setCustomerSupportAiMode(mode, actorName = 'Staff') {
+    const current = await getCustomerSupportAiSettings();
+    const nextMode = normalizeContactAiMode(mode);
+    if (nextMode === current.mode) return current;
+    const updatedAt = nowIso();
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET customer_support_ai_mode = ?,
+          customer_support_ai_mode_updated_at = ?,
+          customer_support_ai_mode_updated_by = ?,
+          staff_ai_apprentice_mode_enabled = ?,
+          staff_ai_apprentice_mode_updated_at = ?,
+          staff_ai_apprentice_mode_updated_by = ?,
+          updated_at = ?
+      WHERE id = 1
+    `).run(
+      nextMode,
+      updatedAt,
+      actorName,
+      nextMode === 'train' ? 1 : 0,
+      updatedAt,
+      actorName,
+      updatedAt
+    );
+    if (nextMode === 'auto') {
+      await db.prepare(`
+        UPDATE telegram_users
+        SET ai_auto_paused = 0,
+            updated_at = ?
+        WHERE ai_auto_paused = 1
+      `).run(updatedAt);
+    }
+    await logSettingsAudit({
+      settingsKey: 'customer_support_ai_mode',
+      fieldName: 'mode',
+      oldValue: current.mode,
+      newValue: nextMode,
+      actorName
+    });
+    return await getCustomerSupportAiSettings();
+  }
+
   async function getStaffAiApprenticeSettings() {
     const existing = await db.prepare('SELECT id FROM coadmin_settings WHERE id = 1').get();
     if (!existing) {
@@ -785,39 +852,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
-  async function setContactAiMode(contactId, mode, actorName = 'Staff') {
-    const contact = await db.prepare('SELECT id, ai_mode FROM telegram_users WHERE id = ?').get(contactId);
-    if (!contact) throw new Error('Contact not found.');
-    const nextMode = normalizeContactAiMode(mode);
-    const updatedAt = nowIso();
-    await db.prepare(`
-      UPDATE telegram_users
-      SET ai_mode = ?,
-          ai_auto_paused = ?,
-          ai_mode_updated_at = ?,
-          ai_mode_updated_by = ?,
-          updated_at = ?
-      WHERE id = ?
-    `).run(
-      nextMode,
-      0,
-      updatedAt,
-      actorName,
-      updatedAt,
-      contactId
-    );
-    if (nextMode === 'auto') {
-      await setBotControl(contactId, { botPaused: false, actorName });
-    }
-    const user = await getUserProfile(contactId);
-    return hydrateContactAiSettings(user);
-  }
-
   async function pauseContactAiAuto(contactId, actorName = 'Staff') {
-    const contact = await db.prepare('SELECT id, ai_mode, ai_auto_paused FROM telegram_users WHERE id = ?').get(contactId);
+    const globalAi = await getCustomerSupportAiSettings();
+    const contact = await db.prepare('SELECT id, ai_auto_paused FROM telegram_users WHERE id = ?').get(contactId);
     if (!contact) throw new Error('Contact not found.');
-    if (normalizeContactAiMode(contact.ai_mode) !== 'auto' || contact.ai_auto_paused) {
-      return hydrateContactAiSettings(contact);
+    if (globalAi.mode !== 'auto' || contact.ai_auto_paused) {
+      return {
+        mode: globalAi.mode,
+        auto_paused: Boolean(contact?.ai_auto_paused),
+        updated_at: globalAi.updated_at,
+        updated_by: globalAi.updated_by
+      };
     }
     const updatedAt = nowIso();
     await db.prepare(`
@@ -828,8 +873,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           updated_at = ?
       WHERE id = ?
     `).run(updatedAt, actorName, updatedAt, contactId);
-    const user = await getUserProfile(contactId);
-    return hydrateContactAiSettings(user);
+    return {
+      mode: globalAi.mode,
+      auto_paused: true,
+      updated_at: updatedAt,
+      updated_by: actorName
+    };
   }
 
   async function findStaffAiTrainingReply({ contactId, intent }) {
@@ -3513,7 +3562,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getCoadminSettings,
     getStaffAiApprenticeSettings,
     setStaffAiApprenticeModeEnabled,
-    setContactAiMode,
+    getCustomerSupportAiSettings,
+    setCustomerSupportAiMode,
     pauseContactAiAuto,
     findStaffAiTrainingReply,
     hydrateContactAiSettings,
@@ -4084,6 +4134,9 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_enabled', 'INTEGER NOT NULL DEFAULT 1');
   await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_updated_at', 'TEXT');
   await addColumnIfMissing(db, 'coadmin_settings', 'staff_ai_apprentice_mode_updated_by', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode', "TEXT NOT NULL DEFAULT 'train'");
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode_updated_at', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode_updated_by', 'TEXT');
   await db.prepare('INSERT OR IGNORE INTO coadmin_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)').run();
 
   await db.exec(`

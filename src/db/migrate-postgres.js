@@ -267,6 +267,12 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_at TEXT;
     ALTER TABLE coadmin_settings
       ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_updated_by TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_ai_mode TEXT NOT NULL DEFAULT 'train';
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_by TEXT;
     ALTER TABLE telegram_users
       ADD COLUMN IF NOT EXISTS ai_mode TEXT NOT NULL DEFAULT 'train';
     ALTER TABLE telegram_users

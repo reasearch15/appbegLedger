@@ -428,7 +428,8 @@ app.get('/api/telegram-account-sync/status', async (req, res) => {
   res.json({
     sync: await store.getTelegramAccountSyncState(),
     logs: await store.listAccountSyncLogs(20),
-    autoRegistrationBot: await store.getAutoRegistrationBotSettings()
+    autoRegistrationBot: await store.getAutoRegistrationBotSettings(),
+    customerSupportAi: await store.getCustomerSupportAiSettings()
   });
 });
 
@@ -458,22 +459,17 @@ app.patch('/api/settings/staff-ai-apprentice-mode', requireAdmin, async (req, re
   }
 });
 
-app.patch('/api/contacts/:id/ai-mode', async (req, res) => {
+app.patch('/api/customer-support-ai-mode', async (req, res) => {
   try {
-    const contactId = Number(req.params.id);
-    const contact = await store.getUserProfile(contactId);
-    if (!contact) return res.status(404).json({ error: 'Contact not found.' });
     const mode = String(req.body?.mode || req.body?.aiMode || '').trim().toLowerCase();
     if (mode !== 'train' && mode !== 'auto') {
       return res.status(400).json({ error: 'mode must be train or auto.' });
     }
     const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
-    const aiMode = await store.setContactAiMode(contactId, mode, actorName);
-    const updated = await store.getUserProfile(contactId);
-    io.emit('contact:changed', { contactId, userId: contactId });
-    io.emit('contact:ai-mode:changed', { contactId, aiMode });
+    const customerSupportAi = await store.setCustomerSupportAiMode(mode, actorName);
+    io.emit('customer-support-ai-mode:changed', customerSupportAi);
     io.emit('contacts:changed');
-    res.json({ contact: updated, aiMode });
+    res.json({ customerSupportAi });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -1096,11 +1092,14 @@ async function sendTelegramMessage(req, res) {
     }
   }
 
-  if (!isTrainingSend && user.ai_mode === 'auto' && !user.ai_auto_paused) {
+  if (!isTrainingSend) {
     try {
-      const aiMode = await store.pauseContactAiAuto(user.id, req.body.staffName || 'Staff');
-      console.log(`[support-ai] auto_paused_on_manual_send contact=${user.id} mode=${aiMode.mode}`);
-      io.emit('contact:ai-mode:changed', { contactId: user.id, aiMode });
+      const globalAi = await store.getCustomerSupportAiSettings();
+      if (globalAi.mode === 'auto' && !user.ai_auto_paused) {
+        const aiMode = await store.pauseContactAiAuto(user.id, req.body.staffName || 'Staff');
+        console.log(`[support-ai] auto_paused_on_manual_send contact=${user.id} mode=${aiMode.mode}`);
+        io.emit('contact:ai-auto-paused:changed', { contactId: user.id, aiMode });
+      }
     } catch (error) {
       console.warn('[support-ai] auto-pause on manual send failed:', error.message);
     }

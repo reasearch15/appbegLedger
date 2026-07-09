@@ -411,7 +411,10 @@ CREATE TABLE IF NOT EXISTS coadmin_settings (
   auto_registration_bot_updated_by TEXT,
   staff_ai_apprentice_mode_enabled INTEGER NOT NULL DEFAULT 1,
   staff_ai_apprentice_mode_updated_at TEXT,
-  staff_ai_apprentice_mode_updated_by TEXT
+  staff_ai_apprentice_mode_updated_by TEXT,
+  customer_support_ai_mode TEXT NOT NULL DEFAULT 'train',
+  customer_support_ai_mode_updated_at TEXT,
+  customer_support_ai_mode_updated_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS staff_ai_training_examples (

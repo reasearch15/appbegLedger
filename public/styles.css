@@ -127,6 +127,13 @@ h1 {
   gap: 8px;
 }
 
+.contacts-top-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 520px;
+}
+
 .auto-registration-bot-status {
   display: flex;
   align-items: center;
@@ -137,7 +144,6 @@ h1 {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fff;
-  max-width: 520px;
 }
 
 .auto-registration-bot-copy {
@@ -186,6 +192,38 @@ h1 {
 .auto-registration-bot-toggle input {
   width: 16px;
   height: 16px;
+}
+
+.customer-support-ai-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.customer-support-ai-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.customer-support-ai-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.customer-support-ai-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .sync-log-preview {
@@ -1202,16 +1240,6 @@ h2 {
 .ai-suggested-reply-panel.is-muted {
   border-color: var(--line);
   background: var(--panel-soft);
-}
-
-.ai-mode-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
 }
 
 .ai-mode-label {
