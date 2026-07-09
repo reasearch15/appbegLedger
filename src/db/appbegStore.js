@@ -1,178 +1,128 @@
 import pg from 'pg';
 import { resolveAppBegDatabaseConfig } from './appbegConfig.js';
-import { discoverAppBegSchema, quoteIdent } from './appbegSchema.js';
 
 const { Pool } = pg;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const MAX_CSV_ROWS = 5000;
-const SORTABLE = new Set(['created_at', 'updated_at', 'name', 'coin_balance', 'cash_balance', 'last_activity']);
+const SORTABLE = new Set(['username', 'coin', 'cash', 'created_at', 'updated_at']);
 
-function sqlExpr(tableAlias, columnName, fallback = 'NULL') {
-  return columnName ? `${tableAlias}.${quoteIdent(columnName)}` : fallback;
-}
+const SELECT_SQL = `
+  p.firebase_id AS player_uid,
+  p.firebase_id,
+  p.username,
+  p.email,
+  p.role,
+  p.status,
+  p.coadmin_uid,
+  p.created_by,
+  p.coin,
+  p.cash,
+  p.cash_box_npr,
+  p.promo_locked_coins,
+  p.referral_bonus_coins,
+  p.source,
+  p.created_at,
+  p.updated_at,
+  p.mirrored_at,
+  p.deleted_at
+`;
 
 function toPublicPlayer(row) {
   return {
-    id: row.player_row_id,
-    display_name: row.display_name ?? null,
+    id: row.firebase_id || row.player_uid,
     player_uid: row.player_uid ?? null,
+    firebase_id: row.firebase_id ?? null,
     username: row.username ?? null,
-    coadmin: row.coadmin ?? null,
-    created_by: row.created_by ?? null,
-    source: row.source ?? null,
-    coin_balance: row.coin_balance ?? null,
-    cash_balance: row.cash_balance ?? null,
-    npr_balance: row.npr_balance ?? null,
-    game_usernames: row.game_usernames ?? null,
-    game_names: row.game_names ?? null,
+    email: row.email ?? null,
+    role: row.role ?? null,
     status: row.status ?? null,
-    last_activity: row.last_activity ?? null,
+    coadmin_uid: row.coadmin_uid ?? null,
+    created_by: row.created_by ?? null,
+    coin: row.coin ?? null,
+    cash: row.cash ?? null,
+    cash_box_npr: row.cash_box_npr ?? null,
+    promo_locked_coins: row.promo_locked_coins ?? null,
+    referral_bonus_coins: row.referral_bonus_coins ?? null,
+    source: row.source ?? null,
     created_at: row.created_at ?? null,
-    updated_at: row.updated_at ?? null
+    updated_at: row.updated_at ?? null,
+    mirrored_at: row.mirrored_at ?? null
   };
 }
 
-function buildSelectParts(schema) {
-  const { playersTable, balancesTable, gamesTable, columns: c } = schema;
-  const p = 'p';
-  const select = [
-    `${sqlExpr(p, c.playerId)} AS player_row_id`,
-    `${sqlExpr(p, c.displayName)} AS display_name`,
-    `${sqlExpr(p, c.playerUid)} AS player_uid`,
-    `${sqlExpr(p, c.username)} AS username`,
-    `${sqlExpr(p, c.coadmin)} AS coadmin`,
-    `${sqlExpr(p, c.createdBy)} AS created_by`,
-    `${sqlExpr(p, c.source)} AS source`,
-    `${sqlExpr(p, c.status)} AS status`,
-    `${sqlExpr(p, c.lastActivity)} AS last_activity`,
-    `${sqlExpr(p, c.createdAt)} AS created_at`,
-    `${sqlExpr(p, c.updatedAt)} AS updated_at`
-  ];
-
-  if (balancesTable && c.balancePlayerId) {
-    const b = 'b';
-    select.push(`${sqlExpr(b, c.coinBalance)} AS coin_balance`);
-    select.push(`${sqlExpr(b, c.cashBalance)} AS cash_balance`);
-    select.push(`${sqlExpr(b, c.nprBalance)} AS npr_balance`);
-  } else {
-    select.push('NULL::text AS coin_balance', 'NULL::text AS cash_balance', 'NULL::text AS npr_balance');
-  }
-
-  if (gamesTable && c.gamePlayerId && c.gameUsername) {
-    select.push('gl.game_usernames');
-    select.push('gl.game_names');
-  } else {
-    select.push('NULL::text AS game_usernames', 'NULL::text AS game_names');
-  }
-
-  let fromSql = `FROM ${quoteIdent(playersTable)} ${p}`;
-  const joins = [];
-
-  if (balancesTable && c.balancePlayerId) {
-    joins.push(`
-      LEFT JOIN ${quoteIdent(balancesTable)} b
-        ON ${sqlExpr('b', c.balancePlayerId)}::text = ${sqlExpr(p, c.playerId)}::text
-    `);
-  }
-
-  if (gamesTable && c.gamePlayerId && c.gameUsername) {
-    const gameNameExpr = c.gameName
-      ? `string_agg(DISTINCT ${sqlExpr('g', c.gameName)}::text, ', ' ORDER BY ${sqlExpr('g', c.gameName)}::text)`
-      : 'NULL::text';
-    joins.push(`
-      LEFT JOIN LATERAL (
-        SELECT
-          string_agg(DISTINCT ${sqlExpr('g', c.gameUsername)}::text, ', ' ORDER BY ${sqlExpr('g', c.gameUsername)}::text) AS game_usernames,
-          ${gameNameExpr} AS game_names
-        FROM ${quoteIdent(gamesTable)} g
-        WHERE ${sqlExpr('g', c.gamePlayerId)}::text = ${sqlExpr(p, c.playerId)}::text
-      ) gl ON TRUE
-    `);
-  }
-
-  return { selectSql: select.join(',\n      '), fromSql, joinsSql: joins.join('\n') };
-}
-
-function resolveSort(schema, sortBy) {
-  const { columns: c } = schema;
+function resolveSort(sortBy) {
   switch (sortBy) {
-    case 'name':
-      return c.displayName ? sqlExpr('p', c.displayName) : sqlExpr('p', c.playerId);
-    case 'coin_balance':
-      return c.coinBalance ? sqlExpr('b', c.coinBalance) : (c.createdAt ? sqlExpr('p', c.createdAt) : sqlExpr('p', c.playerId));
-    case 'cash_balance':
-      return c.cashBalance ? sqlExpr('b', c.cashBalance) : (c.createdAt ? sqlExpr('p', c.createdAt) : sqlExpr('p', c.playerId));
+    case 'username':
+      return 'p.username';
+    case 'coin':
+      return 'p.coin';
+    case 'cash':
+      return 'p.cash';
     case 'updated_at':
-      return c.updatedAt ? sqlExpr('p', c.updatedAt) : (c.createdAt ? sqlExpr('p', c.createdAt) : sqlExpr('p', c.playerId));
-    case 'last_activity':
-      return c.lastActivity ? sqlExpr('p', c.lastActivity) : (c.updatedAt ? sqlExpr('p', c.updatedAt) : sqlExpr('p', c.playerId));
+      return 'p.updated_at';
     case 'created_at':
     default:
-      return c.createdAt ? sqlExpr('p', c.createdAt) : sqlExpr('p', c.playerId);
+      return 'p.created_at';
   }
 }
 
-function buildWhere(schema, { query, status, coadmin }) {
-  const clauses = [];
+function buildBaseWhere({ showTestData = false } = {}) {
+  const clauses = [
+    "p.role = 'player'",
+    'p.deleted_at IS NULL'
+  ];
+
+  if (!showTestData) {
+    clauses.push("(p.firebase_id IS NULL OR p.firebase_id NOT LIKE 'codex_%')");
+    clauses.push("(p.username IS NULL OR p.username NOT LIKE 'codex_%')");
+    clauses.push("(p.email IS NULL OR p.email NOT LIKE '%@example.test')");
+    clauses.push("(p.source IS NULL OR p.source NOT LIKE 'codex_%')");
+  }
+
+  return clauses;
+}
+
+function buildWhere({ query, status, coadmin, showTestData = false }) {
+  const clauses = buildBaseWhere({ showTestData });
   const params = [];
   let index = 1;
 
   const trimmedQuery = String(query || '').trim();
   if (trimmedQuery) {
-    const searchParts = [];
-    const { columns: c } = schema;
     const pattern = `%${trimmedQuery}%`;
-    if (c.displayName) {
-      searchParts.push(`${sqlExpr('p', c.displayName)}::text ILIKE $${index}`);
-      params.push(pattern);
-      index += 1;
-    }
-    if (c.username) {
-      searchParts.push(`${sqlExpr('p', c.username)}::text ILIKE $${index}`);
-      params.push(pattern);
-      index += 1;
-    }
-    if (c.playerUid) {
-      searchParts.push(`${sqlExpr('p', c.playerUid)}::text ILIKE $${index}`);
-      params.push(pattern);
-      index += 1;
-    }
-    if (c.playerId && c.playerId !== c.playerUid) {
-      searchParts.push(`${sqlExpr('p', c.playerId)}::text ILIKE $${index}`);
-      params.push(pattern);
-      index += 1;
-    }
-    if (schema.gamesTable && c.gamePlayerId && c.gameUsername) {
-      searchParts.push(`EXISTS (
-        SELECT 1
-        FROM ${quoteIdent(schema.gamesTable)} sg
-        WHERE ${sqlExpr('sg', c.gamePlayerId)}::text = ${sqlExpr('p', c.playerId)}::text
-          AND ${sqlExpr('sg', c.gameUsername)}::text ILIKE $${index}
-      )`);
-      params.push(pattern);
-      index += 1;
-    }
-    if (searchParts.length) clauses.push(`(${searchParts.join(' OR ')})`);
+    clauses.push(`(
+      p.username ILIKE $${index}
+      OR p.email ILIKE $${index}
+      OR p.firebase_id ILIKE $${index}
+      OR p.coadmin_uid ILIKE $${index}
+      OR p.created_by ILIKE $${index}
+    )`);
+    params.push(pattern);
+    index += 1;
   }
 
-  if (status && schema.columns.status) {
-    clauses.push(`${sqlExpr('p', schema.columns.status)}::text = $${index}`);
+  if (status) {
+    clauses.push(`p.status = $${index}`);
     params.push(status);
     index += 1;
   }
 
-  if (coadmin && schema.columns.coadmin) {
-    clauses.push(`${sqlExpr('p', schema.columns.coadmin)}::text = $${index}`);
+  if (coadmin) {
+    clauses.push(`p.coadmin_uid = $${index}`);
     params.push(coadmin);
     index += 1;
   }
 
   return {
-    whereSql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    whereSql: `WHERE ${clauses.join(' AND ')}`,
     params,
     nextIndex: index
   };
+}
+
+function baseFromSql() {
+  return 'FROM players_cache p';
 }
 
 export async function createAppBegStore(env = process.env) {
@@ -199,16 +149,12 @@ export async function createAppBegStore(env = process.env) {
     ssl: config.ssl
   });
 
-  let schema;
   try {
     await pool.query('SELECT 1');
-    schema = await discoverAppBegSchema(pool);
   } catch (error) {
     await pool.end().catch(() => {});
     throw error;
   }
-
-  const queryParts = buildSelectParts(schema);
 
   async function listPlayers({
     page = 1,
@@ -217,21 +163,27 @@ export async function createAppBegStore(env = process.env) {
     sort = 'created_at',
     dir = 'desc',
     status = '',
-    coadmin = ''
+    coadmin = '',
+    showTestData = false
   } = {}) {
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
     const sortBy = SORTABLE.has(sort) ? sort : 'created_at';
     const sortDir = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const offset = (safePage - 1) * safeLimit;
+    const includeTestData = showTestData === true || showTestData === 'true' || showTestData === '1';
 
-    const { whereSql, params, nextIndex } = buildWhere(schema, { query, status, coadmin });
-    const orderExpr = resolveSort(schema, sortBy);
+    const { whereSql, params, nextIndex } = buildWhere({
+      query,
+      status,
+      coadmin,
+      showTestData: includeTestData
+    });
+    const orderExpr = resolveSort(sortBy);
 
     const countSql = `
       SELECT COUNT(*)::int AS total
-      ${queryParts.fromSql}
-      ${queryParts.joinsSql}
+      ${baseFromSql()}
       ${whereSql}
     `;
     const countResult = await pool.query(countSql, params);
@@ -239,16 +191,14 @@ export async function createAppBegStore(env = process.env) {
 
     const dataSql = `
       SELECT
-      ${queryParts.selectSql}
-      ${queryParts.fromSql}
-      ${queryParts.joinsSql}
+      ${SELECT_SQL}
+      ${baseFromSql()}
       ${whereSql}
-      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, ${sqlExpr('p', schema.columns.playerId)} DESC
+      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, p.firebase_id DESC
       LIMIT $${nextIndex}
       OFFSET $${nextIndex + 1}
     `;
-    const dataParams = [...params, safeLimit, offset];
-    const dataResult = await pool.query(dataSql, dataParams);
+    const dataResult = await pool.query(dataSql, [...params, safeLimit, offset]);
 
     return {
       players: dataResult.rows.map(toPublicPlayer),
@@ -258,28 +208,32 @@ export async function createAppBegStore(env = process.env) {
         total,
         totalPages: Math.max(1, Math.ceil(total / safeLimit))
       },
-      sort: { by: sortBy, dir: sortDir.toLowerCase() }
+      sort: { by: sortBy, dir: sortDir.toLowerCase() },
+      showTestData: includeTestData
     };
   }
 
-  async function getFilterOptions() {
-    const { columns: c } = schema;
-    const statuses = c.status
-      ? (await pool.query(`
-          SELECT DISTINCT ${sqlExpr('p', c.status)}::text AS value
-          FROM ${quoteIdent(schema.playersTable)} p
-          WHERE ${sqlExpr('p', c.status)} IS NOT NULL
-          ORDER BY 1
-        `)).rows.map((row) => row.value).filter(Boolean)
-      : [];
-    const coadmins = c.coadmin
-      ? (await pool.query(`
-          SELECT DISTINCT ${sqlExpr('p', c.coadmin)}::text AS value
-          FROM ${quoteIdent(schema.playersTable)} p
-          WHERE ${sqlExpr('p', c.coadmin)} IS NOT NULL
-          ORDER BY 1
-        `)).rows.map((row) => row.value).filter(Boolean)
-      : [];
+  async function getFilterOptions({ showTestData = false } = {}) {
+    const includeTestData = showTestData === true || showTestData === 'true' || showTestData === '1';
+    const { whereSql, params } = buildWhere({ showTestData: includeTestData });
+
+    const statuses = (await pool.query(`
+      SELECT DISTINCT p.status::text AS value
+      ${baseFromSql()}
+      ${whereSql}
+        AND p.status IS NOT NULL
+      ORDER BY 1
+    `, params)).rows.map((row) => row.value).filter(Boolean);
+
+    const coadmins = (await pool.query(`
+      SELECT DISTINCT p.coadmin_uid::text AS value
+      ${baseFromSql()}
+      ${whereSql}
+        AND p.coadmin_uid IS NOT NULL
+        AND p.coadmin_uid <> ''
+      ORDER BY 1
+    `, params)).rows.map((row) => row.value).filter(Boolean);
+
     return { statuses, coadmins };
   }
 
@@ -294,7 +248,6 @@ export async function createAppBegStore(env = process.env) {
 
   return {
     configured: true,
-    schema,
     pool,
     listPlayers,
     getFilterOptions,

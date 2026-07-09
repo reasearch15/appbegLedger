@@ -1,22 +1,24 @@
 import { escapeHtml } from './playerUtils.js';
 
 const LEDGER_COLUMNS = [
-  { key: 'display_name', label: 'Name', sortable: 'name', sticky: true },
+  { key: 'username', label: 'Username', sortable: 'username', sticky: true },
   { key: 'player_uid', label: 'UID', mono: true },
-  { key: 'username', label: 'Username' },
-  { key: 'coadmin', label: 'Coadmin' },
-  { key: 'created_by', label: 'Created By' },
-  { key: 'source', label: 'Source' },
-  { key: 'coin_balance', label: 'Coins', sortable: 'coin_balance', num: true },
-  { key: 'cash_balance', label: 'Cash', sortable: 'cash_balance', num: true },
-  { key: 'npr_balance', label: 'NPR', num: true },
-  { key: 'game_usernames', label: 'Game Usernames' },
-  { key: 'game_names', label: 'Games' },
+  { key: 'email', label: 'Email' },
+  { key: 'role', label: 'Role' },
   { key: 'status', label: 'Status' },
-  { key: 'last_activity', label: 'Last Activity', sortable: 'last_activity', date: true },
+  { key: 'coadmin_uid', label: 'Coadmin UID', mono: true },
+  { key: 'created_by', label: 'Created By' },
+  { key: 'coin', label: 'Coins', sortable: 'coin', num: true },
+  { key: 'cash', label: 'Cash', sortable: 'cash', num: true },
+  { key: 'cash_box_npr', label: 'NPR', num: true },
+  { key: 'promo_locked_coins', label: 'Promo Locked', num: true },
+  { key: 'referral_bonus_coins', label: 'Referral Bonus', num: true },
+  { key: 'source', label: 'Source' },
   { key: 'created_at', label: 'Created', sortable: 'created_at', date: true },
   { key: 'updated_at', label: 'Updated', sortable: 'updated_at', date: true }
 ];
+
+const EMPTY_REAL_PLAYERS_MESSAGE = 'No real players found. Test/Codex data is hidden. Enable Show test data to view it.';
 
 function cellText(value, { date = false } = {}, fmtDateTime) {
   if (value == null || value === '') return '';
@@ -36,6 +38,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
     if (state.appbegPlayersDir) params.set('dir', state.appbegPlayersDir);
     if (state.appbegPlayersStatus) params.set('status', state.appbegPlayersStatus);
     if (state.appbegPlayersCoadmin) params.set('coadmin', state.appbegPlayersCoadmin);
+    if (state.appbegPlayersShowTestData) params.set('showTestData', '1');
     return params.toString();
   }
 
@@ -64,7 +67,8 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         appbegPlayersPagination: payload.pagination || null,
         appbegPlayersFilters: payload.filters || { statuses: [], coadmins: [] },
         appbegPlayersSort: payload.sort?.by || state.appbegPlayersSort,
-        appbegPlayersDir: payload.sort?.dir || state.appbegPlayersDir
+        appbegPlayersDir: payload.sort?.dir || state.appbegPlayersDir,
+        appbegPlayersShowTestData: Boolean(payload.showTestData)
       });
     } catch (error) {
       const message = error.body?.error || error.message || 'Could not load AppBeg players.';
@@ -74,6 +78,12 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         appbegPlayersConfigured: error.status !== 503
       });
     }
+  }
+
+  function emptyMessage(state) {
+    if (state.appbegPlayersLoading) return 'Loading…';
+    if (!state.appbegPlayersShowTestData) return EMPTY_REAL_PLAYERS_MESSAGE;
+    return 'No players matched your filters.';
   }
 
   function renderSortIndicator(column, state) {
@@ -104,7 +114,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
       return `
         <tbody>
           <tr class="terminal-empty-row">
-            <td colspan="${LEDGER_COLUMNS.length}">${state.appbegPlayersLoading ? 'Loading…' : 'No players matched your filters.'}</td>
+            <td colspan="${LEDGER_COLUMNS.length}">${escapeHtml(emptyMessage(state))}</td>
           </tr>
         </tbody>
       `;
@@ -142,6 +152,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         <span>${state.appbegPlayersLoading ? 'Refreshing…' : `${total.toLocaleString()} players`}</span>
         <span>${total ? `${from.toLocaleString()}–${to.toLocaleString()}` : '0 rows'}</span>
         <span>Page ${page} / ${totalPages}</span>
+        ${state.appbegPlayersShowTestData ? '<span>Test data visible</span>' : '<span>Test data hidden</span>'}
         <div class="appbeg-terminal-page-btns">
           <button type="button" class="terminal-btn" data-appbeg-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>◀</button>
           <button type="button" class="terminal-btn" data-appbeg-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>▶</button>
@@ -157,7 +168,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
     return `
       <aside class="appbeg-detail-drawer ${state.appbegPlayersDrawerOpen ? 'open' : ''}" aria-hidden="${state.appbegPlayersDrawerOpen ? 'false' : 'true'}">
         <div class="appbeg-detail-drawer-header">
-          <strong>${escapeHtml(player.display_name || 'Player')}</strong>
+          <strong>${escapeHtml(player.username || player.player_uid || 'Player')}</strong>
           <button type="button" class="terminal-btn" id="appbegPlayersDrawerClose" aria-label="Close">✕</button>
         </div>
         <div class="appbeg-detail-drawer-body">
@@ -185,7 +196,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
           id="appbegPlayersSearch"
           class="appbeg-terminal-search"
           value="${escapeHtml(state.appbegPlayersQuery || '')}"
-          placeholder="Search name, UID, username, game user"
+          placeholder="Search username, email, UID, coadmin"
           spellcheck="false"
           autocomplete="off"
         />
@@ -201,6 +212,10 @@ export function createAppBegPlayersController({ api, getState, setState, render,
             <option value="${escapeHtml(coadmin)}" ${state.appbegPlayersCoadmin === coadmin ? 'selected' : ''}>${escapeHtml(coadmin)}</option>
           `).join('')}
         </select>
+        <label class="appbeg-terminal-toggle" title="Show test data">
+          <input id="appbegPlayersShowTestData" type="checkbox" ${state.appbegPlayersShowTestData ? 'checked' : ''} />
+          <span>Show test data</span>
+        </label>
         <select id="appbegPlayersLimit" class="appbeg-terminal-select appbeg-terminal-limit" title="Rows per page">
           ${[50, 75, 100].map((size) => `
             <option value="${size}" ${Number(state.appbegPlayersLimit) === size ? 'selected' : ''}>${size}/page</option>
@@ -280,6 +295,15 @@ export function createAppBegPlayersController({ api, getState, setState, render,
 
     root.querySelector('#appbegPlayersCoadmin')?.addEventListener('change', async (event) => {
       setState({ appbegPlayersCoadmin: event.target.value, appbegPlayersPage: 1 });
+      await refreshAppBegPlayers({ silent: true });
+      render();
+    });
+
+    root.querySelector('#appbegPlayersShowTestData')?.addEventListener('change', async (event) => {
+      setState({
+        appbegPlayersShowTestData: event.target.checked,
+        appbegPlayersPage: 1
+      });
       await refreshAppBegPlayers({ silent: true });
       render();
     });

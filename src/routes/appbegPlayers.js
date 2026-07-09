@@ -1,17 +1,18 @@
 const CSV_COLUMNS = [
-  ['display_name', 'Display Name'],
-  ['player_uid', 'Player UID'],
+  ['player_uid', 'UID'],
+  ['firebase_id', 'Firebase ID'],
   ['username', 'Username'],
-  ['coadmin', 'Coadmin'],
-  ['created_by', 'Created By'],
-  ['source', 'Source'],
-  ['coin_balance', 'Coin Balance'],
-  ['cash_balance', 'Cash Balance'],
-  ['npr_balance', 'NPR Balance'],
-  ['game_usernames', 'Game Usernames'],
-  ['game_names', 'Game Names'],
+  ['email', 'Email'],
+  ['role', 'Role'],
   ['status', 'Status'],
-  ['last_activity', 'Last Activity'],
+  ['coadmin_uid', 'Coadmin UID'],
+  ['created_by', 'Created By'],
+  ['coin', 'Coin'],
+  ['cash', 'Cash'],
+  ['cash_box_npr', 'Cash Box NPR'],
+  ['promo_locked_coins', 'Promo Locked Coins'],
+  ['referral_bonus_coins', 'Referral Bonus Coins'],
+  ['source', 'Source'],
   ['created_at', 'Created At'],
   ['updated_at', 'Updated At']
 ];
@@ -30,6 +31,10 @@ function playersToCsv(players) {
   return [header, ...rows].join('\n');
 }
 
+function parseShowTestData(value) {
+  return value === true || value === 'true' || value === '1';
+}
+
 export function registerAppBegPlayerRoutes(app, { appbegStore }) {
   app.get('/api/appbeg-players', async (req, res) => {
     if (!appbegStore.configured) {
@@ -41,6 +46,7 @@ export function registerAppBegPlayerRoutes(app, { appbegStore }) {
 
     try {
       const format = String(req.query.format || '').toLowerCase();
+      const showTestData = parseShowTestData(req.query.showTestData ?? req.query.show_test_data);
       const options = {
         page: req.query.page,
         limit: req.query.limit,
@@ -48,7 +54,8 @@ export function registerAppBegPlayerRoutes(app, { appbegStore }) {
         sort: req.query.sort,
         dir: req.query.dir,
         status: req.query.status || '',
-        coadmin: req.query.coadmin || ''
+        coadmin: req.query.coadmin || '',
+        showTestData
       };
 
       if (format === 'csv') {
@@ -60,7 +67,7 @@ export function registerAppBegPlayerRoutes(app, { appbegStore }) {
 
       const [result, filters] = await Promise.all([
         appbegStore.listPlayers(options),
-        appbegStore.getFilterOptions()
+        appbegStore.getFilterOptions({ showTestData })
       ]);
 
       res.json({

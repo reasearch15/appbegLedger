@@ -107,6 +107,7 @@ let state = {
   appbegPlayersDir: 'desc',
   appbegPlayersPage: 1,
   appbegPlayersLimit: 100,
+  appbegPlayersShowTestData: false,
   appbegPlayersDetail: null,
   appbegPlayersDrawerOpen: false
 };

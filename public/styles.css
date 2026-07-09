@@ -1442,6 +1442,26 @@ textarea {
   max-width: 88px;
 }
 
+.appbeg-terminal-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  background: #0f172a;
+  color: #cbd5e1;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.appbeg-terminal-toggle input {
+  margin: 0;
+}
+
 .terminal-btn {
   height: 28px;
   border: 1px solid #334155;
