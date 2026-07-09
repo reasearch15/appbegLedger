@@ -106,7 +106,9 @@ let state = {
   appbegPlayersSort: 'created_at',
   appbegPlayersDir: 'desc',
   appbegPlayersPage: 1,
-  appbegPlayersLimit: 50
+  appbegPlayersLimit: 100,
+  appbegPlayersDetail: null,
+  appbegPlayersDrawerOpen: false
 };
 
 let playersController;

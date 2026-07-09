@@ -1,31 +1,27 @@
 import { escapeHtml } from './playerUtils.js';
 
 const LEDGER_COLUMNS = [
-  { key: 'display_name', label: 'Name', sortable: 'name' },
-  { key: 'player_uid', label: 'UID' },
+  { key: 'display_name', label: 'Name', sortable: 'name', sticky: true },
+  { key: 'player_uid', label: 'UID', mono: true },
   { key: 'username', label: 'Username' },
   { key: 'coadmin', label: 'Coadmin' },
   { key: 'created_by', label: 'Created By' },
   { key: 'source', label: 'Source' },
-  { key: 'coin_balance', label: 'Coins', sortable: 'coin_balance' },
-  { key: 'cash_balance', label: 'Cash', sortable: 'cash_balance' },
-  { key: 'npr_balance', label: 'NPR' },
-  { key: 'game_usernames', label: 'Game Users' },
+  { key: 'coin_balance', label: 'Coins', sortable: 'coin_balance', num: true },
+  { key: 'cash_balance', label: 'Cash', sortable: 'cash_balance', num: true },
+  { key: 'npr_balance', label: 'NPR', num: true },
+  { key: 'game_usernames', label: 'Game Usernames' },
   { key: 'game_names', label: 'Games' },
   { key: 'status', label: 'Status' },
-  { key: 'last_activity', label: 'Last Activity', sortable: 'last_activity' },
-  { key: 'created_at', label: 'Created', sortable: 'created_at' },
-  { key: 'updated_at', label: 'Updated', sortable: 'updated_at' }
+  { key: 'last_activity', label: 'Last Activity', sortable: 'last_activity', date: true },
+  { key: 'created_at', label: 'Created', sortable: 'created_at', date: true },
+  { key: 'updated_at', label: 'Updated', sortable: 'updated_at', date: true }
 ];
 
-function formatCell(value, fmtDateTime) {
-  if (value == null || value === '') return '—';
-  return escapeHtml(String(value));
-}
-
-function formatDateCell(value, fmtDateTime) {
-  if (!value) return '—';
-  return escapeHtml(fmtDateTime(value));
+function cellText(value, { date = false } = {}, fmtDateTime) {
+  if (value == null || value === '') return '';
+  if (date) return fmtDateTime(value);
+  return String(value);
 }
 
 export function createAppBegPlayersController({ api, getState, setState, render, fmtDateTime }) {
@@ -34,7 +30,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
   function buildQuery(state) {
     const params = new URLSearchParams();
     params.set('page', String(state.appbegPlayersPage || 1));
-    params.set('limit', String(state.appbegPlayersLimit || 50));
+    params.set('limit', String(state.appbegPlayersLimit || 100));
     if (state.appbegPlayersQuery) params.set('query', state.appbegPlayersQuery);
     if (state.appbegPlayersSort) params.set('sort', state.appbegPlayersSort);
     if (state.appbegPlayersDir) params.set('dir', state.appbegPlayersDir);
@@ -80,155 +76,189 @@ export function createAppBegPlayersController({ api, getState, setState, render,
     }
   }
 
-  function renderHeaderCell(column, state) {
-    if (!column.sortable) return `<span>${column.label}</span>`;
-    const active = state.appbegPlayersSort === column.sortable;
-    const dir = active ? state.appbegPlayersDir : 'desc';
-    const indicator = active ? (dir === 'asc' ? ' ↑' : ' ↓') : '';
-    return `<button type="button" class="ledger-sort" data-appbeg-sort="${column.sortable}" data-appbeg-sort-dir="${active && dir === 'asc' ? 'desc' : 'asc'}">${column.label}${indicator}</button>`;
+  function renderSortIndicator(column, state) {
+    if (!column.sortable) return '';
+    if (state.appbegPlayersSort !== column.sortable) return '';
+    return state.appbegPlayersDir === 'asc' ? ' ▲' : ' ▼';
   }
 
-  function renderLedgerRow(player, fmt) {
+  function renderTableHead(state) {
     return `
-      <div class="appbeg-ledger-row">
-        <div class="appbeg-ledger-cell" title="${formatCell(player.display_name)}">${formatCell(player.display_name)}</div>
-        <div class="appbeg-ledger-cell mono" title="${formatCell(player.player_uid)}">${formatCell(player.player_uid)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.username)}">${formatCell(player.username)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.coadmin)}">${formatCell(player.coadmin)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.created_by)}">${formatCell(player.created_by)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.source)}">${formatCell(player.source)}</div>
-        <div class="appbeg-ledger-cell num" title="${formatCell(player.coin_balance)}">${formatCell(player.coin_balance)}</div>
-        <div class="appbeg-ledger-cell num" title="${formatCell(player.cash_balance)}">${formatCell(player.cash_balance)}</div>
-        <div class="appbeg-ledger-cell num" title="${formatCell(player.npr_balance)}">${formatCell(player.npr_balance)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.game_usernames)}">${formatCell(player.game_usernames)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.game_names)}">${formatCell(player.game_names)}</div>
-        <div class="appbeg-ledger-cell" title="${formatCell(player.status)}">${formatCell(player.status)}</div>
-        <div class="appbeg-ledger-cell" title="${formatDateCell(player.last_activity, fmt)}">${formatDateCell(player.last_activity, fmt)}</div>
-        <div class="appbeg-ledger-cell" title="${formatDateCell(player.created_at, fmt)}">${formatDateCell(player.created_at, fmt)}</div>
-        <div class="appbeg-ledger-cell" title="${formatDateCell(player.updated_at, fmt)}">${formatDateCell(player.updated_at, fmt)}</div>
+      <thead>
+        <tr>
+          ${LEDGER_COLUMNS.map((column) => `
+            <th class="${column.sticky ? 'col-sticky' : ''} ${column.num ? 'col-num' : ''}">
+              ${column.sortable
+                ? `<button type="button" class="terminal-sort" data-appbeg-sort="${column.sortable}" data-appbeg-sort-dir="${state.appbegPlayersSort === column.sortable && state.appbegPlayersDir === 'asc' ? 'desc' : 'asc'}">${column.label}${renderSortIndicator(column, state)}</button>`
+                : escapeHtml(column.label)}
+            </th>
+          `).join('')}
+        </tr>
+      </thead>
+    `;
+  }
+
+  function renderTableBody(state) {
+    const players = state.appbegPlayers || [];
+    if (!players.length) {
+      return `
+        <tbody>
+          <tr class="terminal-empty-row">
+            <td colspan="${LEDGER_COLUMNS.length}">${state.appbegPlayersLoading ? 'Loading…' : 'No players matched your filters.'}</td>
+          </tr>
+        </tbody>
+      `;
+    }
+
+    return `
+      <tbody>
+        ${players.map((player) => `
+          <tr class="terminal-data-row" data-appbeg-player-id="${escapeHtml(String(player.id))}" tabindex="0">
+            ${LEDGER_COLUMNS.map((column, index) => {
+              const raw = cellText(player[column.key], column, fmtDateTime);
+              const classes = [
+                index === 0 ? 'col-sticky' : '',
+                column.num ? 'col-num' : '',
+                column.mono ? 'col-mono' : ''
+              ].filter(Boolean).join(' ');
+              return `<td class="${classes}" title="${escapeHtml(raw || '—')}">${escapeHtml(raw || '—')}</td>`;
+            }).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    `;
+  }
+
+  function renderStatusBar(state) {
+    const pagination = state.appbegPlayersPagination;
+    const total = pagination?.total ?? 0;
+    const page = pagination?.page ?? 1;
+    const totalPages = pagination?.totalPages ?? 1;
+    const from = total ? ((page - 1) * (state.appbegPlayersLimit || 100)) + 1 : 0;
+    const to = total ? Math.min(page * (state.appbegPlayersLimit || 100), total) : 0;
+
+    return `
+      <div class="appbeg-terminal-status">
+        <span>${state.appbegPlayersLoading ? 'Refreshing…' : `${total.toLocaleString()} players`}</span>
+        <span>${total ? `${from.toLocaleString()}–${to.toLocaleString()}` : '0 rows'}</span>
+        <span>Page ${page} / ${totalPages}</span>
+        <div class="appbeg-terminal-page-btns">
+          <button type="button" class="terminal-btn" data-appbeg-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>◀</button>
+          <button type="button" class="terminal-btn" data-appbeg-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>▶</button>
+        </div>
       </div>
     `;
   }
 
-  function renderMobileCard(player, fmt) {
+  function renderDetailDrawer(state) {
+    const player = state.appbegPlayersDetail;
+    if (!player) return '';
+
     return `
-      <article class="appbeg-ledger-card card">
-        <div class="appbeg-ledger-card-title">${formatCell(player.display_name)}</div>
-        <div class="appbeg-ledger-card-grid">
-          <div><span>UID</span><strong>${formatCell(player.player_uid)}</strong></div>
-          <div><span>Username</span><strong>${formatCell(player.username)}</strong></div>
-          <div><span>Coadmin</span><strong>${formatCell(player.coadmin)}</strong></div>
-          <div><span>Status</span><strong>${formatCell(player.status)}</strong></div>
-          <div><span>Coins</span><strong>${formatCell(player.coin_balance)}</strong></div>
-          <div><span>Cash</span><strong>${formatCell(player.cash_balance)}</strong></div>
-          <div><span>NPR</span><strong>${formatCell(player.npr_balance)}</strong></div>
-          <div><span>Games</span><strong>${formatCell(player.game_names)}</strong></div>
-          <div><span>Game Users</span><strong>${formatCell(player.game_usernames)}</strong></div>
-          <div><span>Created By</span><strong>${formatCell(player.created_by)}</strong></div>
-          <div><span>Source</span><strong>${formatCell(player.source)}</strong></div>
-          <div><span>Last Activity</span><strong>${formatDateCell(player.last_activity, fmt)}</strong></div>
+      <aside class="appbeg-detail-drawer ${state.appbegPlayersDrawerOpen ? 'open' : ''}" aria-hidden="${state.appbegPlayersDrawerOpen ? 'false' : 'true'}">
+        <div class="appbeg-detail-drawer-header">
+          <strong>${escapeHtml(player.display_name || 'Player')}</strong>
+          <button type="button" class="terminal-btn" id="appbegPlayersDrawerClose" aria-label="Close">✕</button>
         </div>
-      </article>
+        <div class="appbeg-detail-drawer-body">
+          <p class="appbeg-detail-note">Player detail drawer — full profile view coming soon.</p>
+          <dl class="appbeg-detail-list">
+            ${LEDGER_COLUMNS.map((column) => `
+              <div class="appbeg-detail-item">
+                <dt>${escapeHtml(column.label)}</dt>
+                <dd>${escapeHtml(cellText(player[column.key], column, fmtDateTime) || '—')}</dd>
+              </div>
+            `).join('')}
+          </dl>
+        </div>
+      </aside>
+      <button type="button" class="appbeg-detail-backdrop ${state.appbegPlayersDrawerOpen ? 'open' : ''}" id="appbegPlayersDrawerBackdrop" aria-label="Close detail"></button>
     `;
   }
 
-  function renderPagination(state) {
-    const pagination = state.appbegPlayersPagination;
-    if (!pagination) return '';
-    const { page, totalPages, total } = pagination;
+  function renderToolbar(state) {
+    const filters = state.appbegPlayersFilters || { statuses: [], coadmins: [] };
     return `
-      <div class="appbeg-ledger-pagination">
-        <div class="subtle">${total.toLocaleString()} players</div>
-        <div class="appbeg-ledger-page-controls">
-          <button type="button" class="button secondary small" data-appbeg-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>Prev</button>
-          <span class="subtle">Page ${page} / ${totalPages}</span>
-          <button type="button" class="button secondary small" data-appbeg-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>Next</button>
-        </div>
+      <div class="appbeg-terminal-toolbar">
+        <span class="appbeg-terminal-brand">AppBeg Players</span>
+        <input
+          id="appbegPlayersSearch"
+          class="appbeg-terminal-search"
+          value="${escapeHtml(state.appbegPlayersQuery || '')}"
+          placeholder="Search name, UID, username, game user"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <select id="appbegPlayersStatus" class="appbeg-terminal-select" title="Status">
+          <option value="">Status: All</option>
+          ${filters.statuses.map((status) => `
+            <option value="${escapeHtml(status)}" ${state.appbegPlayersStatus === status ? 'selected' : ''}>${escapeHtml(status)}</option>
+          `).join('')}
+        </select>
+        <select id="appbegPlayersCoadmin" class="appbeg-terminal-select" title="Coadmin">
+          <option value="">Coadmin: All</option>
+          ${filters.coadmins.map((coadmin) => `
+            <option value="${escapeHtml(coadmin)}" ${state.appbegPlayersCoadmin === coadmin ? 'selected' : ''}>${escapeHtml(coadmin)}</option>
+          `).join('')}
+        </select>
+        <select id="appbegPlayersLimit" class="appbeg-terminal-select appbeg-terminal-limit" title="Rows per page">
+          ${[50, 75, 100].map((size) => `
+            <option value="${size}" ${Number(state.appbegPlayersLimit) === size ? 'selected' : ''}>${size}/page</option>
+          `).join('')}
+        </select>
+        <button type="button" class="terminal-btn" id="appbegPlayersRefresh" title="Refresh">↻ Refresh</button>
+        <button type="button" class="terminal-btn" id="appbegPlayersExport" title="Export CSV">⭳ CSV</button>
+        ${state.appbegPlayersError ? `<span class="appbeg-terminal-error">${escapeHtml(state.appbegPlayersError)}</span>` : ''}
       </div>
     `;
   }
 
   function renderAppBegPlayersWorkspace(state) {
-    const filters = state.appbegPlayersFilters || { statuses: [], coadmins: [] };
-    const players = state.appbegPlayers || [];
-
     if (state.appbegPlayersConfigured === false) {
       return `
-        <main class="ops-main appbeg-players-main">
-          <header class="topbar">
-            <div>
-              <div class="eyebrow">Read-only Ledger</div>
-              <h1>AppBeg Players</h1>
-            </div>
-          </header>
-          <section class="card appbeg-ledger-empty">
-            <div class="settings-error">${escapeHtml(state.appbegPlayersError || 'AppBeg database is not configured.')}</div>
-            <p class="subtle">Set <code>APPBEG_DATABASE_URL</code> in the server environment and restart AppBeg Ledger.</p>
-          </section>
+        <main class="ops-main appbeg-terminal">
+          <div class="appbeg-terminal-toolbar">
+            <span class="appbeg-terminal-brand">AppBeg Players</span>
+          </div>
+          <div class="appbeg-terminal-config-error">
+            <strong>${escapeHtml(state.appbegPlayersError || 'AppBeg database is not configured.')}</strong>
+            <span>Set <code>APPBEG_DATABASE_URL</code> and restart the server.</span>
+          </div>
         </main>
       `;
     }
 
     return `
-      <main class="ops-main appbeg-players-main">
-        <header class="topbar appbeg-players-topbar">
-          <div>
-            <div class="eyebrow">Read-only Ledger</div>
-            <h1>AppBeg Players</h1>
-            <div class="subtle">Live player data from the AppBeg PostgreSQL database.</div>
-          </div>
-          <div class="appbeg-ledger-actions">
-            <button type="button" class="button secondary small" id="appbegPlayersExport">Export CSV</button>
-          </div>
-        </header>
-
-        <section class="appbeg-ledger-toolbar card">
-          <input id="appbegPlayersSearch" class="search" value="${escapeHtml(state.appbegPlayersQuery || '')}" placeholder="Search name, UID, username, game username" />
-          <div class="appbeg-ledger-filter-row">
-            <label class="appbeg-ledger-filter">
-              <span>Status</span>
-              <select id="appbegPlayersStatus">
-                <option value="">All</option>
-                ${filters.statuses.map((status) => `
-                  <option value="${escapeHtml(status)}" ${state.appbegPlayersStatus === status ? 'selected' : ''}>${escapeHtml(status)}</option>
-                `).join('')}
-              </select>
-            </label>
-            <label class="appbeg-ledger-filter">
-              <span>Coadmin</span>
-              <select id="appbegPlayersCoadmin">
-                <option value="">All</option>
-                ${filters.coadmins.map((coadmin) => `
-                  <option value="${escapeHtml(coadmin)}" ${state.appbegPlayersCoadmin === coadmin ? 'selected' : ''}>${escapeHtml(coadmin)}</option>
-                `).join('')}
-              </select>
-            </label>
-          </div>
-        </section>
-
-        ${state.appbegPlayersError ? `<div class="settings-error appbeg-ledger-banner">${escapeHtml(state.appbegPlayersError)}</div>` : ''}
-
-        <section class="appbeg-ledger-shell card">
-          ${state.appbegPlayersLoading ? '<div class="subtle appbeg-ledger-loading">Loading AppBeg players…</div>' : ''}
-          <div class="appbeg-ledger-table-wrap">
-            <div class="appbeg-ledger-header sticky-table-header">
-              ${LEDGER_COLUMNS.map((column) => `<div class="appbeg-ledger-cell">${renderHeaderCell(column, state)}</div>`).join('')}
-            </div>
-            <div class="appbeg-ledger-body desktop-only">
-              ${players.length
-                ? players.map((player) => renderLedgerRow(player, fmtDateTime)).join('')
-                : '<div class="appbeg-ledger-empty-row subtle">No players matched your filters.</div>'}
-            </div>
-          </div>
-          <div class="appbeg-ledger-cards mobile-only">
-            ${players.length
-              ? players.map((player) => renderMobileCard(player, fmtDateTime)).join('')
-              : '<div class="appbeg-ledger-empty-row subtle">No players matched your filters.</div>'}
-          </div>
-          ${renderPagination(state)}
-        </section>
+      <main class="ops-main appbeg-terminal">
+        ${renderToolbar(state)}
+        <div class="appbeg-terminal-grid" id="appbegTerminalGrid">
+          <table class="appbeg-terminal-table">
+            ${renderTableHead(state)}
+            ${renderTableBody(state)}
+          </table>
+        </div>
+        ${renderStatusBar(state)}
+        ${renderDetailDrawer(state)}
       </main>
     `;
+  }
+
+  function openPlayerDrawer(playerId) {
+    const state = getState();
+    const player = (state.appbegPlayers || []).find((row) => String(row.id) === String(playerId));
+    if (!player) return;
+    setState({
+      appbegPlayersDetail: player,
+      appbegPlayersDrawerOpen: true
+    });
+    render();
+  }
+
+  function closePlayerDrawer() {
+    setState({
+      appbegPlayersDrawerOpen: false
+    });
+    render();
   }
 
   function bindAppBegPlayersEvents(root) {
@@ -239,7 +269,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
       searchTimer = setTimeout(async () => {
         await refreshAppBegPlayers({ silent: true });
         render();
-      }, 250);
+      }, 220);
     });
 
     root.querySelector('#appbegPlayersStatus')?.addEventListener('change', async (event) => {
@@ -252,6 +282,27 @@ export function createAppBegPlayersController({ api, getState, setState, render,
       setState({ appbegPlayersCoadmin: event.target.value, appbegPlayersPage: 1 });
       await refreshAppBegPlayers({ silent: true });
       render();
+    });
+
+    root.querySelector('#appbegPlayersLimit')?.addEventListener('change', async (event) => {
+      setState({
+        appbegPlayersLimit: Number(event.target.value) || 100,
+        appbegPlayersPage: 1
+      });
+      await refreshAppBegPlayers({ silent: true });
+      render();
+    });
+
+    root.querySelector('#appbegPlayersRefresh')?.addEventListener('click', async () => {
+      await refreshAppBegPlayers();
+      render();
+    });
+
+    root.querySelector('#appbegPlayersExport')?.addEventListener('click', () => {
+      const state = getState();
+      const params = new URLSearchParams(buildQuery(state));
+      params.set('format', 'csv');
+      window.open(`/api/appbeg-players?${params.toString()}`, '_blank', 'noopener');
     });
 
     root.querySelectorAll('[data-appbeg-sort]').forEach((button) => {
@@ -273,15 +324,18 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         setState({ appbegPlayersPage: page });
         await refreshAppBegPlayers({ silent: true });
         render();
+        root.querySelector('#appbegTerminalGrid')?.scrollTo({ top: 0 });
       });
     });
 
-    root.querySelector('#appbegPlayersExport')?.addEventListener('click', () => {
-      const state = getState();
-      const params = new URLSearchParams(buildQuery(state));
-      params.set('format', 'csv');
-      window.open(`/api/appbeg-players?${params.toString()}`, '_blank', 'noopener');
+    root.querySelectorAll('.terminal-data-row').forEach((row) => {
+      row.addEventListener('dblclick', () => {
+        openPlayerDrawer(row.dataset.appbegPlayerId);
+      });
     });
+
+    root.querySelector('#appbegPlayersDrawerClose')?.addEventListener('click', closePlayerDrawer);
+    root.querySelector('#appbegPlayersDrawerBackdrop')?.addEventListener('click', closePlayerDrawer);
   }
 
   return {
