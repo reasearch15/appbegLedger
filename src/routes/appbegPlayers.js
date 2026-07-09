@@ -25,7 +25,7 @@ function csvEscape(value) {
 function playersToCsv(players) {
   const header = CSV_COLUMNS.map(([, label]) => csvEscape(label)).join(',');
   const rows = players.map((player) => (
-    CSV_COLUMNS.map(([key]) => csvEscape(player[key])).join(',')
+    CSV_COLUMNS.map(([key]) => csvEscape(player[key] ?? '')).join(',')
   ));
   return [header, ...rows].join('\n');
 }

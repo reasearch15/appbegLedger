@@ -7,25 +7,81 @@ const MAX_LIMIT = 200;
 const MAX_CSV_ROWS = 5000;
 const SORTABLE = new Set(['username', 'coin', 'cash', 'created_at', 'updated_at']);
 
-const SELECT_SQL = `
-  p.uid AS uid,
-  p.username,
-  p.email,
-  p.role,
-  p.status,
-  p.coadmin_uid,
-  p.created_by,
-  p.coin,
-  p.cash,
-  p.cash_box_npr,
-  p.promo_locked_coins,
-  p.referral_bonus_coins,
-  p.source,
-  p.created_at,
-  p.updated_at,
-  p.mirrored_at,
-  p.deleted_at
-`;
+const REQUIRED_COLUMNS = [
+  'username',
+  'email',
+  'role',
+  'status',
+  'coadmin_uid',
+  'created_by',
+  'coin',
+  'cash',
+  'created_at',
+  'updated_at',
+  'source'
+];
+
+const OPTIONAL_COLUMNS = [
+  { name: 'cash_box_npr', sqlType: 'numeric' },
+  { name: 'promo_locked_coins', sqlType: 'numeric' },
+  { name: 'referral_bonus_coins', sqlType: 'numeric' },
+  { name: 'mirrored_at', sqlType: 'timestamptz' }
+];
+
+const UID_COLUMN_CANDIDATES = ['uid', 'firebase_id'];
+
+function quoteIdent(name) {
+  return `"${String(name).replaceAll('"', '""')}"`;
+}
+
+function colExpr(alias, columnName) {
+  return `${alias}.${quoteIdent(columnName)}`;
+}
+
+async function loadPlayersCacheColumns(pool) {
+  const result = await pool.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'players_cache'
+    ORDER BY ordinal_position
+  `);
+  return new Set(result.rows.map((row) => row.column_name));
+}
+
+function buildQueryPlan(columns) {
+  const uidColumn = UID_COLUMN_CANDIDATES.find((name) => columns.has(name));
+  if (!uidColumn) {
+    throw new Error('players_cache is missing a uid column (expected uid or firebase_id).');
+  }
+
+  const missingRequired = REQUIRED_COLUMNS.filter((name) => !columns.has(name));
+  if (missingRequired.length) {
+    throw new Error(`players_cache is missing required columns: ${missingRequired.join(', ')}`);
+  }
+
+  const selectParts = [
+    `${colExpr('p', uidColumn)} AS uid`,
+    ...REQUIRED_COLUMNS.map((name) => colExpr('p', name))
+  ];
+
+  const optionalPresent = {};
+  for (const optional of OPTIONAL_COLUMNS) {
+    optionalPresent[optional.name] = columns.has(optional.name);
+    selectParts.push(
+      optionalPresent[optional.name]
+        ? colExpr('p', optional.name)
+        : `NULL::${optional.sqlType} AS ${quoteIdent(optional.name)}`
+    );
+  }
+
+  return {
+    columns,
+    uidColumn,
+    hasDeletedAt: columns.has('deleted_at'),
+    optionalPresent,
+    selectSql: selectParts.join(',\n      ')
+  };
+}
 
 function toPublicPlayer(row) {
   return {
@@ -66,14 +122,15 @@ function resolveSort(sortBy) {
   }
 }
 
-function buildBaseWhere({ showTestData = false } = {}) {
-  const clauses = [
-    "p.role = 'player'",
-    'p.deleted_at IS NULL'
-  ];
+function buildBaseWhere(plan, { showTestData = false } = {}) {
+  const clauses = ["p.role = 'player'"];
+
+  if (plan.hasDeletedAt) {
+    clauses.push('p.deleted_at IS NULL');
+  }
 
   if (!showTestData) {
-    clauses.push("(p.uid IS NULL OR p.uid::text NOT LIKE 'codex_%')");
+    clauses.push(`(${colExpr('p', plan.uidColumn)} IS NULL OR ${colExpr('p', plan.uidColumn)}::text NOT LIKE 'codex_%')`);
     clauses.push("(p.username IS NULL OR p.username NOT LIKE 'codex_%')");
     clauses.push("(p.email IS NULL OR p.email NOT LIKE '%@example.test')");
     clauses.push("(p.source IS NULL OR p.source NOT LIKE 'codex_%')");
@@ -82,8 +139,8 @@ function buildBaseWhere({ showTestData = false } = {}) {
   return clauses;
 }
 
-function buildWhere({ query, status, coadmin, showTestData = false }) {
-  const clauses = buildBaseWhere({ showTestData });
+function buildWhere(plan, { query, status, coadmin, showTestData = false }) {
+  const clauses = buildBaseWhere(plan, { showTestData });
   const params = [];
   let index = 1;
 
@@ -93,7 +150,7 @@ function buildWhere({ query, status, coadmin, showTestData = false }) {
     clauses.push(`(
       p.username ILIKE $${index}
       OR p.email ILIKE $${index}
-      OR p.uid::text ILIKE $${index}
+      OR ${colExpr('p', plan.uidColumn)}::text ILIKE $${index}
       OR p.coadmin_uid ILIKE $${index}
       OR p.created_by ILIKE $${index}
     )`);
@@ -148,8 +205,11 @@ export async function createAppBegStore(env = process.env) {
     ssl: config.ssl
   });
 
+  let plan;
   try {
     await pool.query('SELECT 1');
+    const columns = await loadPlayersCacheColumns(pool);
+    plan = buildQueryPlan(columns);
   } catch (error) {
     await pool.end().catch(() => {});
     throw error;
@@ -172,7 +232,7 @@ export async function createAppBegStore(env = process.env) {
     const offset = (safePage - 1) * safeLimit;
     const includeTestData = showTestData === true || showTestData === 'true' || showTestData === '1';
 
-    const { whereSql, params, nextIndex } = buildWhere({
+    const { whereSql, params, nextIndex } = buildWhere(plan, {
       query,
       status,
       coadmin,
@@ -190,10 +250,10 @@ export async function createAppBegStore(env = process.env) {
 
     const dataSql = `
       SELECT
-      ${SELECT_SQL}
+      ${plan.selectSql}
       ${baseFromSql()}
       ${whereSql}
-      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, p.uid DESC
+      ORDER BY ${orderExpr} ${sortDir} NULLS LAST, ${colExpr('p', plan.uidColumn)} DESC
       LIMIT $${nextIndex}
       OFFSET $${nextIndex + 1}
     `;
@@ -208,13 +268,16 @@ export async function createAppBegStore(env = process.env) {
         totalPages: Math.max(1, Math.ceil(total / safeLimit))
       },
       sort: { by: sortBy, dir: sortDir.toLowerCase() },
-      showTestData: includeTestData
+      showTestData: includeTestData,
+      columns: {
+        optional: plan.optionalPresent
+      }
     };
   }
 
   async function getFilterOptions({ showTestData = false } = {}) {
     const includeTestData = showTestData === true || showTestData === 'true' || showTestData === '1';
-    const { whereSql, params } = buildWhere({ showTestData: includeTestData });
+    const { whereSql, params } = buildWhere(plan, { showTestData: includeTestData });
 
     const statuses = (await pool.query(`
       SELECT DISTINCT p.status::text AS value
@@ -247,6 +310,7 @@ export async function createAppBegStore(env = process.env) {
 
   return {
     configured: true,
+    plan,
     pool,
     listPlayers,
     getFilterOptions,
