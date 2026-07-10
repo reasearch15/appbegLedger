@@ -200,6 +200,12 @@ export async function migratePostgres(driver) {
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS feedback TEXT;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS ai_reply_rejected BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS normalized_customer_message TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS generation_id TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS draft_status TEXT NOT NULL DEFAULT 'ready';
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_generation_id
+      ON staff_ai_training_examples(generation_id);
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_message_status
+      ON staff_ai_training_examples(contact_id, incoming_message_id, draft_status);
     CREATE INDEX IF NOT EXISTS idx_staff_ai_training_normalized_message
       ON staff_ai_training_examples(normalized_customer_message);
     CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent

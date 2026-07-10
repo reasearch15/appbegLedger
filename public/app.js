@@ -59,6 +59,7 @@ let state = {
   automationState: null,
   automationLogs: [],
   staffAiDraft: null,
+  staffAiActiveGenerationId: null,
   staffAiBadDraftId: null,
   allTags: [],
   quickReplies: [],
@@ -240,6 +241,79 @@ function getCachedContactDetail(contactId) {
   return cached.detail;
 }
 
+function getLatestIncomingMessage() {
+  const messages = state.messages || [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].direction === 'incoming') return messages[index];
+  }
+  return null;
+}
+
+function isStaffAiDraftActionable(draft = state.staffAiDraft) {
+  if (!draft || draft.draft_status !== 'ready' || !draft.ai_draft_reply) return false;
+  const latest = getLatestIncomingMessage();
+  if (!latest) return false;
+  if (draft.incoming_message_id && Number(draft.incoming_message_id) !== Number(latest.id)) return false;
+  return true;
+}
+
+function applyStaffAiDraftFromServer(draft) {
+  const latest = getLatestIncomingMessage();
+  if (!draft) {
+    if (state.staffAiDraft?.draft_status === 'generating'
+      && latest
+      && (!state.staffAiDraft.incoming_message_id || Number(state.staffAiDraft.incoming_message_id) === Number(latest.id))) {
+      return;
+    }
+    state.staffAiDraft = null;
+    state.staffAiActiveGenerationId = null;
+    return;
+  }
+  if (draft.incoming_message_id && latest && Number(draft.incoming_message_id) !== Number(latest.id)) {
+    if (state.staffAiDraft?.draft_status !== 'generating') {
+      state.staffAiDraft = null;
+      state.staffAiActiveGenerationId = null;
+    }
+    return;
+  }
+  state.staffAiDraft = draft;
+  if (draft.generation_id) state.staffAiActiveGenerationId = draft.generation_id;
+  if (draft.draft_status !== 'ready') state.staffAiBadDraftId = null;
+}
+
+function setStaffAiDraftGenerating({ customerMessage, incomingMessageId, generationId = null } = {}) {
+  state.staffAiDraft = {
+    draft_status: 'generating',
+    customer_message: customerMessage || '',
+    incoming_message_id: incomingMessageId || null,
+    ai_draft_reply: null,
+    generation_id: generationId
+  };
+  if (generationId) state.staffAiActiveGenerationId = generationId;
+  state.staffAiBadDraftId = null;
+}
+
+function applyStaffAiDraftEvent({ draft, generationId } = {}) {
+  if (generationId
+    && state.staffAiActiveGenerationId
+    && generationId !== state.staffAiActiveGenerationId
+    && draft?.draft_status === 'ready') {
+    return false;
+  }
+  const latest = getLatestIncomingMessage();
+  if (draft?.incoming_message_id && latest && Number(draft.incoming_message_id) !== Number(latest.id)) {
+    return false;
+  }
+  if (draft) {
+    state.staffAiDraft = draft;
+    if (generationId || draft.generation_id) {
+      state.staffAiActiveGenerationId = generationId || draft.generation_id;
+    }
+    if (draft.draft_status !== 'ready') state.staffAiBadDraftId = null;
+  }
+  return true;
+}
+
 function applyContactDetail(detail) {
   if (!detail?.contact) return;
   state.contact = normalizeContact(detail.contact);
@@ -248,7 +322,7 @@ function applyContactDetail(detail) {
   state.timeline = detail.timeline || [];
   state.automationState = detail.automationState;
   state.automationLogs = detail.automationLogs || [];
-  state.staffAiDraft = detail.staffAiDraft || null;
+  applyStaffAiDraftFromServer(detail.staffAiDraft || null);
   state.allTags = detail.tags || [];
   state.quickReplies = detail.quickReplies || [];
   state.contactLoading = false;
@@ -1337,13 +1411,41 @@ function staffAiSuggestedReplyPanel() {
     `;
   }
   const draft = state.staffAiDraft;
-  if (!draft?.ai_draft_reply) {
+  const latestIncoming = getLatestIncomingMessage();
+  const customerMessage = draft?.customer_message || latestIncoming?.text || '';
+  const isGenerating = draft?.draft_status === 'generating';
+
+  if (isGenerating) {
+    return `
+      <section class="ai-suggested-reply-panel is-generating">
+        <div class="ai-suggested-header">
+          <div>
+            <div class="card-title">AI Suggested Reply</div>
+            <div class="subtle">Generating draft...</div>
+          </div>
+        </div>
+        <div class="ai-context-block">
+          <span>Customer message</span>
+          <p>${escapeHtml(customerMessage || '—')}</p>
+        </div>
+        <div class="ai-context-block">
+          <span>AI suggested reply</span>
+          <div class="ai-generating-row">
+            <span class="ai-spinner" aria-hidden="true"></span>
+            <span>Generating draft...</span>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  if (!draft?.ai_draft_reply || draft.draft_status !== 'ready' || !isStaffAiDraftActionable(draft)) {
     return `
       <section class="ai-suggested-reply-panel is-empty">
         <div class="ai-suggested-header">
           <div>
             <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">Waiting for the next customer support draft.</div>
+            <div class="subtle">No draft yet.</div>
           </div>
         </div>
       </section>
@@ -2626,6 +2728,7 @@ async function selectVisibleIfNeeded() {
     state.automationState = null;
     state.automationLogs = [];
     state.staffAiDraft = null;
+    state.staffAiActiveGenerationId = null;
     state.staffAiBadDraftId = null;
   }
   render();
@@ -2849,7 +2952,7 @@ function setComposerDraft(text) {
 
 async function handleAiDraftAction(action) {
   const draft = state.staffAiDraft;
-  if (!draft?.ai_draft_reply) return;
+  if (!isStaffAiDraftActionable(draft)) return;
   if (action === 'good') {
     await sendStaffAiTrainingReply(draft.ai_draft_reply, 'good');
     return;
@@ -2871,6 +2974,7 @@ async function handleAiDraftAction(action) {
 
 async function sendStaffAiTrainingReply(text, replyUsed) {
   if (sendingMessage || !state.selectedContactId) return;
+  if ((replyUsed === 'good' || replyUsed === 'bad') && !isStaffAiDraftActionable(state.staffAiDraft)) return;
   const finalText = String(text || '').trim();
   if (!finalText) return;
 
@@ -2890,9 +2994,12 @@ async function sendStaffAiTrainingReply(text, replyUsed) {
       })
     });
     state.draft = '';
+    state.staffAiDraft = null;
+    state.staffAiActiveGenerationId = null;
     state.staffAiBadDraftId = null;
     contactDetailCache.delete(Number(state.selectedContactId));
     await refreshContacts({ force: true, reason: 'ai training reply sent' });
+    await refreshSelectedContact({ force: true, reason: 'ai training reply sent' });
     render();
   } catch (error) {
     alert(error.message);
@@ -3175,14 +3282,51 @@ socket.on('auto-registration-bot:changed', (payload = {}) => {
   if (state.section === 'contacts') render();
 });
 
-socket.on('staff-ai-draft:changed', async ({ contactId } = {}) => {
+socket.on('staff-ai-draft-cleared', ({ contactId } = {}) => {
+  const id = normalizeContactId(contactId);
+  if (state.selectedContactId !== id) return;
+  state.staffAiDraft = null;
+  state.staffAiActiveGenerationId = null;
+  state.staffAiBadDraftId = null;
+  if (id) contactDetailCache.delete(id);
+  render();
+});
+
+socket.on('staff-ai-draft-generating', ({ contactId, generationId, draft, customerMessage } = {}) => {
+  const id = normalizeContactId(contactId);
+  if (state.selectedContactId !== id) return;
+  if (id) contactDetailCache.delete(id);
+  const latest = getLatestIncomingMessage();
+  setStaffAiDraftGenerating({
+    customerMessage: customerMessage || draft?.customer_message || latest?.text || '',
+    incomingMessageId: draft?.incoming_message_id || latest?.id || null,
+    generationId: generationId || draft?.generation_id || null
+  });
+  render();
+});
+
+socket.on('staff-ai-draft-ready', ({ contactId, generationId, draft } = {}) => {
+  const id = normalizeContactId(contactId);
+  if (state.selectedContactId !== id) return;
+  if (id) contactDetailCache.delete(id);
+  if (!applyStaffAiDraftEvent({ draft, generationId })) return;
+  render();
+  console.log('[support-ai] support_ai_draft_visible client contact=%s generation_id=%s', id, generationId || draft?.generation_id || 'n/a');
+});
+
+socket.on('staff-ai-draft-stale', () => {});
+
+socket.on('staff-ai-draft:changed', async ({ contactId, generationId, draft } = {}) => {
   const id = normalizeContactId(contactId);
   if (id) contactDetailCache.delete(id);
   if (state.selectedContactId === id) {
+    if (draft && applyStaffAiDraftEvent({ draft, generationId })) {
+      render();
+      return;
+    }
     try {
       await refreshSelectedContact({ force: true, reason: 'staff ai draft changed' });
       render();
-      console.log('[support-ai] support_ai_draft_visible client contact=%s', id);
     } catch (error) {
       console.warn('[support-ai] draft refresh failed:', error);
     }
@@ -3237,6 +3381,17 @@ socket.on('message:new', async ({ contactId, userId } = {}) => {
   if (state.selectedContactId !== id) return;
   try {
     await refreshSelectedContact({ force: true, reason: 'message:new selected contact' });
+    const latest = getLatestIncomingMessage();
+    if (latest?.text) {
+      setStaffAiDraftGenerating({
+        customerMessage: latest.text,
+        incomingMessageId: latest.id
+      });
+    } else {
+      state.staffAiDraft = null;
+      state.staffAiActiveGenerationId = null;
+      state.staffAiBadDraftId = null;
+    }
     render();
   } catch (error) {
     console.warn('[contacts] selected message refresh failed:', error);

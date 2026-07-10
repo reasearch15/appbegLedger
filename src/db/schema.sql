@@ -452,6 +452,8 @@ CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
   feedback TEXT,
   ai_reply_rejected BOOLEAN NOT NULL DEFAULT FALSE,
   normalized_customer_message TEXT,
+  generation_id TEXT,
+  draft_status TEXT NOT NULL DEFAULT 'ready',
   language TEXT,
   sentiment TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -1237,9 +1237,36 @@ h2 {
 }
 
 .ai-suggested-reply-panel.is-empty,
-.ai-suggested-reply-panel.is-muted {
+.ai-suggested-reply-panel.is-muted,
+.ai-suggested-reply-panel.is-generating {
   border-color: var(--line);
   background: var(--panel-soft);
+}
+
+.ai-suggested-reply-panel.is-generating {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
+.ai-generating-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.ai-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #cbd5e1;
+  border-top-color: #0284c7;
+  border-radius: 50%;
+  animation: ai-spinner-spin 0.8s linear infinite;
+}
+
+@keyframes ai-spinner-spin {
+  to { transform: rotate(360deg); }
 }
 
 .ai-mode-label {

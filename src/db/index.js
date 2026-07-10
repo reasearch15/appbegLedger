@@ -1118,16 +1118,182 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   }
 
   async function getLatestStaffAiTrainingDraftForContact(contactId) {
+    const latestIncoming = await db.prepare(`
+      SELECT id, text
+      FROM messages
+      WHERE telegram_user_id = ?
+        AND direction = 'incoming'
+      ORDER BY id DESC, created_at DESC
+      LIMIT 1
+    `).get(contactId);
+    if (!latestIncoming) return null;
+
     const row = await db.prepare(`
       SELECT *
       FROM staff_ai_training_examples
       WHERE contact_id = ?
-        AND outcome = 'drafted'
+        AND incoming_message_id = ?
+        AND draft_status IN ('generating', 'ready')
         AND final_staff_reply IS NULL
-      ORDER BY created_at DESC, id DESC
+      ORDER BY id DESC
       LIMIT 1
-    `).get(contactId);
+    `).get(contactId, latestIncoming.id);
     return row ? hydrateStaffAiTrainingExample(row) : null;
+  }
+
+  async function beginStaffAiDraftGeneration({
+    contactId,
+    generationId,
+    incomingMessageId = null,
+    customerMessage = '',
+    telegramUserId = null
+  }) {
+    const contact = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
+    if (!contact) throw new Error('Contact not found.');
+
+    await db.prepare(`
+      UPDATE staff_ai_training_examples
+      SET draft_status = 'stale',
+          outcome = CASE WHEN outcome = 'drafted' THEN 'stale' ELSE outcome END
+      WHERE contact_id = ?
+        AND draft_status IN ('generating', 'ready')
+        AND final_staff_reply IS NULL
+    `).run(contactId);
+
+    const state = await ensureAutomationState(contactId);
+    await updateAutomationState(contactId, {
+      intents: {
+        ...state.intents,
+        support_ai_active_generation_id: generationId,
+        support_ai_active_message_id: incomingMessageId || null
+      }
+    });
+
+    const now = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO staff_ai_training_examples (
+        contact_id, telegram_user_id, incoming_message_id, customer_message,
+        conversation_context, conversation_history, outcome, draft_status, generation_id, created_at
+      )
+      VALUES (?, ?, ?, ?, '', '', 'drafted', 'generating', ?, ?)
+    `).run(
+      contactId,
+      String(telegramUserId || contact.telegram_id || ''),
+      incomingMessageId || null,
+      customerMessage || null,
+      generationId,
+      now
+    );
+    return await getStaffAiTrainingExample(result.lastInsertRowid);
+  }
+
+  async function completeStaffAiDraftGeneration({
+    generationId,
+    contactId,
+    conversationContext = null,
+    detectedIntent = null,
+    detectedEntities = {},
+    aiDraftReply = '',
+    language = null,
+    sentiment = null,
+    confidence = null,
+    wasRegistered = null,
+    registrationStatus = null,
+    registrationStep = null,
+    paymentWindowStatus = null,
+    appbegPlayerUid = null,
+    recommendedAction = null,
+    actionExecuted = null,
+    actionBlockedReason = null,
+    outcome = 'drafted'
+  }) {
+    const state = await getAutomationState(contactId);
+    const activeGenerationId = state?.intents?.support_ai_active_generation_id || null;
+    const row = await db.prepare('SELECT * FROM staff_ai_training_examples WHERE generation_id = ?').get(generationId);
+    if (!row) return { ready: false, stale: true, draft: null };
+
+    if (activeGenerationId && activeGenerationId !== generationId) {
+      await db.prepare(`
+        UPDATE staff_ai_training_examples
+        SET draft_status = 'stale',
+            outcome = CASE WHEN outcome = 'drafted' THEN 'stale' ELSE outcome END
+        WHERE generation_id = ?
+      `).run(generationId);
+      return { ready: false, stale: true, draft: await getStaffAiTrainingExample(row.id) };
+    }
+
+    const context = conversationContext ?? row.conversation_context ?? '';
+    await db.prepare(`
+      UPDATE staff_ai_training_examples
+      SET conversation_context = ?,
+          conversation_history = ?,
+          detected_intent = ?,
+          detected_entities_json = ?,
+          entities_json = ?,
+          ai_draft_reply = ?,
+          ai_reply = ?,
+          confidence = ?,
+          language = ?,
+          sentiment = ?,
+          was_registered = ?,
+          registration_status = ?,
+          registration_step = ?,
+          payment_window_status = ?,
+          appbeg_player_uid = ?,
+          recommended_action = ?,
+          action_executed = ?,
+          action_blocked_reason = ?,
+          outcome = ?,
+          draft_status = 'ready'
+      WHERE generation_id = ?
+    `).run(
+      context || null,
+      context || null,
+      detectedIntent || null,
+      JSON.stringify(detectedEntities || {}),
+      JSON.stringify(detectedEntities || {}),
+      aiDraftReply || null,
+      aiDraftReply || null,
+      confidence == null ? null : Number(confidence),
+      language || null,
+      sentiment || null,
+      wasRegistered == null ? null : sql.boolParam(wasRegistered),
+      registrationStatus || null,
+      registrationStep || null,
+      paymentWindowStatus || null,
+      appbegPlayerUid || null,
+      recommendedAction || null,
+      actionExecuted == null ? null : sql.boolParam(actionExecuted),
+      actionBlockedReason || null,
+      outcome,
+      generationId
+    );
+    return {
+      ready: true,
+      stale: false,
+      draft: await getStaffAiTrainingExample(row.id)
+    };
+  }
+
+  async function failStaffAiDraftGeneration({ generationId, contactId }) {
+    if (!generationId) return null;
+    await db.prepare(`
+      UPDATE staff_ai_training_examples
+      SET draft_status = 'stale',
+          outcome = CASE WHEN outcome = 'drafted' THEN 'stale' ELSE outcome END
+      WHERE generation_id = ?
+    `).run(generationId);
+    const state = await getAutomationState(contactId);
+    if (state?.intents?.support_ai_active_generation_id === generationId) {
+      await updateAutomationState(contactId, {
+        intents: {
+          ...state.intents,
+          support_ai_active_generation_id: null,
+          support_ai_active_message_id: null
+        }
+      });
+    }
+    return null;
   }
 
   async function markStaffAiTrainingFeedback(id, {
@@ -1187,6 +1353,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const wasEdited = aiDraft ? aiDraft !== finalText : true;
     const feedback = replyUsed || (wasEdited ? 'bad' : 'good');
     const aiReplyRejected = feedback === 'bad';
+    const draftStatus = feedback === 'good' ? 'approved' : 'rejected';
     const normalizedCustomerMessage = normalizeCustomerMessage(row.customer_message || '');
     await db.prepare(`
       UPDATE staff_ai_training_examples
@@ -1202,6 +1369,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           approved = ?,
           ai_reply_rejected = ?,
           normalized_customer_message = ?,
+          draft_status = ?,
           staff_feedback_reason = COALESCE(?, staff_feedback_reason),
           outcome = ?,
           sent_at = ?
@@ -1218,6 +1386,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       sql.boolParam(true),
       sql.boolParam(aiReplyRejected),
       normalizedCustomerMessage || null,
+      draftStatus,
       staffFeedbackReason || null,
       outcome,
       sentAt,
@@ -3651,6 +3820,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     createStaffAiTrainingDraft,
     getStaffAiTrainingExample,
     getLatestStaffAiTrainingDraftForContact,
+    beginStaffAiDraftGeneration,
+    completeStaffAiDraftGeneration,
+    failStaffAiDraftGeneration,
     markStaffAiTrainingFeedback,
     completeStaffAiTrainingExampleOnSend,
     getAutoRegistrationBotSettings,
@@ -3790,7 +3962,9 @@ function hydrateStaffAiTrainingExample(row) {
     approved: row.approved === true || row.approved === 1 || row.approved === '1',
     feedback: row.feedback || row.reply_used || null,
     ai_reply_rejected: row.ai_reply_rejected === true || row.ai_reply_rejected === 1 || row.ai_reply_rejected === '1',
-    normalized_customer_message: row.normalized_customer_message || null
+    normalized_customer_message: row.normalized_customer_message || null,
+    generation_id: row.generation_id || null,
+    draft_status: row.draft_status || (row.final_staff_reply ? (row.feedback === 'bad' ? 'rejected' : 'approved') : 'ready')
   };
 }
 
@@ -4277,6 +4451,41 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'feedback', 'TEXT');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'ai_reply_rejected', 'BOOLEAN NOT NULL DEFAULT FALSE');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'normalized_customer_message', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'generation_id', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'draft_status', "TEXT NOT NULL DEFAULT 'ready'");
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_generation_id ON staff_ai_training_examples(generation_id)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_message_status ON staff_ai_training_examples(contact_id, incoming_message_id, draft_status)');
+  await db.exec(`
+    UPDATE staff_ai_training_examples
+    SET draft_status = 'approved'
+    WHERE sent_at IS NOT NULL
+      AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
+      AND COALESCE(feedback, reply_used) = 'good'
+      AND draft_status = 'ready'
+  `);
+  await db.exec(`
+    UPDATE staff_ai_training_examples
+    SET draft_status = 'rejected'
+    WHERE sent_at IS NOT NULL
+      AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
+      AND COALESCE(feedback, reply_used) = 'bad'
+      AND draft_status = 'ready'
+  `);
+  await db.exec(`
+    UPDATE staff_ai_training_examples
+    SET draft_status = 'stale'
+    WHERE outcome = 'drafted'
+      AND final_staff_reply IS NULL
+      AND draft_status = 'ready'
+      AND incoming_message_id IS NOT NULL
+      AND incoming_message_id != (
+        SELECT id FROM messages
+        WHERE telegram_user_id = staff_ai_training_examples.contact_id
+          AND direction = 'incoming'
+        ORDER BY id DESC
+        LIMIT 1
+      )
+  `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_normalized_message ON staff_ai_training_examples(normalized_customer_message)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent ON staff_ai_training_examples(approved, sent_at DESC)');
   await db.exec(`
