@@ -188,6 +188,14 @@ export async function migratePostgres(driver) {
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS staff_reply TEXT;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS reply_used TEXT;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS was_registered BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS registration_status TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS registration_step TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS payment_window_status TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS appbeg_player_uid TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS recommended_action TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS action_executed BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS action_blocked_reason TEXT;
   `);
 
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);

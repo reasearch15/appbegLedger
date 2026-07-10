@@ -970,7 +970,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     language = null,
     sentiment = null,
     confidence = null,
-    outcome = 'drafted'
+    outcome = 'drafted',
+    wasRegistered = null,
+    registrationStatus = null,
+    registrationStep = null,
+    paymentWindowStatus = null,
+    appbegPlayerUid = null,
+    recommendedAction = null,
+    actionExecuted = null,
+    actionBlockedReason = null
   }) {
     const contact = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
     if (!contact) throw new Error('Contact not found.');
@@ -1002,6 +1010,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
             confidence = ?,
             language = ?,
             sentiment = ?,
+            was_registered = ?,
+            registration_status = ?,
+            registration_step = ?,
+            payment_window_status = ?,
+            appbeg_player_uid = ?,
+            recommended_action = ?,
+            action_executed = ?,
+            action_blocked_reason = ?,
             created_at = ?
         WHERE id = ?
       `).run(
@@ -1017,6 +1033,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         confidence == null ? null : Number(confidence),
         language || contact.language_code || null,
         sentiment || null,
+        wasRegistered == null ? null : sql.boolParam(wasRegistered),
+        registrationStatus || null,
+        registrationStep || null,
+        paymentWindowStatus || null,
+        appbegPlayerUid || null,
+        recommendedAction || null,
+        actionExecuted == null ? null : sql.boolParam(actionExecuted),
+        actionBlockedReason || null,
         now,
         existing.id
       );
@@ -1026,9 +1050,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       INSERT INTO staff_ai_training_examples (
         contact_id, telegram_user_id, incoming_message_id, customer_message, conversation_context,
         conversation_history, detected_intent, detected_entities_json, entities_json, ai_draft_reply,
-        ai_reply, outcome, confidence, language, sentiment, created_at
+        ai_reply, outcome, confidence, language, sentiment, was_registered, registration_status,
+        registration_step, payment_window_status, appbeg_player_uid, recommended_action,
+        action_executed, action_blocked_reason, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId || contact.telegram_id || ''),
@@ -1045,6 +1071,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       confidence == null ? null : Number(confidence),
       language || contact.language_code || null,
       sentiment || null,
+      wasRegistered == null ? null : sql.boolParam(wasRegistered),
+      registrationStatus || null,
+      registrationStep || null,
+      paymentWindowStatus || null,
+      appbegPlayerUid || null,
+      recommendedAction || null,
+      actionExecuted == null ? null : sql.boolParam(actionExecuted),
+      actionBlockedReason || null,
       now
     );
     return await getStaffAiTrainingExample(result.lastInsertRowid);
@@ -3706,8 +3740,11 @@ function hydrateStaffAiTrainingExample(row) {
     ai_reply: row.ai_reply || row.ai_draft_reply || '',
     staff_reply: row.staff_reply || row.final_staff_reply || '',
     was_edited: Boolean(row.was_edited),
+    was_registered: row.was_registered === true || row.was_registered === 1 || row.was_registered === '1',
+    action_executed: row.action_executed === true || row.action_executed === 1 || row.action_executed === '1',
     edit_distance_percent: row.edit_distance_percent == null ? null : Number(row.edit_distance_percent),
-    confidence: row.confidence == null ? null : Number(row.confidence)
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    recommended_action: row.recommended_action || parseJsonField(row.entities_json, {}).recommended_action || null
   };
 }
 
@@ -4182,6 +4219,14 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'staff_reply', 'TEXT');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'reply_used', 'TEXT');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'confidence', 'REAL');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'was_registered', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'registration_status', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'registration_step', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'payment_window_status', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'appbeg_player_uid', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'recommended_action', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'action_executed', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'action_blocked_reason', 'TEXT');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings_audit_log (

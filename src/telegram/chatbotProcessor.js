@@ -183,8 +183,13 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
       useTraining: contactAi.mode === 'auto'
     });
 
-    const shouldAutoSend = contactAi.mode === 'auto' && !contactAi.auto_paused;
-    const draftOutcome = shouldAutoSend ? 'auto_sent' : 'drafted';
+    if (!supportDraft.configured) {
+      await store.completeBotJob(job.id, { status: 'completed', errorText: 'Support AI not configured' });
+      emitSupportAiDraftUpdate(io, contact, { configured: false, draft: null });
+      return { ok: true, skipped: true, reason: 'not_configured' };
+    }
+
+    const draftOutcome = contactAi.mode === 'auto' && !contactAi.auto_paused ? 'auto_sent' : 'drafted';
 
     savedDraft = await store.createStaffAiTrainingDraft({
       contactId: contact.id,
@@ -192,13 +197,21 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
       incomingMessageId: job.message_id || null,
       customerMessage: job.input_text || '',
       conversationContext: supportDraft.context,
-      detectedIntent: supportDraft.kind,
+      detectedIntent: supportDraft.decision?.intent || supportDraft.kind,
       detectedEntities: supportDraft.entities,
-      aiDraftReply: supportDraft.reply,
+      aiDraftReply: supportDraft.reply_text || supportDraft.reply,
       language: contact.language_code || null,
       sentiment: null,
       confidence: supportDraft.confidence,
-      outcome: draftOutcome
+      outcome: draftOutcome,
+      wasRegistered: supportDraft.contactContext?.was_registered ?? null,
+      registrationStatus: supportDraft.contactContext?.registration_status ?? null,
+      registrationStep: supportDraft.contactContext?.current_step ?? null,
+      paymentWindowStatus: supportDraft.contactContext?.payment_window_status ?? null,
+      appbegPlayerUid: supportDraft.contactContext?.appbeg_player_uid ?? null,
+      recommendedAction: supportDraft.decision?.recommended_action ?? null,
+      actionExecuted: false,
+      actionBlockedReason: supportDraft.decision?.action_blocked_reason ?? null
     });
     console.log(`[support-ai] support_ai_draft_created contact=${contact.id} job=${job.id} draft_id=${savedDraft?.id || 'n/a'} intent=${supportDraft.kind}`);
   } catch (error) {
@@ -217,20 +230,50 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
     await queueBotReply({
       store,
       user: contact,
-      text: supportDraft.reply,
+      text: supportDraft.reply_text || supportDraft.reply,
       buttons: [],
       bot: bot || globalThis.telegramBot || null
     });
+
+    const { executeSupportAiRecommendedAction } = await import('./supportAiActionExecutor.js');
+    const actionResult = await executeSupportAiRecommendedAction({
+      store,
+      contact,
+      job,
+      decision: supportDraft.decision,
+      io,
+      bot,
+      executeActions: true
+    });
+
+    if (savedDraft?.id && store.updateStaffAiTrainingActionResult) {
+      await store.updateStaffAiTrainingActionResult(savedDraft.id, actionResult);
+    } else if (savedDraft?.id) {
+      await store.db.prepare(`
+        UPDATE staff_ai_training_examples
+        SET action_executed = ?,
+            action_blocked_reason = ?
+        WHERE id = ?
+      `).run(
+        Boolean(actionResult.action_executed),
+        actionResult.action_blocked_reason || actionResult.reason || null,
+        savedDraft.id
+      );
+    }
+
     await store.logAutomationDecision({
       userId: contact.id,
       messageId: job.message_id,
       incomingTelegramMessageId: job.incoming_telegram_message_id,
       actionTaken: `support_auto_reply:${supportDraft.kind}`,
-      responseSent: supportDraft.reply,
+      responseSent: supportDraft.reply_text || supportDraft.reply,
       metadata: {
         jobId: job.id,
         aiMode: 'auto',
         replySource: supportDraft.replySource || 'template',
+        recommendedAction: supportDraft.decision?.recommended_action || null,
+        actionExecuted: actionResult.action_executed,
+        actionBlockedReason: actionResult.action_blocked_reason || actionResult.reason || null,
         backendActionsSuppressed: true,
         confidence: supportDraft.confidence,
         intent: supportDraft.kind
@@ -247,7 +290,7 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
     messageId: job.message_id,
     incomingTelegramMessageId: job.incoming_telegram_message_id,
     actionTaken: `support_train_draft:${supportDraft.kind}`,
-    responseSent: supportDraft.reply,
+    responseSent: supportDraft.reply_text || supportDraft.reply,
     metadata: {
       jobId: job.id,
       aiMode: contactAi.mode,
@@ -256,7 +299,9 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
       autoPaused: contactAi.auto_paused,
       backendActionsSuppressed: true,
       confidence: supportDraft.confidence,
-      intent: supportDraft.kind
+      intent: supportDraft.kind,
+      registrationPhase: supportDraft.contactContext?.registration_phase || null,
+      recommendedAction: supportDraft.decision?.recommended_action || null
     }
   });
   await store.completeBotJob(job.id, { status: 'completed', errorText: 'Train Mode: support draft saved, auto-send suppressed' });
