@@ -14,7 +14,8 @@
     "telegram:test-buttons": "python scripts/test_welcome_buttons.py",
     "payment:login": "python scripts/payment_telegram_sync.py login",
     "payment:sync": "python scripts/payment_telegram_sync.py sync",
-    "create-admin": "node scripts/create-admin.js"
+    "create-admin": "node scripts/create-admin.js",
+    "test:support-ai-training": "node scripts/test-support-ai-training.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

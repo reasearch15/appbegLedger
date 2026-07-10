@@ -1206,6 +1206,56 @@ async function sendTelegramMessage(req, res) {
     });
     if (trainingExample) {
       response.trainingExample = trainingExample;
+      if (replyUsed === 'good') {
+        const recommendedAction = trainingExample.recommended_action
+          || trainingExample.detected_entities?.recommended_action;
+        if (recommendedAction && recommendedAction !== 'send_support_reply') {
+          try {
+            const { executeSupportAiRecommendedAction } = await import('./telegram/supportAiActionExecutor.js');
+            const freshUser = await store.getUserProfile(user.id);
+            const actionResult = await executeSupportAiRecommendedAction({
+              store,
+              contact: freshUser,
+              job: {
+                input_text: trainingExample.customer_message || '',
+                message_id: trainingExample.incoming_message_id || null
+              },
+              decision: {
+                recommended_action: recommendedAction,
+                intent: trainingExample.detected_intent || null
+              },
+              io,
+              bot: globalThis.telegramBot || null,
+              executeActions: true,
+              staffApproved: true
+            });
+            if (trainingExample.id) {
+              await store.db.prepare(`
+                UPDATE staff_ai_training_examples
+                SET action_executed = ?,
+                    action_blocked_reason = ?
+                WHERE id = ?
+              `).run(
+                Boolean(actionResult.action_executed),
+                actionResult.action_blocked_reason || actionResult.reason || null,
+                trainingExample.id
+              );
+            }
+            response.approvedAction = {
+              recommended_action: recommendedAction,
+              executed: Boolean(actionResult.action_executed),
+              blocked_reason: actionResult.action_blocked_reason || actionResult.reason || null
+            };
+          } catch (actionError) {
+            console.error(`[support-ai] support_ai_approved_action_failed contact=${user.id} action=${recommendedAction} error=${actionError.message}`);
+            response.approvedAction = {
+              recommended_action: recommendedAction,
+              executed: false,
+              error: actionError.message
+            };
+          }
+        }
+      }
     }
 
     io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });

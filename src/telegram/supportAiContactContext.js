@@ -50,20 +50,24 @@ export async function loadSupportAiContactContext({ store, contact }) {
   const manualStaffTakeover = Boolean(contact.bot_paused)
     || Boolean(contact.needs_staff_review);
 
-  const registrationPhase = classifyRegistrationPhase({
+  const underlyingRegistrationPhase = classifyRegistrationPhase({
     contact,
     flow,
     step,
     info,
     paymentWindow,
     wasRegistered,
-    manualStaffTakeover
+    manualStaffTakeover: false
   });
+  const registrationPhase = manualStaffTakeover
+    ? 'manual_staff_takeover'
+    : underlyingRegistrationPhase;
 
   const context = {
     contact_id: contact.id,
     registration_status: contact.registration_status || 'New',
     registration_phase: registrationPhase,
+    underlying_registration_phase: underlyingRegistrationPhase,
     current_flow: flow,
     current_step: step,
     payment_window_status: paymentWindow?.status || (activePaymentWindow ? 'active' : null),
@@ -145,19 +149,39 @@ export function detectWantsRegistrationIntent(messageText = '') {
 }
 
 export function buildSupportAiDecision({ messageText, contactContext }) {
+  const intentPhase = contactContext.underlying_registration_phase
+    || contactContext.registration_phase;
+  const decision = buildCoreSupportAiDecision({
+    messageText,
+    contactContext: { ...contactContext, registration_phase: intentPhase }
+  });
+
+  if (!contactContext.staff_takeover) {
+    return {
+      ...decision,
+      auto_send_allowed: true,
+      action_execution_allowed: true,
+      action_blocked_reason: null
+    };
+  }
+
+  console.log(`[support-ai] support_ai_intent_detected_during_manual_takeover contact=${contactContext.contact_id} intent=${decision.intent} action=${decision.recommended_action}`);
+  if (decision.recommended_action && decision.recommended_action !== 'send_support_reply') {
+    console.log(`[support-ai] support_ai_action_held_for_staff_approval contact=${contactContext.contact_id} action=${decision.recommended_action}`);
+  }
+
+  return {
+    ...decision,
+    auto_send_allowed: false,
+    action_execution_allowed: false,
+    action_blocked_reason: 'manual_staff_takeover'
+  };
+}
+
+function buildCoreSupportAiDecision({ messageText, contactContext }) {
   const text = String(messageText || '').trim();
   const phase = contactContext.registration_phase;
   const wantsRegistration = detectWantsRegistrationIntent(text);
-
-  if (phase === 'manual_staff_takeover') {
-    return {
-      intent: wantsRegistration ? 'wants_registration' : 'general_support',
-      recommended_action: 'send_support_reply',
-      confidence: 0.95,
-      reply_text: 'A staff member is already helping you here. Please wait for their reply or send any extra details you want them to see.',
-      action_blocked_reason: 'manual_staff_takeover'
-    };
-  }
 
   if (phase === 'registered') {
     if (wantsRegistration) {
@@ -311,6 +335,9 @@ function buildRegisteredSupportReply(text, context) {
 export function formatSupportAiContextBlock(contactContext, recentMessages = '') {
   return [
     `Registration phase: ${contactContext.registration_phase}`,
+    contactContext.staff_takeover && contactContext.underlying_registration_phase
+      ? `Underlying registration phase: ${contactContext.underlying_registration_phase}`
+      : null,
     `Registration status: ${contactContext.registration_status}`,
     `Current flow: ${contactContext.current_flow || 'none'}`,
     `Current step: ${contactContext.current_step || 'none'}`,

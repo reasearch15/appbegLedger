@@ -13,6 +13,10 @@ import {
   playerMatchesQuery
 } from '../registration/playerModel.js';
 import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
+import {
+  normalizeCustomerMessage,
+  selectBestTrainingMatch
+} from '../telegram/supportAiTrainingRetrieval.js';
 import { depositWindowMinutes } from '../payments/constants.js';
 import {
   CONVERSATION_STATUSES,
@@ -886,53 +890,77 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
-  async function findStaffAiTrainingReply({ contactId, intent }) {
+  async function searchApprovedSupportAiTraining({
+    customerMessage,
+    contactId = null,
+    intent = null,
+    contactContext = {},
+    language = null,
+    limit = 5
+  }) {
+    const normalizedMessage = normalizeCustomerMessage(customerMessage);
+    const rows = await db.prepare(`
+      SELECT *
+      FROM staff_ai_training_examples
+      WHERE approved = ${sql.boolTrue}
+        AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
+        AND sent_at IS NOT NULL
+      ORDER BY sent_at DESC, id DESC
+      LIMIT 500
+    `).all();
+
+    const examples = rows.map(hydrateStaffAiTrainingExample);
+    const rejectedExamples = examples.filter((example) => example.ai_reply_rejected);
+    if (rejectedExamples.length) {
+      console.log(`[support-ai] support_ai_rejected_reply_excluded contact=${contactId || 'global'} count=${rejectedExamples.length}`);
+    }
+
+    const result = selectBestTrainingMatch(examples, {
+      customerMessage,
+      normalizedMessage,
+      intent,
+      contactContext,
+      language,
+      contactId,
+      limit
+    });
+
+    if (result.matchType === 'exact') {
+      console.log(`[support-ai] support_ai_exact_training_match_found contact=${contactId || 'global'} example_id=${result.best?.id || 'n/a'} intent=${intent || 'n/a'}`);
+    } else if (result.matchType === 'similar') {
+      console.log(`[support-ai] support_ai_similar_training_examples_found contact=${contactId || 'global'} count=${result.examples.length} best_id=${result.best?.id || 'n/a'} score=${result.score}`);
+    }
+
+    if (result.reply) {
+      console.log(`[support-ai] support_ai_training_examples_used contact=${contactId || 'global'} match=${result.matchType} example_id=${result.best?.id || 'n/a'}`);
+    }
+
+    return result;
+  }
+
+  async function findStaffAiTrainingReply({ contactId, intent, customerMessage, contactContext, language }) {
+    if (customerMessage) {
+      const result = await searchApprovedSupportAiTraining({
+        customerMessage,
+        contactId,
+        intent,
+        contactContext: contactContext || {},
+        language,
+        limit: 1
+      });
+      return result.reply || null;
+    }
     const normalizedIntent = String(intent || '').trim();
     if (!normalizedIntent) return null;
-    const pickReply = (row) => {
-      const reply = String(row?.reply || '').trim();
-      return reply || null;
-    };
-    const contactRow = await db.prepare(`
-      SELECT COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply) AS reply
-      FROM staff_ai_training_examples
-      WHERE contact_id = ?
-        AND detected_intent = ?
-        AND TRIM(COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply, '')) != ''
-        AND outcome IN ('sent', 'completed', 'auto_sent')
-      ORDER BY
-        CASE COALESCE(reply_used, '')
-          WHEN 'good' THEN 0
-          WHEN 'bad' THEN 1
-          ELSE 2
-        END,
-        CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END,
-        sent_at DESC,
-        created_at DESC,
-        id DESC
-      LIMIT 1
-    `).get(contactId, normalizedIntent);
-    const contactReply = pickReply(contactRow);
-    if (contactReply) return contactReply;
-    const globalRow = await db.prepare(`
-      SELECT COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply) AS reply
-      FROM staff_ai_training_examples
-      WHERE detected_intent = ?
-        AND TRIM(COALESCE(final_staff_reply, staff_reply, ai_reply, ai_draft_reply, '')) != ''
-        AND outcome IN ('sent', 'completed', 'auto_sent')
-      ORDER BY
-        CASE COALESCE(reply_used, '')
-          WHEN 'good' THEN 0
-          WHEN 'bad' THEN 1
-          ELSE 2
-        END,
-        CASE WHEN sent_at IS NULL THEN 1 ELSE 0 END,
-        sent_at DESC,
-        created_at DESC,
-        id DESC
-      LIMIT 1
-    `).get(normalizedIntent);
-    return pickReply(globalRow);
+    const result = await searchApprovedSupportAiTraining({
+      customerMessage: '',
+      contactId,
+      intent: normalizedIntent,
+      contactContext: contactContext || {},
+      language,
+      limit: 1
+    });
+    return result.reply || null;
   }
 
   async function setStaffAiApprenticeModeEnabled(enabled, actorName = 'Staff') {
@@ -1154,18 +1182,26 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         outcome: 'manual'
       });
     }
-    const aiDraft = String(row.ai_draft_reply || '').trim();
+    const aiDraft = String(row.ai_draft_reply || row.ai_reply || '').trim();
     const editDistancePercent = aiDraft ? calculateEditDistancePercent(aiDraft, finalText) : null;
     const wasEdited = aiDraft ? aiDraft !== finalText : true;
+    const feedback = replyUsed || (wasEdited ? 'bad' : 'good');
+    const aiReplyRejected = feedback === 'bad';
+    const normalizedCustomerMessage = normalizeCustomerMessage(row.customer_message || '');
     await db.prepare(`
       UPDATE staff_ai_training_examples
       SET final_staff_reply = ?,
           staff_reply = ?,
+          ai_reply = COALESCE(ai_reply, ai_draft_reply),
           staff_user_id = ?,
           staff_username = ?,
           was_edited = ?,
           edit_distance_percent = ?,
           reply_used = ?,
+          feedback = ?,
+          approved = ?,
+          ai_reply_rejected = ?,
+          normalized_customer_message = ?,
           staff_feedback_reason = COALESCE(?, staff_feedback_reason),
           outcome = ?,
           sent_at = ?
@@ -1177,12 +1213,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       staffUsername || 'Staff',
       wasEdited ? 1 : 0,
       editDistancePercent,
-      replyUsed || (wasEdited ? 'bad' : 'good'),
+      feedback,
+      feedback,
+      sql.boolParam(true),
+      sql.boolParam(aiReplyRejected),
+      normalizedCustomerMessage || null,
       staffFeedbackReason || null,
       outcome,
       sentAt,
       row.id
     );
+    console.log(`[support-ai] support_ai_training_example_saved contact=${contactId} example_id=${row.id} feedback=${feedback} approved=true ai_reply_rejected=${aiReplyRejected}`);
     return await getStaffAiTrainingExample(row.id);
   }
 
@@ -3605,6 +3646,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     setCustomerSupportAiMode,
     pauseContactAiAuto,
     findStaffAiTrainingReply,
+    searchApprovedSupportAiTraining,
     hydrateContactAiSettings,
     createStaffAiTrainingDraft,
     getStaffAiTrainingExample,
@@ -3744,7 +3786,11 @@ function hydrateStaffAiTrainingExample(row) {
     action_executed: row.action_executed === true || row.action_executed === 1 || row.action_executed === '1',
     edit_distance_percent: row.edit_distance_percent == null ? null : Number(row.edit_distance_percent),
     confidence: row.confidence == null ? null : Number(row.confidence),
-    recommended_action: row.recommended_action || parseJsonField(row.entities_json, {}).recommended_action || null
+    recommended_action: row.recommended_action || parseJsonField(row.entities_json, {}).recommended_action || null,
+    approved: row.approved === true || row.approved === 1 || row.approved === '1',
+    feedback: row.feedback || row.reply_used || null,
+    ai_reply_rejected: row.ai_reply_rejected === true || row.ai_reply_rejected === 1 || row.ai_reply_rejected === '1',
+    normalized_customer_message: row.normalized_customer_message || null
   };
 }
 
@@ -4227,6 +4273,25 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'recommended_action', 'TEXT');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'action_executed', 'BOOLEAN NOT NULL DEFAULT FALSE');
   await addColumnIfMissing(db, 'staff_ai_training_examples', 'action_blocked_reason', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'approved', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'feedback', 'TEXT');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'ai_reply_rejected', 'BOOLEAN NOT NULL DEFAULT FALSE');
+  await addColumnIfMissing(db, 'staff_ai_training_examples', 'normalized_customer_message', 'TEXT');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_normalized_message ON staff_ai_training_examples(normalized_customer_message)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent ON staff_ai_training_examples(approved, sent_at DESC)');
+  await db.exec(`
+    UPDATE staff_ai_training_examples
+    SET approved = ${sql.boolTrue},
+        feedback = COALESCE(feedback, reply_used, CASE WHEN was_edited = 0 THEN 'good' ELSE 'bad' END),
+        ai_reply_rejected = CASE
+          WHEN COALESCE(feedback, reply_used) = 'bad' THEN ${sql.boolTrue}
+          WHEN was_edited = 1 AND COALESCE(feedback, reply_used) IS NULL THEN ${sql.boolTrue}
+          ELSE ${sql.boolFalse}
+        END
+    WHERE sent_at IS NOT NULL
+      AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
+      AND approved = ${sql.boolFalse}
+  `);
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS settings_audit_log (

@@ -196,6 +196,25 @@ export async function migratePostgres(driver) {
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS recommended_action TEXT;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS action_executed BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS action_blocked_reason TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS feedback TEXT;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS ai_reply_rejected BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE staff_ai_training_examples ADD COLUMN IF NOT EXISTS normalized_customer_message TEXT;
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_normalized_message
+      ON staff_ai_training_examples(normalized_customer_message);
+    CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent
+      ON staff_ai_training_examples(approved, sent_at DESC);
+    UPDATE staff_ai_training_examples
+    SET approved = TRUE,
+        feedback = COALESCE(feedback, reply_used, CASE WHEN was_edited = FALSE THEN 'good' ELSE 'bad' END),
+        ai_reply_rejected = CASE
+          WHEN COALESCE(feedback, reply_used) = 'bad' THEN TRUE
+          WHEN was_edited = TRUE AND COALESCE(feedback, reply_used) IS NULL THEN TRUE
+          ELSE FALSE
+        END
+    WHERE sent_at IS NOT NULL
+      AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
+      AND approved = FALSE;
   `);
 
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);

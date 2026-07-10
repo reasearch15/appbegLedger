@@ -448,6 +448,10 @@ CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
   recommended_action TEXT,
   action_executed BOOLEAN NOT NULL DEFAULT FALSE,
   action_blocked_reason TEXT,
+  approved BOOLEAN NOT NULL DEFAULT FALSE,
+  feedback TEXT,
+  ai_reply_rejected BOOLEAN NOT NULL DEFAULT FALSE,
+  normalized_customer_message TEXT,
   language TEXT,
   sentiment TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -586,6 +590,12 @@ CREATE INDEX IF NOT EXISTS idx_staff_ai_training_contact_created
 
 CREATE INDEX IF NOT EXISTS idx_staff_ai_training_outcome_created
   ON staff_ai_training_examples(outcome, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_normalized_message
+  ON staff_ai_training_examples(normalized_customer_message);
+
+CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent
+  ON staff_ai_training_examples(approved, sent_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order
   ON payment_methods(is_active, display_order ASC, id ASC);

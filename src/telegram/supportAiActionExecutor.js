@@ -43,7 +43,8 @@ export async function executeSupportAiRecommendedAction({
   decision,
   io,
   bot,
-  executeActions = false
+  executeActions = false,
+  staffApproved = false
 }) {
   const recommended = String(decision?.recommended_action || 'send_support_reply').trim();
   if (BLOCKED_ACTIONS.has(recommended)) {
@@ -77,7 +78,7 @@ export async function executeSupportAiRecommendedAction({
     };
   }
 
-  if (contact.bot_paused || contact.needs_staff_review) {
+  if (!staffApproved && (contact.bot_paused || contact.needs_staff_review)) {
     console.log(`[support-ai] support_ai_registration_action_blocked contact=${contact.id} action=${recommended} reason=manual_staff_takeover`);
     return {
       executed: false,
@@ -90,7 +91,11 @@ export async function executeSupportAiRecommendedAction({
 
   if (recommended === 'handoff_to_staff') {
     await store.markBotNeedsStaffReview(contact.id, 'support_ai_handoff', 'Support AI');
-    console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=handoff_to_staff`);
+    if (staffApproved) {
+      console.log(`[support-ai] support_ai_approved_action_executed contact=${contact.id} action=handoff_to_staff`);
+    } else {
+      console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=handoff_to_staff`);
+    }
     return {
       executed: true,
       blocked: false,
@@ -133,7 +138,11 @@ export async function executeSupportAiRecommendedAction({
       action: 'bot:register'
     });
     await applyRegistrationDecision({ store, contact, decision: regDecision, job, io, bot });
-    console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=start_registration_flow kind=${regDecision.kind}`);
+    if (staffApproved) {
+      console.log(`[support-ai] support_ai_approved_action_executed contact=${contact.id} action=start_registration_flow kind=${regDecision.kind}`);
+    } else {
+      console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=start_registration_flow kind=${regDecision.kind}`);
+    }
     return {
       executed: true,
       blocked: false,
@@ -175,7 +184,11 @@ export async function executeSupportAiRecommendedAction({
       action: job.action || null
     });
     await applyRegistrationDecision({ store, contact, decision: regDecision, job, io, bot });
-    console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=continue_registration_flow kind=${regDecision.kind}`);
+    if (staffApproved) {
+      console.log(`[support-ai] support_ai_approved_action_executed contact=${contact.id} action=continue_registration_flow kind=${regDecision.kind}`);
+    } else {
+      console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=continue_registration_flow kind=${regDecision.kind}`);
+    }
     console.log(`[support-ai] support_ai_existing_registration_continued contact=${contact.id}`);
     return {
       executed: true,
