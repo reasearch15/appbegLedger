@@ -34,6 +34,10 @@ export function createQueryHelpers(dialect) {
     return value ? boolTrue : boolFalse;
   }
 
+  function boolParam(value) {
+    return isPostgres ? Boolean(value) : (value ? 1 : 0);
+  }
+
   function messageUpsertSuffix() {
     return isPostgres
       ? ' ON CONFLICT (source, conversation_id, telegram_message_id, direction) WHERE telegram_message_id IS NOT NULL DO NOTHING'
@@ -60,6 +64,7 @@ export function createQueryHelpers(dialect) {
     boolTrue,
     boolFalse,
     boolLiteral,
+    boolParam,
     tagsJsonSelect,
     notesTextSelect,
     messageUpsertSuffix,

@@ -794,7 +794,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       nextMode,
       updatedAt,
       actorName,
-      nextMode === 'train' ? 1 : 0,
+      sql.boolParam(nextMode === 'train'),
       updatedAt,
       actorName,
       updatedAt
@@ -802,10 +802,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (nextMode === 'auto') {
       await db.prepare(`
         UPDATE telegram_users
-        SET ai_auto_paused = ${sql.boolFalse},
+        SET ai_auto_paused = ?,
             updated_at = ?
-        WHERE ai_auto_paused = ${sql.boolTrue}
-      `).run(updatedAt);
+        WHERE ai_auto_paused = ?
+      `).run(sql.boolParam(false), updatedAt, sql.boolParam(true));
     }
     await logSettingsAudit({
       settingsKey: 'customer_support_ai_mode',
@@ -867,12 +867,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const updatedAt = nowIso();
     await db.prepare(`
       UPDATE telegram_users
-      SET ai_auto_paused = ${sql.boolTrue},
+      SET ai_auto_paused = ?,
           ai_mode_updated_at = ?,
           ai_mode_updated_by = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(updatedAt, actorName, updatedAt, contactId);
+    `).run(sql.boolParam(true), updatedAt, actorName, updatedAt, contactId);
     return {
       mode: globalAi.mode,
       auto_paused: true,
@@ -942,7 +942,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           staff_ai_apprentice_mode_updated_by = ?,
           updated_at = ?
       WHERE id = 1
-    `).run(nextEnabled ? 1 : 0, updatedAt, actorName, updatedAt);
+    `).run(sql.boolParam(nextEnabled), updatedAt, actorName, updatedAt);
     await logSettingsAudit({
       settingsKey: 'staff_ai_apprentice_mode',
       fieldName: 'enabled',
