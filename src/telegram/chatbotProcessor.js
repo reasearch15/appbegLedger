@@ -9,6 +9,7 @@ import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/m
 import { registrationCompletionStatus } from '../registration/utils.js';
 import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 import { generateCustomerSupportReply } from './customerSupportAi.js';
+import { isCustomerSupportAiConfigured } from './customerSupportAiConfig.js';
 
 /**
  * Prefer Bot API for messages that include inline buttons (Telegram user
@@ -114,43 +115,103 @@ async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot 
   console.log(`[chatbot] registration_payment_window_started contact=${contact.id} window=${paymentWindow.id} expires_at=${paymentWindow.expires_at}`);
 }
 
-async function processSupportAiJob({ store, contact, job, io, bot }) {
-  const globalAi = await store.getCustomerSupportAiSettings?.()
-    || { mode: 'train', auto_paused: false };
-  const contactAi = {
-    mode: globalAi.mode === 'auto' ? 'auto' : 'train',
-    auto_paused: Boolean(contact.ai_auto_paused)
-  };
+export function isSupportInboundJob(job = {}) {
+  return job.job_type === 'inbound_message' && Boolean(String(job.input_text || '').trim());
+}
 
-  if (job.job_type !== 'inbound_message' || !String(job.input_text || '').trim()) {
+function canEnqueueBotJob(contact, { jobType = 'inbound_message', action = null } = {}) {
+  if (!contact) return { ok: false, reason: 'missing_contact' };
+  if (contact.bot_enabled === false || contact.bot_enabled === 0) {
+    return { ok: false, reason: 'bot_disabled' };
+  }
+  if (jobType === 'inbound_message' && !action) {
+    return { ok: true, reason: 'support_inbound' };
+  }
+  if (!isBotActiveForContact(contact)) {
+    const reason = contact.needs_staff_review
+      ? 'needs_staff_review'
+      : contact.bot_paused
+        ? 'bot_paused'
+        : 'bot_inactive';
+    return { ok: false, reason };
+  }
+  return { ok: true, reason: 'active' };
+}
+
+async function processSupportAiJob({ store, contact, job, io, bot }) {
+  console.log(`[support-ai] support_ai_inbound_received contact=${contact.id} job=${job.id} message_id=${job.message_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'}`);
+
+  if (!isSupportInboundJob(job)) {
     await store.completeBotJob(job.id, { status: 'completed', errorText: 'Support AI skipped: no inbound text' });
     return { ok: true, skipped: true, reason: 'no_inbound_text' };
   }
 
-  const supportDraft = await generateCustomerSupportReply({
-    store,
-    contact,
-    messageText: job.input_text || '',
-    useTraining: contactAi.mode === 'auto'
-  });
+  const globalAi = await store.getCustomerSupportAiSettings?.()
+    || { mode: 'train', configured: isCustomerSupportAiConfigured() };
+  const contactAi = {
+    mode: globalAi.mode === 'auto' ? 'auto' : 'train',
+    auto_paused: contact.ai_auto_paused === true
+      || contact.ai_auto_paused === 1
+      || contact.ai_auto_paused === '1'
+      || contact.ai_auto_paused === 'true'
+  };
+
+  console.log(`[support-ai] support_ai_mode_loaded contact=${contact.id} mode=${contactAi.mode} ai_auto_paused=${contactAi.auto_paused} configured=${globalAi.configured !== false}`);
+
+  if (globalAi.configured === false || !isCustomerSupportAiConfigured()) {
+    console.log(`[support-ai] support_ai_draft_failed contact=${contact.id} job=${job.id} reason=not_configured`);
+    await store.completeBotJob(job.id, { status: 'completed', errorText: 'Support AI not configured' });
+    emitSupportAiDraftUpdate(io, contact, { configured: false, draft: null });
+    return { ok: true, skipped: true, reason: 'not_configured' };
+  }
+
+  if (contactAi.mode === 'auto' && contactAi.auto_paused) {
+    console.log(`[support-ai] support_ai_skipped_paused contact=${contact.id} job=${job.id}`);
+    await store.completeBotJob(job.id, { status: 'completed', errorText: 'Support AI auto paused for contact' });
+    return { ok: true, skipped: true, reason: 'auto_paused' };
+  }
+
+  console.log(`[support-ai] support_ai_draft_started contact=${contact.id} job=${job.id}`);
+
+  let supportDraft;
+  let savedDraft;
+  try {
+    supportDraft = await generateCustomerSupportReply({
+      store,
+      contact,
+      messageText: job.input_text || '',
+      useTraining: contactAi.mode === 'auto'
+    });
+
+    const shouldAutoSend = contactAi.mode === 'auto' && !contactAi.auto_paused;
+    const draftOutcome = shouldAutoSend ? 'auto_sent' : 'drafted';
+
+    savedDraft = await store.createStaffAiTrainingDraft({
+      contactId: contact.id,
+      telegramUserId: contact.telegram_id,
+      incomingMessageId: job.message_id || null,
+      customerMessage: job.input_text || '',
+      conversationContext: supportDraft.context,
+      detectedIntent: supportDraft.kind,
+      detectedEntities: supportDraft.entities,
+      aiDraftReply: supportDraft.reply,
+      language: contact.language_code || null,
+      sentiment: null,
+      confidence: supportDraft.confidence,
+      outcome: draftOutcome
+    });
+    console.log(`[support-ai] support_ai_draft_created contact=${contact.id} job=${job.id} draft_id=${savedDraft?.id || 'n/a'} intent=${supportDraft.kind}`);
+  } catch (error) {
+    console.error(`[support-ai] support_ai_draft_failed contact=${contact.id} job=${job.id} error=${error.message}`);
+    await store.completeBotJob(job.id, {
+      status: 'failed',
+      errorText: error.message || String(error)
+    });
+    emitSupportAiDraftUpdate(io, contact, { configured: true, draft: null, error: error.message });
+    return { ok: false, error };
+  }
 
   const shouldAutoSend = contactAi.mode === 'auto' && !contactAi.auto_paused;
-  const draftOutcome = shouldAutoSend ? 'auto_sent' : 'drafted';
-
-  await store.createStaffAiTrainingDraft({
-    contactId: contact.id,
-    telegramUserId: contact.telegram_id,
-    incomingMessageId: job.message_id || null,
-    customerMessage: job.input_text || '',
-    conversationContext: supportDraft.context,
-    detectedIntent: supportDraft.kind,
-    detectedEntities: supportDraft.entities,
-    aiDraftReply: supportDraft.reply,
-    language: contact.language_code || null,
-    sentiment: null,
-    confidence: supportDraft.confidence,
-    outcome: draftOutcome
-  });
 
   if (shouldAutoSend) {
     await queueBotReply({
@@ -198,10 +259,10 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
       intent: supportDraft.kind
     }
   });
-  console.log(`[support-ai] train_draft_saved contact=${contact.id} job=${job.id} intent=${supportDraft.kind}`);
   await store.completeBotJob(job.id, { status: 'completed', errorText: 'Train Mode: support draft saved, auto-send suppressed' });
-  emitUpdates(io, contact);
-  return { ok: true, supportDraft, trainMode: true };
+  emitSupportAiDraftUpdate(io, contact, { configured: true, draft: savedDraft });
+  console.log(`[support-ai] support_ai_draft_visible contact=${contact.id} job=${job.id} draft_id=${savedDraft?.id || 'n/a'}`);
+  return { ok: true, supportDraft, trainMode: true, draft: savedDraft };
 }
 
 export async function enqueueChatbotJob(store, {
@@ -219,15 +280,9 @@ export async function enqueueChatbotJob(store, {
     return null;
   }
 
-  if (!isBotActiveForContact(contact)) {
-    const reason = contact.needs_staff_review
-      ? 'needs_staff_review'
-      : contact.bot_paused
-        ? 'bot_paused'
-        : contact.bot_enabled === false || contact.bot_enabled === 0
-          ? 'bot_disabled'
-          : 'bot_inactive';
-    console.log(`[chatbot] bot job skipped reason=${reason} contact=${contactId}`);
+  const enqueueGate = canEnqueueBotJob(contact, { jobType, action });
+  if (!enqueueGate.ok) {
+    console.log(`[chatbot] bot job skipped reason=${enqueueGate.reason} contact=${contactId}`);
     return null;
   }
 
@@ -275,20 +330,25 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
     return { ok: false, reason: 'missing_contact' };
   }
 
-  if (!isBotActiveForContact(contact)) {
-    const reason = contact.needs_staff_review
-      ? 'needs_staff_review'
-      : contact.bot_paused
-        ? 'bot_paused'
-        : 'bot_inactive';
-    await store.completeBotJob(job.id, { status: 'completed', errorText: `Bot inactive — ${reason}` });
-    console.log(`[chatbot] bot job skipped id=${job.id} contact=${contact.id} reason=${reason}`);
-    return { ok: true, skipped: true, reason };
-  }
-
   try {
     const beforeState = await store.ensureAutomationState(contact.id);
     console.log(`[chatbot] processing id=${job.id} contact=${contact.id} flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} status=${contact.registration_status}`);
+
+    const registrationJob = shouldUseRegistrationBot(job, beforeState);
+    if (!registrationJob) {
+      return await processSupportAiJob({ store, contact, job, io, bot });
+    }
+
+    if (!isBotActiveForContact(contact)) {
+      const reason = contact.needs_staff_review
+        ? 'needs_staff_review'
+        : contact.bot_paused
+          ? 'bot_paused'
+          : 'bot_inactive';
+      await store.completeBotJob(job.id, { status: 'completed', errorText: `Bot inactive — ${reason}` });
+      console.log(`[chatbot] bot job skipped id=${job.id} contact=${contact.id} reason=${reason}`);
+      return { ok: true, skipped: true, reason };
+    }
 
     const eligibility = await store.isIncomingMessageEligibleForAutoBot(contact.id, {
       telegramMessageId: job.incoming_telegram_message_id,
@@ -305,11 +365,6 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
         console.log(`[chatbot] auto_reply_skipped contact=${contact.id} job=${job.id} reason=${eligibility.reason}`);
       }
       return { ok: true, skipped: true, reason: eligibility.reason };
-    }
-
-    const registrationJob = shouldUseRegistrationBot(job, beforeState);
-    if (!registrationJob) {
-      return await processSupportAiJob({ store, contact, job, io, bot });
     }
 
     const autoBot = await store.getAutoRegistrationBotSettings();
@@ -462,6 +517,19 @@ function formatLogExtra(logEvent = {}) {
     .filter(([key]) => key !== 'event')
     .map(([key, value]) => ` ${key}=${value}`)
     .join('');
+}
+
+function emitSupportAiDraftUpdate(io, contact, { configured = true, draft = null, error = null } = {}) {
+  if (!io || !contact) return;
+  io.emit('staff-ai-draft:changed', {
+    contactId: contact.id,
+    userId: contact.id,
+    configured,
+    draft,
+    error
+  });
+  io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+  io.emit('contacts:changed');
 }
 
 function emitUpdates(io, contact) {

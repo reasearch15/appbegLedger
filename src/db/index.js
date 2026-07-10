@@ -24,6 +24,7 @@ import {
 import { createQueryHelpers } from './query-helpers.js';
 import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '../payments/methodUtils.js';
 import { normalizeAutoRegistrationBotSettings, isMessageAfterBotResumeCheckpoint } from '../telegram/autoRegistrationBot.js';
+import { isCustomerSupportAiConfigured } from '../telegram/customerSupportAiConfig.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -770,6 +771,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     }
     return {
       mode,
+      configured: isCustomerSupportAiConfigured(),
       updated_at: row?.customer_support_ai_mode_updated_at || null,
       updated_by: row?.customer_support_ai_mode_updated_by || null
     };
@@ -856,10 +858,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const globalAi = await getCustomerSupportAiSettings();
     const contact = await db.prepare('SELECT id, ai_auto_paused FROM telegram_users WHERE id = ?').get(contactId);
     if (!contact) throw new Error('Contact not found.');
-    if (globalAi.mode !== 'auto' || contact.ai_auto_paused) {
+    if (globalAi.mode !== 'auto' || contact.ai_auto_paused === true) {
       return {
         mode: globalAi.mode,
-        auto_paused: Boolean(contact?.ai_auto_paused),
+        auto_paused: contact.ai_auto_paused === true
+          || contact.ai_auto_paused === 1
+          || contact.ai_auto_paused === '1'
+          || contact.ai_auto_paused === 'true',
         updated_at: globalAi.updated_at,
         updated_by: globalAi.updated_by
       };
@@ -1023,7 +1028,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         conversation_history, detected_intent, detected_entities_json, entities_json, ai_draft_reply,
         ai_reply, outcome, confidence, language, sentiment, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId || contact.telegram_id || ''),
@@ -3656,13 +3661,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
 function hydrateUser(user) {
   const aiMode = String(user.ai_mode || '').trim().toLowerCase() === 'auto' ? 'auto' : 'train';
+  const aiAutoPaused = user.ai_auto_paused === true
+    || user.ai_auto_paused === 1
+    || user.ai_auto_paused === '1'
+    || user.ai_auto_paused === 'true';
   return {
     ...user,
     bot_enabled: user.bot_enabled === undefined || user.bot_enabled === null ? true : Boolean(user.bot_enabled),
     bot_paused: Boolean(user.bot_paused),
     needs_staff_review: Boolean(user.needs_staff_review),
     ai_mode: aiMode,
-    ai_auto_paused: Boolean(user.ai_auto_paused),
+    ai_auto_paused: aiAutoPaused,
     tags: parseJsonField(user.tags_json, []).filter((tag) => tag && tag.id),
     tags_json: undefined
   };
@@ -3888,7 +3897,7 @@ async function migrate(db) {
     ['staff_review_reason', 'TEXT'],
     ['staff_review_at', 'TEXT'],
     ['ai_mode', "TEXT NOT NULL DEFAULT 'train'"],
-    ['ai_auto_paused', 'INTEGER NOT NULL DEFAULT 0'],
+    ['ai_auto_paused', 'BOOLEAN NOT NULL DEFAULT FALSE'],
     ['ai_mode_updated_at', 'TEXT'],
     ['ai_mode_updated_by', 'TEXT']
   ]) {

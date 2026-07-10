@@ -104,7 +104,7 @@ let state = {
   paymentActionBusy: false,
   autoRegistrationBot: { enabled: true, enabled_at: null },
   autoRegistrationBotSaving: false,
-  customerSupportAi: { mode: 'train' },
+  customerSupportAi: { mode: 'train', configured: true },
   customerSupportAiSaving: false,
   registrationWindow: null,
   authUser: null,
@@ -1308,7 +1308,20 @@ function quickReplyBar() {
 function staffAiSuggestedReplyPanel() {
   if (!state.contact) return '';
   const mode = state.customerSupportAi?.mode === 'auto' ? 'auto' : 'train';
-  const paused = Boolean(state.contact.ai_auto_paused);
+  const configured = state.customerSupportAi?.configured !== false;
+  const paused = state.contact.ai_auto_paused === true;
+  if (!configured) {
+    return `
+      <section class="ai-suggested-reply-panel is-muted">
+        <div class="ai-suggested-header">
+          <div>
+            <div class="card-title">AI Suggested Reply</div>
+            <div class="subtle">AI is not configured</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
   if (mode !== 'train') {
     return `
       <section class="ai-suggested-reply-panel is-muted">
@@ -3160,6 +3173,20 @@ async function boot() {
 socket.on('auto-registration-bot:changed', (payload = {}) => {
   state.autoRegistrationBot = payload;
   if (state.section === 'contacts') render();
+});
+
+socket.on('staff-ai-draft:changed', async ({ contactId } = {}) => {
+  const id = normalizeContactId(contactId);
+  if (id) contactDetailCache.delete(id);
+  if (state.selectedContactId === id) {
+    try {
+      await refreshSelectedContact({ force: true, reason: 'staff ai draft changed' });
+      render();
+      console.log('[support-ai] support_ai_draft_visible client contact=%s', id);
+    } catch (error) {
+      console.warn('[support-ai] draft refresh failed:', error);
+    }
+  }
 });
 
 socket.on('customer-support-ai-mode:changed', async (payload = {}) => {

@@ -31,6 +31,12 @@ export function canAutoRegistrationBotReply({ settings, messageSentAt }) {
   return isMessageAfterBotResumeCheckpoint(messageSentAt, settings);
 }
 
+function isSupportInboundEnqueue(enqueueParams = {}) {
+  return enqueueParams.jobType === 'inbound_message'
+    && !enqueueParams.action
+    && Boolean(String(enqueueParams.inputText || '').trim());
+}
+
 export async function tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
   CHATBOT_ENABLED = true,
   contact,
@@ -46,9 +52,18 @@ export async function tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
     return { enqueued: false, reason: 'not_chatbot_action' };
   }
 
+  if (isSupportInboundEnqueue(enqueueParams)) {
+    if (contact.bot_enabled === false || contact.bot_enabled === 0) {
+      return { enqueued: false, reason: 'bot_disabled' };
+    }
+    await enqueueChatbotJob(store, enqueueParams);
+    return { enqueued: true, reason: 'enqueued_support' };
+  }
+
   const autoBot = await store.getAutoRegistrationBotSettings();
   if (!autoBot.enabled) {
-    console.log(`[chatbot] registration_bot_disabled contact=${contact.id} (support AI jobs may still process)`);
+    console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${contact.id}`);
+    return { enqueued: false, reason: 'bot_disabled' };
   }
 
   if (!isBotActiveForContact(contact)) {

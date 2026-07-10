@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS telegram_users (
   staff_review_reason TEXT,
   staff_review_at TEXT,
   ai_mode TEXT NOT NULL DEFAULT 'train',
-  ai_auto_paused INTEGER NOT NULL DEFAULT 0,
+  ai_auto_paused BOOLEAN NOT NULL DEFAULT FALSE,
   ai_mode_updated_at TEXT,
   ai_mode_updated_by TEXT,
   first_seen TEXT NOT NULL,
