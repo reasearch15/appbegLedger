@@ -92,11 +92,15 @@ async function initAppBegStore() {
       async getFilterOptions() {
         throw new Error(error.message || 'AppBeg database connection failed.');
       },
+      async getPlayerByUid() {
+        return null;
+      },
       async exportPlayersCsv() {
         throw new Error(error.message || 'AppBeg database connection failed.');
       }
     };
   }
+  globalThis.appbegStore = appbegStore;
 }
 
 await initStore();

@@ -1,17 +1,27 @@
 import { isUnregisteredStatus } from '../registration/utils.js';
+import {
+  resolveSupportAiRegistrationState,
+  formatSupportAiRegistrationPromptRules
+} from './supportAiRegistrationState.js';
 
 const WANTS_REGISTRATION_PATTERNS = [
   /\b(want|need|make|create|get)\b.*\b(account|id|username)\b/i,
-  /\bhow\b.*\b(register|sign ?up|join|start)\b/i,
+  /\bhow\b.*\b(register|sign ?up|join)\b/i,
   /\bcan i join\b/i,
   /\bregister me\b/i,
   /\bsign ?up\b/i,
-  /\bwant to play\b/i,
   /\bhow do i start\b/i,
   /\bmake me an id\b/i,
   /\bcreate account\b/i,
   /\bnew account\b/i,
   /^(register|signup)$/i
+];
+
+const UNREGISTERED_PLAY_PATTERNS = [
+  /\bhow do i play\b/i,
+  /\bhow to play\b/i,
+  /\bwant to play\b/i,
+  /\bi want to play\b/i
 ];
 
 const ACCOUNT_INFO_STEPS = new Set([
@@ -40,15 +50,17 @@ export async function loadSupportAiContactContext({ store, contact }) {
   const paymentWindow = activePaymentWindow || latestPaymentWindow;
   const flow = automationState?.current_flow || null;
   const step = automationState?.current_step || null;
-  const appbegPlayerUid = info.appbeg_player_uid
-    || contact.appbeg_account_id
-    || info.preferred_appbeg_username
-    || null;
-  const wasRegistered = contact.registration_status === 'Registered'
-    || Boolean(appbegPlayerUid)
-    || Boolean(info.appbeg_creation_complete);
   const manualStaffTakeover = Boolean(contact.bot_paused)
     || Boolean(contact.needs_staff_review);
+
+  const registrationState = await resolveSupportAiRegistrationState({
+    contact,
+    info,
+    flow,
+    step,
+    paymentWindow,
+    manualStaffTakeover
+  });
 
   const underlyingRegistrationPhase = classifyRegistrationPhase({
     contact,
@@ -56,7 +68,7 @@ export async function loadSupportAiContactContext({ store, contact }) {
     step,
     info,
     paymentWindow,
-    wasRegistered,
+    registrationState,
     manualStaffTakeover: false
   });
   const registrationPhase = manualStaffTakeover
@@ -65,31 +77,33 @@ export async function loadSupportAiContactContext({ store, contact }) {
 
   const context = {
     contact_id: contact.id,
-    registration_status: contact.registration_status || 'New',
+    registration_status: registrationState.registration_status,
+    registration_state: registrationState.registration_state,
     registration_phase: registrationPhase,
     underlying_registration_phase: underlyingRegistrationPhase,
     current_flow: flow,
     current_step: step,
+    registration_step: step,
     payment_window_status: paymentWindow?.status || (activePaymentWindow ? 'active' : null),
     payment_confirmed: Boolean(info.payment_confirmed),
     payment_app: info.payment_method_name || info.payment_app || null,
     payment_display_name: info.payment_display_name || info.chime_payment_name || null,
     deposit_amount: info.first_deposit_amount ?? info.deposit_amount ?? null,
-    appbeg_username: info.preferred_appbeg_username || null,
-    appbeg_player_uid: appbegPlayerUid,
-    account_creation_complete: Boolean(info.appbeg_creation_complete) || contact.registration_status === 'Registered',
+    appbeg_username: registrationState.appbeg_username,
+    appbeg_player_uid: registrationState.appbeg_player_uid,
+    appbeg_link_status: registrationState.appbeg_link_status,
+    account_status: registrationState.account_status,
+    account_creation_complete: registrationState.account_creation_complete,
+    appbeg_player_exists: registrationState.appbeg_player_exists,
     staff_takeover: manualStaffTakeover,
-    was_registered: wasRegistered,
+    is_registered: registrationState.is_registered,
+    was_registered: registrationState.is_registered,
+    registration_status_conflict: registrationState.registration_status_conflict,
     payment_window_expires_at: paymentWindow?.expires_at || null,
     payment_window_id: paymentWindow?.id || info.registration_payment_window_id || null
   };
 
-  console.log(`[support-ai] support_ai_contact_state_loaded contact=${contact.id} phase=${registrationPhase} status=${context.registration_status} step=${step || 'none'} flow=${flow || 'none'} registered=${wasRegistered}`);
-  if (wasRegistered) {
-    console.log(`[support-ai] support_ai_registered_contact contact=${contact.id} uid=${appbegPlayerUid || 'n/a'}`);
-  } else {
-    console.log(`[support-ai] support_ai_unregistered_contact contact=${contact.id} phase=${registrationPhase}`);
-  }
+  console.log(`[support-ai] support_ai_contact_state_loaded contact=${contact.id} phase=${registrationPhase} state=${registrationState.registration_state} status=${context.registration_status} step=${step || 'none'} flow=${flow || 'none'} registered=${registrationState.is_registered}`);
   if (manualStaffTakeover) {
     console.log(`[support-ai] support_ai_manual_takeover_respected contact=${contact.id}`);
   }
@@ -103,11 +117,14 @@ function classifyRegistrationPhase({
   step,
   info,
   paymentWindow,
-  wasRegistered,
+  registrationState,
   manualStaffTakeover
 }) {
   if (manualStaffTakeover) return 'manual_staff_takeover';
-  if (wasRegistered || contact.registration_status === 'Registered') return 'registered';
+  if (registrationState.is_registered) return 'registered';
+  if (registrationState.registration_state === 'registration_complete_but_not_linked') {
+    return 'registration_complete_but_not_linked';
+  }
 
   const normalizedStep = String(step || '').trim();
   const inBotRegistration = flow === 'bot_registration';
@@ -148,6 +165,11 @@ export function detectWantsRegistrationIntent(messageText = '') {
   return WANTS_REGISTRATION_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+export function detectUnregisteredPlayIntent(messageText = '') {
+  const text = String(messageText || '').trim();
+  return UNREGISTERED_PLAY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function buildSupportAiDecision({ messageText, contactContext }) {
   const intentPhase = contactContext.underlying_registration_phase
     || contactContext.registration_phase;
@@ -182,14 +204,24 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
   const text = String(messageText || '').trim();
   const phase = contactContext.registration_phase;
   const wantsRegistration = detectWantsRegistrationIntent(text);
+  const wantsToPlay = detectUnregisteredPlayIntent(text);
+  const isRegistered = Boolean(contactContext.is_registered ?? contactContext.was_registered);
 
-  if (phase === 'registered') {
+  if (phase === 'registered' || isRegistered) {
     if (wantsRegistration) {
       console.log(`[support-ai] support_ai_registered_user_not_restarted contact=${contactContext.contact_id}`);
       return {
         intent: 'registered_support',
         recommended_action: 'send_support_reply',
         confidence: 0.92,
+        reply_text: buildRegisteredAlreadyAccountReply(contactContext)
+      };
+    }
+    if (wantsToPlay || /\b(play|game|start)\b/i.test(text)) {
+      return {
+        intent: 'registered_support',
+        recommended_action: 'send_support_reply',
+        confidence: 0.9,
         reply_text: buildRegisteredPlayReply(text, contactContext)
       };
     }
@@ -201,14 +233,25 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
     };
   }
 
-  if (wantsRegistration && (phase === 'not_registered' || phase === 'registration_expired')) {
+  if ((wantsRegistration || wantsToPlay) && (phase === 'not_registered' || phase === 'registration_expired')) {
     console.log(`[support-ai] support_ai_registration_intent_detected contact=${contactContext.contact_id}`);
     console.log(`[support-ai] support_ai_registration_start_recommended contact=${contactContext.contact_id}`);
     return {
       intent: 'wants_registration',
       recommended_action: 'start_registration_flow',
       confidence: 0.98,
-      reply_text: 'Sure, I can help you get registered. First, which payment app will you use?'
+      reply_text: wantsToPlay
+        ? 'Sure, I can help you get registered first. Which payment app will you use?'
+        : 'Sure, I can help you get registered. First, which payment app will you use?'
+    };
+  }
+
+  if (phase === 'registration_complete_but_not_linked') {
+    return {
+      intent: 'registration_progress',
+      recommended_action: 'send_support_reply',
+      confidence: 0.9,
+      reply_text: 'Your registration details are complete, but your AppBeg account is not fully linked yet. Please wait while staff finishes linking your account.'
     };
   }
 
@@ -266,11 +309,11 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
   }
 
   if (phase === 'registration_in_progress' || phase === 'registration_expired') {
-    if (wantsRegistration) {
+    if (wantsRegistration || wantsToPlay) {
       console.log(`[support-ai] support_ai_existing_registration_continued contact=${contactContext.contact_id}`);
     }
     return {
-      intent: wantsRegistration ? 'wants_registration' : 'registration_progress',
+      intent: wantsRegistration || wantsToPlay ? 'wants_registration' : 'registration_progress',
       recommended_action: 'continue_registration_flow',
       confidence: 0.88,
       reply_text: phase === 'registration_expired'
@@ -279,12 +322,14 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
     };
   }
 
-  if (wantsRegistration) {
+  if (wantsRegistration || wantsToPlay) {
     return {
       intent: 'wants_registration',
       recommended_action: 'start_registration_flow',
       confidence: 0.9,
-      reply_text: 'Sure, I can help you get registered. First, which payment app will you use?'
+      reply_text: wantsToPlay
+        ? 'Sure, I can help you get registered first. Which payment app will you use?'
+        : 'Sure, I can help you get registered. First, which payment app will you use?'
     };
   }
 
@@ -305,9 +350,15 @@ function detectRegisteredIntent(text) {
   return 'registered_support';
 }
 
+function buildRegisteredAlreadyAccountReply(context) {
+  const username = context.appbeg_username ? ` (${context.appbeg_username})` : '';
+  return `You already have a Royal VIP account${username}. You do not need to register again. Log in with your username and password, or tell us if you need login help.`;
+}
+
 function buildRegisteredPlayReply(text, context) {
-  if (/\b(play|game|start)\b/i.test(text)) {
-    return 'You already have an AppBeg account. Open AppBeg, log in with your username and password, and you can start playing from there.';
+  if (/\b(play|game|start|how do i play|how to play)\b/i.test(text)) {
+    const username = context.appbeg_username ? ` as ${context.appbeg_username}` : '';
+    return `You can log in to your Royal VIP account${username} and open the Play section. Which game do you want help with?`;
   }
   return buildRegisteredSupportReply(text, context);
 }
@@ -315,16 +366,16 @@ function buildRegisteredPlayReply(text, context) {
 function buildRegisteredSupportReply(text, context) {
   const intent = detectRegisteredIntent(text);
   if (intent === 'deposit_question') {
-    return 'You can use the Load Coin option in AppBeg. Make sure the payment name matches the one registered with your account.';
+    return 'Open Load Coin in your Royal VIP account, copy your Royal VIP username, and include it with your payment.';
   }
   if (intent === 'withdrawal_question') {
-    return 'For withdrawals, open AppBeg and follow the cash-out steps. If something fails, reply Staff and our team will review it.';
+    return 'For withdrawals, open your Royal VIP account and follow the cash-out steps. If something fails, reply Staff and our team will review it.';
   }
   if (intent === 'bonus_question') {
     return 'Bonus rules depend on the offer. Tell us which bonus you mean and staff will explain the details.';
   }
   if (intent === 'login_help') {
-    return 'Use your AppBeg username and password to log in. If you forgot your credentials, reply Staff and our team will help through the reset flow.';
+    return 'Use your Royal VIP username and password to log in. If you forgot your credentials, reply Staff and our team will help through the reset flow.';
   }
   if (intent === 'needs_staff') {
     return 'Yes, staff can help you. Tell us what happened and we will check it for you.';
@@ -334,11 +385,13 @@ function buildRegisteredSupportReply(text, context) {
 
 export function formatSupportAiContextBlock(contactContext, recentMessages = '') {
   return [
+    formatSupportAiRegistrationPromptRules(contactContext),
     `Registration phase: ${contactContext.registration_phase}`,
     contactContext.staff_takeover && contactContext.underlying_registration_phase
       ? `Underlying registration phase: ${contactContext.underlying_registration_phase}`
       : null,
     `Registration status: ${contactContext.registration_status}`,
+    `AppBeg link status: ${contactContext.appbeg_link_status || 'not set'}`,
     `Current flow: ${contactContext.current_flow || 'none'}`,
     `Current step: ${contactContext.current_step || 'none'}`,
     `Payment window: ${contactContext.payment_window_status || 'none'}`,
@@ -348,8 +401,11 @@ export function formatSupportAiContextBlock(contactContext, recentMessages = '')
     `Deposit amount: ${contactContext.deposit_amount ?? 'not collected'}`,
     `AppBeg username: ${contactContext.appbeg_username || 'not collected'}`,
     `AppBeg player UID: ${contactContext.appbeg_player_uid || 'not linked'}`,
+    `AppBeg player exists in database: ${contactContext.appbeg_player_exists ? 'yes' : 'no'}`,
     `Account creation complete: ${contactContext.account_creation_complete ? 'yes' : 'no'}`,
     `Staff takeover: ${contactContext.staff_takeover ? 'yes' : 'no'}`,
     recentMessages
   ].filter(Boolean).join('\n');
 }
+
+export { formatSupportAiRegistrationPromptRules };

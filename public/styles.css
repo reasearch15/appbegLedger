@@ -1248,6 +1248,18 @@ h2 {
   background: #f0f9ff;
 }
 
+.ai-debug-context {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff7ed;
+  border: 1px dashed #fdba74;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
 .ai-generating-row {
   display: inline-flex;
   align-items: center;

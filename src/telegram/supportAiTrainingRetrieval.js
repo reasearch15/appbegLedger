@@ -16,6 +16,33 @@ export function normalizeCustomerMessage(text = '') {
     .trim();
 }
 
+export function buildTrainingLookupKey({
+  normalizedMessage,
+  wasRegistered = false,
+  registrationStep = null,
+  intent = null
+} = {}) {
+  return [
+    normalizedMessage || '',
+    wasRegistered ? 'registered' : 'unregistered',
+    registrationStep || 'none',
+    intent || 'any'
+  ].join('|');
+}
+
+export function exampleTrainingLookupKey(example) {
+  const exampleRegistered = example.was_registered === true
+    || example.was_registered === 1
+    || example.was_registered === '1';
+  return buildTrainingLookupKey({
+    normalizedMessage: example.normalized_customer_message
+      || normalizeCustomerMessage(example.customer_message),
+    wasRegistered: exampleRegistered,
+    registrationStep: example.registration_step || null,
+    intent: example.detected_intent || null
+  });
+}
+
 export function tokenizeMessage(text = '') {
   const normalized = normalizeCustomerMessage(text);
   if (!normalized) return [];
@@ -45,33 +72,36 @@ export function getApprovedFinalReply(example) {
   return reply;
 }
 
-export function isRegistrationContextCompatible(example, contactContext = {}) {
-  const exampleRegistered = example.was_registered === true
+function exampleWasRegistered(example) {
+  return example.was_registered === true
     || example.was_registered === 1
     || example.was_registered === '1';
-  const currentRegistered = Boolean(contactContext.was_registered);
+}
+
+function contactIsRegistered(contactContext = {}) {
+  return Boolean(contactContext.is_registered ?? contactContext.was_registered);
+}
+
+export function isRegistrationContextCompatible(example, contactContext = {}) {
+  const exampleRegistered = exampleWasRegistered(example);
+  const currentRegistered = contactIsRegistered(contactContext);
 
   if (exampleRegistered !== currentRegistered) {
-    const intent = String(example.detected_intent || '').trim();
-    const phase = String(contactContext.registration_phase || contactContext.underlying_registration_phase || '').trim();
-    if (REGISTRATION_SENSITIVE_INTENTS.has(intent)) return false;
-    if (intent === 'wants_registration' && currentRegistered) return false;
-    if (phase === 'registered' && !exampleRegistered) return false;
-    if (phase === 'not_registered' && exampleRegistered) return false;
-  }
-
-  if (example.registration_status && contactContext.registration_status) {
-    if (example.registration_status !== contactContext.registration_status) {
-      if (REGISTRATION_SENSITIVE_INTENTS.has(String(example.detected_intent || ''))) {
-        return false;
-      }
-    }
+    return false;
   }
 
   if (example.registration_step && contactContext.current_step) {
     if (example.registration_step !== contactContext.current_step) {
       const paymentSteps = new Set(['await_payment_done', 'waiting_for_payment_confirmation']);
       if (paymentSteps.has(example.registration_step) || paymentSteps.has(contactContext.current_step)) {
+        return false;
+      }
+    }
+  }
+
+  if (example.registration_status && contactContext.registration_status) {
+    if (example.registration_status !== contactContext.registration_status) {
+      if (REGISTRATION_SENSITIVE_INTENTS.has(String(example.detected_intent || ''))) {
         return false;
       }
     }
@@ -104,12 +134,30 @@ export function scoreTrainingExample(example, {
   const finalReply = getApprovedFinalReply(example);
   if (!finalReply) return -1;
 
+  if (!isRegistrationContextCompatible(example, contactContext)) {
+    return -1;
+  }
+
   const exampleNormalized = example.normalized_customer_message
     || normalizeCustomerMessage(example.customer_message);
+  const currentRegistered = contactIsRegistered(contactContext);
+  const lookupKey = buildTrainingLookupKey({
+    normalizedMessage,
+    wasRegistered: currentRegistered,
+    registrationStep: contactContext.current_step || contactContext.registration_step || null,
+    intent
+  });
+  const exampleKey = exampleTrainingLookupKey(example);
   let score = 0;
 
-  if (exampleNormalized && normalizedMessage && exampleNormalized === normalizedMessage) {
+  if (lookupKey === exampleKey) {
+    score += 1500;
+  } else if (exampleNormalized && normalizedMessage && exampleNormalized === normalizedMessage) {
     score += 1000;
+    if (exampleWasRegistered(example) === currentRegistered) score += 200;
+    if ((example.registration_step || 'none') === (contactContext.current_step || contactContext.registration_step || 'none')) {
+      score += 50;
+    }
   } else {
     const similarity = wordSimilarity(customerMessage, example.customer_message);
     score += Math.round(similarity * 80);
@@ -119,10 +167,14 @@ export function scoreTrainingExample(example, {
     score += 100;
   }
 
-  if (isRegistrationContextCompatible(example, contactContext)) {
-    score += 50;
+  if (exampleWasRegistered(example) === currentRegistered) {
+    score += 200;
   } else {
     return -1;
+  }
+
+  if ((example.registration_step || 'none') === (contactContext.current_step || contactContext.registration_step || 'none')) {
+    score += 50;
   }
 
   if (language && example.language && example.language === language) {
@@ -196,8 +248,9 @@ export function formatTrainingExamplesForContext(examples = []) {
       `Customer: ${example.customer_message || ''}`,
       `Staff reply: ${reply}`,
       `Intent: ${example.detected_intent || 'unknown'}`,
-      `Registered: ${example.was_registered ? 'yes' : 'no'}`
+      `Registered: ${exampleWasRegistered(example) ? 'yes' : 'no'}`,
+      `Registration step: ${example.registration_step || 'none'}`
     ].join('\n');
   });
-  return ['Approved staff training examples:', ...lines].join('\n\n');
+  return ['Approved staff training examples (matched to current user state):', ...lines].join('\n\n');
 }

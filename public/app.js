@@ -1513,6 +1513,23 @@ function quickReplyBar() {
   `;
 }
 
+function staffAiUserStateDebugLabel(draft) {
+  const entities = draft?.detected_entities || draft?.entities || {};
+  const registered = draft?.was_registered === true
+    || draft?.was_registered === 1
+    || entities.is_registered === true
+    || entities.was_registered === true;
+  const username = draft?.appbeg_username
+    || entities.appbeg_username
+    || state.contact?.appbeg_account_id
+    || null;
+  if (registered) {
+    return `User state: Registered${username ? `\nAppBeg username: ${username}` : ''}`;
+  }
+  const step = draft?.registration_step || entities.registration_step || 'none';
+  return `User state: Unregistered\nRegistration step: ${step}`;
+}
+
 function staffAiSuggestedReplyPanel() {
   if (!state.contact) return '';
   const mode = state.customerSupportAi?.mode === 'auto' ? 'auto' : 'train';
@@ -1600,6 +1617,7 @@ function staffAiSuggestedReplyPanel() {
     `;
   }
   const badOpen = Number(state.staffAiBadDraftId) === Number(draft.id);
+  const debugLabel = staffAiUserStateDebugLabel(draft);
   return `
     <section class="ai-suggested-reply-panel">
       <div class="ai-suggested-header">
@@ -1611,6 +1629,7 @@ function staffAiSuggestedReplyPanel() {
           </div>
         </div>
       </div>
+      <div class="ai-debug-context" aria-label="Staff-only AI context">${escapeHtml(debugLabel)}</div>
       ${draft.customer_message ? `
         <div class="ai-context-block">
           <span>Customer message</span>
