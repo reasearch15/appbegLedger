@@ -169,6 +169,7 @@ app.get('/api/users/:id', async (req, res) => {
 app.get('/api/contacts/:id', async (req, res) => {
   const user = await store.getUserProfile(Number(req.params.id));
   if (!user) return res.status(404).json({ error: 'Contact not found.' });
+  res.set('Cache-Control', 'no-store');
   res.json({
     contact: user,
     messages: await store.listMessagesForUser(user.id),

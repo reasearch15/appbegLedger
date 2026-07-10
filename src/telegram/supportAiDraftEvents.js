@@ -31,10 +31,19 @@ export function emitSupportAiDraftGenerating(io, contact, { draft, generationId,
 }
 
 export function emitSupportAiDraftReady(io, contact, { draft, generationId } = {}) {
-  emitSupportAiDraftEvent(io, contact, 'ready', {
+  const resolvedGenerationId = generationId || draft?.generation_id || null;
+  const payload = {
     draft,
-    generationId: generationId || draft?.generation_id || null
-  });
+    generationId: resolvedGenerationId,
+    contact_id: contact.id,
+    contactId: contact.id,
+    draft_id: draft?.id || null,
+    customer_message_id: draft?.incoming_message_id || null,
+    generation_id: resolvedGenerationId,
+    status: 'ready'
+  };
+  emitSupportAiDraftEvent(io, contact, 'ready', payload);
+  io.emit('staff-ai-draft:changed', payload);
 }
 
 export function emitSupportAiDraftStale(io, contact, { generationId } = {}) {

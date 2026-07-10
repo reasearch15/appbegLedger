@@ -61,6 +61,8 @@ let state = {
   staffAiDraft: null,
   staffAiActiveGenerationId: null,
   staffAiBadDraftId: null,
+  staffAiDraftLoading: false,
+  staffAiDraftGenerationError: null,
   allTags: [],
   quickReplies: [],
   query: '',
@@ -160,6 +162,8 @@ const STATS_REFRESH_DEBOUNCE_MS = 3000;
 const SYNC_STATUS_REFRESH_DEBOUNCE_MS = 5000;
 const REFRESH_DEDUPE_MS = 1000;
 const CONTACTS_POLL_MS = 30000;
+let staffAiDraftPollTimer = null;
+let staffAiDraftPollStartedAt = 0;
 const CONTACT_DETAIL_CACHE_MS = 5000;
 
 function escapeHtml(value) {
@@ -249,69 +253,192 @@ function getLatestIncomingMessage() {
   return null;
 }
 
-function isStaffAiDraftActionable(draft = state.staffAiDraft) {
-  if (!draft || draft.draft_status !== 'ready' || !draft.ai_draft_reply) return false;
+function normalizeStaffAiDraft(draft) {
+  if (!draft) return null;
+  const aiReply = String(draft.ai_draft_reply || draft.ai_reply || '').trim();
+  return {
+    ...draft,
+    id: draft.id != null ? Number(draft.id) : draft.id,
+    contact_id: draft.contact_id != null ? Number(draft.contact_id) : draft.contact_id,
+    incoming_message_id: draft.incoming_message_id != null ? Number(draft.incoming_message_id) : null,
+    ai_draft_reply: aiReply || draft.ai_draft_reply || null,
+    draft_status: draft.draft_status || draft.status || (aiReply ? 'ready' : 'generating'),
+    generation_id: draft.generation_id || null
+  };
+}
+
+function isDraftOlderThanLatest(draft) {
   const latest = getLatestIncomingMessage();
-  if (!latest) return false;
-  if (draft.incoming_message_id && Number(draft.incoming_message_id) !== Number(latest.id)) return false;
+  if (!draft?.incoming_message_id || !latest?.id) return false;
+  return Number(draft.incoming_message_id) < Number(latest.id);
+}
+
+function stopStaffAiDraftPolling() {
+  if (staffAiDraftPollTimer) {
+    clearInterval(staffAiDraftPollTimer);
+    staffAiDraftPollTimer = null;
+  }
+  staffAiDraftPollStartedAt = 0;
+}
+
+function startStaffAiDraftPolling(contactId) {
+  stopStaffAiDraftPolling();
+  staffAiDraftPollStartedAt = Date.now();
+  console.log('[support-ai] support_ai_ui_generating_started contact=%s', contactId);
+  staffAiDraftPollTimer = setInterval(() => {
+    void pollStaffAiDraftReady(contactId);
+  }, 1000);
+}
+
+async function pollStaffAiDraftReady(contactId) {
+  if (Number(state.selectedContactId) !== Number(contactId)) {
+    stopStaffAiDraftPolling();
+    return;
+  }
+  if (staffAiDraftPollStartedAt && Date.now() - staffAiDraftPollStartedAt > 15000) {
+    stopStaffAiDraftPolling();
+    state.staffAiDraftGenerationError = 'Draft generation timed out. Retry.';
+    state.staffAiDraftLoading = false;
+    console.log('[support-ai] support_ai_ui_generation_timeout contact=%s', contactId);
+    render();
+    return;
+  }
+  try {
+    const draft = await fetchLatestStaffAiDraft(contactId);
+    if (draft?.draft_status === 'ready' && draft.ai_draft_reply) {
+      applyReadyStaffAiDraft(draft);
+      stopStaffAiDraftPolling();
+      render();
+    }
+  } catch (error) {
+    console.warn('[support-ai] draft poll failed:', error);
+  }
+}
+
+async function fetchLatestStaffAiDraft(contactId) {
+  console.log('[support-ai] support_ai_ui_fetch_latest_started contact=%s', contactId);
+  const data = await api(`/api/contacts/${contactId}?_=${Date.now()}`, { cache: 'no-store' });
+  return normalizeStaffAiDraft(data.staffAiDraft || null);
+}
+
+function applyReadyStaffAiDraft(draft, { generationId = null } = {}) {
+  const normalized = normalizeStaffAiDraft(draft);
+  if (!normalized?.ai_draft_reply) return false;
+  if (isDraftOlderThanLatest(normalized)) {
+    console.log('[support-ai] support_ai_ui_stale_draft_rejected contact=%s draft_id=%s message_id=%s', normalized.contact_id, normalized.id, normalized.incoming_message_id);
+    return false;
+  }
+  state.staffAiDraft = {
+    ...normalized,
+    draft_status: 'ready'
+  };
+  state.staffAiActiveGenerationId = generationId || normalized.generation_id || null;
+  state.staffAiBadDraftId = null;
+  state.staffAiDraftLoading = false;
+  state.staffAiDraftGenerationError = null;
+  console.log('[support-ai] support_ai_ui_ready_draft_loaded contact=%s draft_id=%s message_id=%s', normalized.contact_id, normalized.id, normalized.incoming_message_id);
+  return true;
+}
+
+async function loadReadyStaffAiDraft(contactId, { socketDraft = null, generationId = null } = {}) {
+  stopStaffAiDraftPolling();
+  state.staffAiDraftLoading = true;
+  state.staffAiDraftGenerationError = null;
+  let draft = null;
+  try {
+    draft = await fetchLatestStaffAiDraft(contactId);
+  } catch (error) {
+    console.warn('[support-ai] ready draft fetch failed:', error);
+  }
+  if (!draft?.ai_draft_reply && socketDraft) {
+    draft = normalizeStaffAiDraft(socketDraft);
+  }
+  const applied = draft ? applyReadyStaffAiDraft(draft, { generationId }) : false;
+  if (!applied) {
+    state.staffAiDraftLoading = false;
+  }
+  return applied;
+}
+
+function isStaffAiDraftActionable(draft = state.staffAiDraft) {
+  const normalized = normalizeStaffAiDraft(draft);
+  if (!normalized || normalized.draft_status !== 'ready' || !normalized.ai_draft_reply) return false;
+  if (isDraftOlderThanLatest(normalized)) return false;
   return true;
 }
 
 function applyStaffAiDraftFromServer(draft) {
-  const latest = getLatestIncomingMessage();
-  if (!draft) {
-    if (state.staffAiDraft?.draft_status === 'generating'
-      && latest
-      && (!state.staffAiDraft.incoming_message_id || Number(state.staffAiDraft.incoming_message_id) === Number(latest.id))) {
-      return;
-    }
-    state.staffAiDraft = null;
-    state.staffAiActiveGenerationId = null;
-    return;
-  }
-  if (draft.incoming_message_id && latest && Number(draft.incoming_message_id) !== Number(latest.id)) {
+  const normalized = normalizeStaffAiDraft(draft);
+  if (!normalized?.ai_draft_reply) {
+    if (state.staffAiDraft?.draft_status === 'generating' && staffAiDraftPollTimer) return;
     if (state.staffAiDraft?.draft_status !== 'generating') {
       state.staffAiDraft = null;
       state.staffAiActiveGenerationId = null;
     }
     return;
   }
-  state.staffAiDraft = draft;
-  if (draft.generation_id) state.staffAiActiveGenerationId = draft.generation_id;
-  if (draft.draft_status !== 'ready') state.staffAiBadDraftId = null;
+  if (isDraftOlderThanLatest(normalized)) {
+    console.log('[support-ai] support_ai_ui_stale_draft_rejected contact=%s draft_id=%s', normalized.contact_id, normalized.id);
+    return;
+  }
+  applyReadyStaffAiDraft(normalized);
 }
 
 function setStaffAiDraftGenerating({ customerMessage, incomingMessageId, generationId = null } = {}) {
   state.staffAiDraft = {
     draft_status: 'generating',
     customer_message: customerMessage || '',
-    incoming_message_id: incomingMessageId || null,
+    incoming_message_id: incomingMessageId != null ? Number(incomingMessageId) : null,
     ai_draft_reply: null,
-    generation_id: generationId
+    generation_id: generationId || null
   };
+  state.staffAiDraftLoading = true;
+  state.staffAiDraftGenerationError = null;
   if (generationId) state.staffAiActiveGenerationId = generationId;
   state.staffAiBadDraftId = null;
 }
 
-function applyStaffAiDraftEvent({ draft, generationId } = {}) {
-  if (generationId
-    && state.staffAiActiveGenerationId
-    && generationId !== state.staffAiActiveGenerationId
-    && draft?.draft_status === 'ready') {
-    return false;
+async function handleStaffAiDraftSocketEvent(eventName, payload = {}) {
+  const id = normalizeContactId(payload.contactId || payload.contact_id);
+  console.log('[support-ai] support_ai_ui_socket_event_received event=%s contact=%s draft_id=%s status=%s', eventName, id, payload.draft_id || payload.draft?.id || 'n/a', payload.status || payload.draft?.draft_status || 'n/a');
+  if (!id || state.selectedContactId !== id) return;
+  contactDetailCache.delete(id);
+
+  if (eventName === 'cleared') {
+    stopStaffAiDraftPolling();
+    state.staffAiDraft = null;
+    state.staffAiActiveGenerationId = null;
+    state.staffAiBadDraftId = null;
+    state.staffAiDraftLoading = false;
+    state.staffAiDraftGenerationError = null;
+    stopStaffAiDraftPolling();
+    state.staffAiDraftLoading = false;
+    state.staffAiDraftGenerationError = null;
+    render();
+    return;
   }
-  const latest = getLatestIncomingMessage();
-  if (draft?.incoming_message_id && latest && Number(draft.incoming_message_id) !== Number(latest.id)) {
-    return false;
+
+  if (eventName === 'generating') {
+    const latest = getLatestIncomingMessage();
+    setStaffAiDraftGenerating({
+      customerMessage: payload.customerMessage || payload.draft?.customer_message || latest?.text || '',
+      incomingMessageId: payload.customer_message_id || payload.draft?.incoming_message_id || latest?.id || null,
+      generationId: payload.generation_id || payload.generationId || payload.draft?.generation_id || null
+    });
+    startStaffAiDraftPolling(id);
+    render();
+    return;
   }
-  if (draft) {
-    state.staffAiDraft = draft;
-    if (generationId || draft.generation_id) {
-      state.staffAiActiveGenerationId = generationId || draft.generation_id;
+
+  if (eventName === 'ready' || eventName === 'changed') {
+    const generationId = payload.generation_id || payload.generationId || payload.draft?.generation_id || null;
+    const socketDraft = payload.draft || null;
+    const status = payload.status || socketDraft?.draft_status;
+    if (status === 'ready' || socketDraft?.ai_draft_reply || socketDraft?.ai_reply) {
+      await loadReadyStaffAiDraft(id, { socketDraft, generationId });
+      render();
     }
-    if (draft.draft_status !== 'ready') state.staffAiBadDraftId = null;
   }
-  return true;
 }
 
 function applyContactDetail(detail) {
@@ -361,7 +488,8 @@ async function api(path, options = {}) {
     response = await fetch(path, {
       ...options,
       headers,
-      credentials: 'include'
+      credentials: 'include',
+      cache: options.cache || 'no-store'
     });
   } catch (networkError) {
     const error = new ApiError({
@@ -485,6 +613,12 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
   if (changed) {
     state.registrationWizard = null;
     state.appbegCreateState = null;
+    stopStaffAiDraftPolling();
+    state.staffAiDraft = null;
+    state.staffAiActiveGenerationId = null;
+    state.staffAiBadDraftId = null;
+    state.staffAiDraftLoading = false;
+    state.staffAiDraftGenerationError = null;
   }
   if (!changed && state.contact?.id === id) {
     render();
@@ -1413,7 +1547,21 @@ function staffAiSuggestedReplyPanel() {
   const draft = state.staffAiDraft;
   const latestIncoming = getLatestIncomingMessage();
   const customerMessage = draft?.customer_message || latestIncoming?.text || '';
-  const isGenerating = draft?.draft_status === 'generating';
+
+  if (state.staffAiDraftGenerationError) {
+    return `
+      <section class="ai-suggested-reply-panel is-empty">
+        <div class="ai-suggested-header">
+          <div>
+            <div class="card-title">AI Suggested Reply</div>
+            <div class="subtle">${escapeHtml(state.staffAiDraftGenerationError)}</div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  const isGenerating = draft?.draft_status === 'generating' || state.staffAiDraftLoading;
 
   if (isGenerating) {
     return `
@@ -2730,6 +2878,9 @@ async function selectVisibleIfNeeded() {
     state.staffAiDraft = null;
     state.staffAiActiveGenerationId = null;
     state.staffAiBadDraftId = null;
+    state.staffAiDraftLoading = false;
+    state.staffAiDraftGenerationError = null;
+    stopStaffAiDraftPolling();
   }
   render();
 }
@@ -2994,9 +3145,13 @@ async function sendStaffAiTrainingReply(text, replyUsed) {
       })
     });
     state.draft = '';
+    stopStaffAiDraftPolling();
     state.staffAiDraft = null;
     state.staffAiActiveGenerationId = null;
     state.staffAiBadDraftId = null;
+    state.staffAiDraftLoading = false;
+    state.staffAiDraftGenerationError = null;
+    stopStaffAiDraftPolling();
     contactDetailCache.delete(Number(state.selectedContactId));
     await refreshContacts({ force: true, reason: 'ai training reply sent' });
     await refreshSelectedContact({ force: true, reason: 'ai training reply sent' });
@@ -3282,55 +3437,22 @@ socket.on('auto-registration-bot:changed', (payload = {}) => {
   if (state.section === 'contacts') render();
 });
 
-socket.on('staff-ai-draft-cleared', ({ contactId } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (state.selectedContactId !== id) return;
-  state.staffAiDraft = null;
-  state.staffAiActiveGenerationId = null;
-  state.staffAiBadDraftId = null;
-  if (id) contactDetailCache.delete(id);
-  render();
+socket.on('staff-ai-draft-cleared', (payload = {}) => {
+  void handleStaffAiDraftSocketEvent('cleared', payload);
 });
 
-socket.on('staff-ai-draft-generating', ({ contactId, generationId, draft, customerMessage } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (state.selectedContactId !== id) return;
-  if (id) contactDetailCache.delete(id);
-  const latest = getLatestIncomingMessage();
-  setStaffAiDraftGenerating({
-    customerMessage: customerMessage || draft?.customer_message || latest?.text || '',
-    incomingMessageId: draft?.incoming_message_id || latest?.id || null,
-    generationId: generationId || draft?.generation_id || null
-  });
-  render();
+socket.on('staff-ai-draft-generating', (payload = {}) => {
+  void handleStaffAiDraftSocketEvent('generating', payload);
 });
 
-socket.on('staff-ai-draft-ready', ({ contactId, generationId, draft } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (state.selectedContactId !== id) return;
-  if (id) contactDetailCache.delete(id);
-  if (!applyStaffAiDraftEvent({ draft, generationId })) return;
-  render();
-  console.log('[support-ai] support_ai_draft_visible client contact=%s generation_id=%s', id, generationId || draft?.generation_id || 'n/a');
+socket.on('staff-ai-draft-ready', (payload = {}) => {
+  void handleStaffAiDraftSocketEvent('ready', payload);
 });
 
 socket.on('staff-ai-draft-stale', () => {});
 
-socket.on('staff-ai-draft:changed', async ({ contactId, generationId, draft } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (id) contactDetailCache.delete(id);
-  if (state.selectedContactId === id) {
-    if (draft && applyStaffAiDraftEvent({ draft, generationId })) {
-      render();
-      return;
-    }
-    try {
-      await refreshSelectedContact({ force: true, reason: 'staff ai draft changed' });
-      render();
-    } catch (error) {
-      console.warn('[support-ai] draft refresh failed:', error);
-    }
-  }
+socket.on('staff-ai-draft:changed', (payload = {}) => {
+  void handleStaffAiDraftSocketEvent('changed', payload);
 });
 
 socket.on('customer-support-ai-mode:changed', async (payload = {}) => {
@@ -3387,10 +3509,14 @@ socket.on('message:new', async ({ contactId, userId } = {}) => {
         customerMessage: latest.text,
         incomingMessageId: latest.id
       });
+      startStaffAiDraftPolling(id);
     } else {
+      stopStaffAiDraftPolling();
       state.staffAiDraft = null;
       state.staffAiActiveGenerationId = null;
       state.staffAiBadDraftId = null;
+      state.staffAiDraftLoading = false;
+      state.staffAiDraftGenerationError = null;
     }
     render();
   } catch (error) {
