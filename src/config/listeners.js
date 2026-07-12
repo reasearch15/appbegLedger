@@ -1,8 +1,8 @@
 export const listenerRoles = {
   chatAccount: {
     key: 'CHAT_TELEGRAM_ACCOUNT',
-    value: process.env.CHAT_TELEGRAM_ACCOUNT || process.env.CHAT_ACCOUNT_LISTENER || 'business_telegram_account',
-    description: 'Customer private chat listener (Telethon business account session).'
+    value: 'disabled',
+    description: 'Personal Telegram private-chat sync is disabled. User contacts are created only through the official Bot API.'
   },
   paymentGroup: {
     key: 'PAYMENT_TELEGRAM_GROUP',

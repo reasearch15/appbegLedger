@@ -69,7 +69,7 @@ async function run() {
   const first = await decideBotReply({ store, contact, messageText: 'hi' });
   assertEqual(first.kind, 'welcome');
   assertEqual(first.markWelcomeSent, true);
-  assertEqual(Boolean(first.replies[0].buttons), false);
+  assertEqual(Boolean(first.replies[0].buttons), true);
   assertIncludes(first.replies[0].text, 'Register');
   assertIncludes(first.replies[0].text, 'Staff');
   console.log('ok hello triggers welcome when no active flow');

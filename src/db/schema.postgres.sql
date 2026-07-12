@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS telegram_users (
   telegram_sync_source TEXT,
   telegram_source_account_id TEXT,
   telegram_source_account_username TEXT,
+  active_messaging_source TEXT NOT NULL DEFAULT 'bot_api'
+    CHECK (active_messaging_source IN ('bot_api', 'none')),
   registration_method TEXT,
   bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   bot_paused BOOLEAN NOT NULL DEFAULT FALSE,
@@ -407,6 +409,13 @@ ALTER TABLE coadmin_settings
   ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_at TEXT;
 ALTER TABLE coadmin_settings
   ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_by TEXT;
+ALTER TABLE telegram_users
+  ADD COLUMN IF NOT EXISTS active_messaging_source TEXT NOT NULL DEFAULT 'bot_api';
+ALTER TABLE telegram_users
+  DROP CONSTRAINT IF EXISTS telegram_users_active_messaging_source_check;
+ALTER TABLE telegram_users
+  ADD CONSTRAINT telegram_users_active_messaging_source_check
+  CHECK (active_messaging_source IN ('bot_api', 'none'));
 
 CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
   id BIGSERIAL PRIMARY KEY,

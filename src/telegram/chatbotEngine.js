@@ -45,8 +45,40 @@ export const PAYMENT_APP_OPTIONS = [
 ];
 
 export const WELCOME_BUTTONS = [
-  [{ label: '📝 Register', action: 'register', text: '📝 Register', data: 'register' }],
-  [{ label: '💬 Talk to Staff', action: 'staff', text: '💬 Talk to Staff', data: 'staff' }]
+  [{ label: 'Register', action: 'bot:register', text: 'Register', data: 'bot:register' }],
+  [
+    { label: 'How It Works', action: 'bot:how_it_works', text: 'How It Works', data: 'bot:how_it_works' },
+    { label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }
+  ]
+];
+
+export const IN_PROGRESS_BUTTONS = [
+  [{ label: 'Continue Registration', action: 'bot:continue_registration', text: 'Continue Registration', data: 'bot:continue_registration' }],
+  [
+    { label: 'Restart Registration', action: 'bot:restart_registration', text: 'Restart Registration', data: 'bot:restart_registration' },
+    { label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }
+  ]
+];
+
+export const PAYMENT_WAITING_BUTTONS = [
+  [{ label: 'Payment Instructions', action: 'bot:payment_instructions', text: 'Payment Instructions', data: 'bot:payment_instructions' }],
+  [
+    { label: 'I Have Paid', action: 'bot:i_have_paid', text: 'I Have Paid', data: 'bot:i_have_paid' },
+    { label: 'Change Payment Details', action: 'bot:change_payment_details', text: 'Change Payment Details', data: 'bot:change_payment_details' }
+  ],
+  [{ label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }]
+];
+
+export const REGISTERED_BUTTONS = [
+  [
+    { label: 'Deposit', action: 'bot:deposit', text: 'Deposit', data: 'bot:deposit' },
+    { label: 'Cash Out', action: 'bot:cashout', text: 'Cash Out', data: 'bot:cashout' }
+  ],
+  [
+    { label: 'My Account', action: 'bot:my_account', text: 'My Account', data: 'bot:my_account' },
+    { label: 'My Games', action: 'bot:my_games', text: 'My Games', data: 'bot:my_games' }
+  ],
+  [{ label: 'Support', action: 'staff:takeover', text: 'Support', data: 'staff:takeover' }]
 ];
 
 export const REVIEW_BUTTONS = [
@@ -133,6 +165,7 @@ export function normalizeCallbackAction(action) {
   if (!raw) return '';
   const aliases = {
     register: 'bot:register',
+    'flow:registration_info': 'bot:register',
     staff: 'staff:takeover',
     'talk_to_staff': 'staff:takeover',
     'bot:talk_to_staff': 'staff:takeover',
@@ -220,6 +253,48 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
   if (action === 'staff:takeover' || action === 'bot:talk_to_staff') {
     return talkToStaffDecision();
+  }
+
+  if (action === 'bot:how_it_works') {
+    return {
+      kind: 'how_it_works',
+      replies: [{
+        text: [
+          'Here is how registration works:',
+          '1. Choose your payment method.',
+          '2. Send your first deposit.',
+          '3. We match the payment.',
+          '4. You choose your AppBeg username and password.',
+          '5. Your account is created after verification.'
+        ].join('\n'),
+        buttons: WELCOME_BUTTONS
+      }],
+      statePatch: null,
+      escalate: false
+    };
+  }
+
+  if (action === 'bot:continue_registration') {
+    if (isRegistrationFlow(flow)) {
+      return await continueRegistrationDecision({
+        store,
+        contact,
+        text: '',
+        action: null,
+        step: normalizedStep,
+        info,
+        flow,
+        automationState
+      });
+    }
+    return await startRegistrationDecision(contact, info, store, { resumed: true });
+  }
+
+  if (action === 'bot:restart_registration') {
+    if (store.expireActiveRegistrationPaymentWindows) {
+      await store.expireActiveRegistrationPaymentWindows(contact.id, { suppressNotification: true }).catch(() => null);
+    }
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
   }
 
   if (action === 'bot:stop' || action === 'bot:cancel') {
@@ -362,9 +437,8 @@ function welcomeDecision(contact, info, automationState = null, { forceFull = fa
   return {
     kind: throttled ? 'welcome_nudge' : 'welcome',
     replies: [{
-      text
-      // Text-only welcome: Telethon user/business sessions cannot render
-      // Bot-style inline callback buttons reliably.
+      text,
+      buttons: WELCOME_BUTTONS
     }],
     statePatch: {
       currentFlow: 'bot_registration',
@@ -402,11 +476,18 @@ function decideRegisteredSupport({ text, action }) {
     return talkToStaffDecision();
   }
 
-  if (SUPPORT_PATTERNS.test(text)) {
+  if (['bot:deposit', 'bot:cashout', 'bot:my_account', 'bot:my_games'].includes(action)) {
+    const label = {
+      'bot:deposit': 'deposit',
+      'bot:cashout': 'cash out',
+      'bot:my_account': 'account',
+      'bot:my_games': 'games'
+    }[action];
     return {
-      kind: 'registered_support',
+      kind: `registered_${label.replaceAll(' ', '_')}`,
       replies: [{
-        text: 'You’re all set on registration. Tell me what you need help with (deposit, cash out, login hiccup—whatever).\n\nReply Staff anytime to reach a human teammate.'
+        text: `Staff can help with ${label}. Tell us what you need and we will take it from here.`,
+        buttons: REGISTERED_BUTTONS
       }],
       statePatch: null,
       escalate: false
@@ -416,7 +497,8 @@ function decideRegisteredSupport({ text, action }) {
   return {
     kind: 'registered_support',
     replies: [{
-      text: 'You’re all set on registration. Tell me what you need help with.\n\nReply Staff anytime to reach a human teammate.'
+      text: 'You are all set on registration. Tell me what you need help with.',
+      buttons: REGISTERED_BUTTONS
     }],
     statePatch: null,
     escalate: false
@@ -706,10 +788,30 @@ async function continueRegistrationDecision({ store, contact, text, action, step
     const offTopic = registrationOffTopicGuard(text, awaitPrompt, info, 'await_payment_done');
     if (offTopic) return offTopic;
 
-    if (!isDoneCommand(text)) {
+    if (action === 'bot:payment_instructions') {
+      return {
+        kind: 'registration_payment_instructions',
+        replies: [{ text: awaitPrompt, buttons: PAYMENT_WAITING_BUTTONS }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'payment_instructions_reshown' }
+      };
+    }
+
+    if (action === 'bot:change_payment_details') {
+      return {
+        kind: 'registration_change_payment_details',
+        replies: [{ text: paymentPrompt }],
+        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'payment_details_change_requested' }
+      };
+    }
+
+    if (!isDoneCommand(text) && action !== 'bot:i_have_paid') {
       return {
         kind: 'registration_await_payment_done',
-        replies: [{ text: awaitPrompt }],
+        replies: [{ text: awaitPrompt, buttons: PAYMENT_WAITING_BUTTONS }],
         statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
         escalate: false,
         logEvent: { event: 'flow_step', step: 'await_payment_done' }

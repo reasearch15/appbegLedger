@@ -114,7 +114,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
             language_code = ?, phone_number = COALESCE(?, phone_number),
             presence_status = COALESCE(?, presence_status),
             last_online_at = COALESCE(?, last_online_at),
-            is_bot = ?, last_seen = ?, updated_at = ?
+            is_bot = ?, telegram_sync_source = 'bot_api',
+            active_messaging_source = 'bot_api',
+            last_seen = ?, updated_at = ?
         WHERE telegram_id = ?
       `).run(
         rawUser.username ?? null,
@@ -125,7 +127,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         rawUser.phone_number ?? rawUser.phone ?? null,
         rawUser.presence_status ?? null,
         rawUser.last_online_at ?? null,
-        Boolean(rawUser.is_bot),
+        sql.boolParam(Boolean(rawUser.is_bot)),
         seenAt,
         seenAt,
         telegramId
@@ -136,9 +138,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const result = await db.prepare(`
       INSERT INTO telegram_users (
         telegram_id, username, first_name, last_name, display_name, language_code,
-        phone_number, presence_status, last_online_at, is_bot, first_seen, last_seen, updated_at
+        phone_number, presence_status, last_online_at, is_bot, telegram_sync_source,
+        active_messaging_source, first_seen, last_seen, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'bot_api', 'bot_api', ?, ?, ?)
     `).run(
       telegramId,
       rawUser.username ?? null,
@@ -149,7 +152,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       rawUser.phone_number ?? rawUser.phone ?? null,
       rawUser.presence_status ?? null,
       rawUser.last_online_at ?? null,
-      Boolean(rawUser.is_bot),
+      sql.boolParam(Boolean(rawUser.is_bot)),
       seenAt,
       seenAt,
       seenAt
@@ -361,18 +364,23 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(localMessageId, nowIso(), outboundId);
   }
 
-  async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message' }) {
+  async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message', action = null }) {
     if (incomingTelegramMessageId == null || incomingTelegramMessageId === '') return null;
+    const actionClause = action ? 'AND action = ?' : '';
+    const params = action
+      ? [contactId, jobType, incomingTelegramMessageId, action]
+      : [contactId, jobType, incomingTelegramMessageId];
     return await db.prepare(`
       SELECT *
       FROM bot_jobs
       WHERE contact_id = ?
         AND job_type = ?
         AND incoming_telegram_message_id = ?
+        ${actionClause}
         AND status IN ('pending', 'processing', 'completed')
       ORDER BY id DESC
       LIMIT 1
-    `).get(contactId, jobType, incomingTelegramMessageId);
+    `).get(...params);
   }
 
   async function createBotJob({
@@ -384,13 +392,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     inputText = '',
     action = null
   }) {
-    // Dedupe by Telegram message_id so the same inbound event cannot create duplicate replies.
-    // Different message_ids for the same contact must each get their own job.
-    if (jobType === 'inbound_message' && incomingTelegramMessageId != null && incomingTelegramMessageId !== '') {
+    // Dedupe by Telegram message_id / callback action so the same Telegram
+    // update cannot create duplicate replies or duplicate registration actions.
+    if ((jobType === 'inbound_message' || jobType === 'callback_action') && incomingTelegramMessageId != null && incomingTelegramMessageId !== '') {
       const existing = await findExistingBotJobForTelegramMessage({
         contactId,
         incomingTelegramMessageId,
-        jobType
+        jobType,
+        action: jobType === 'callback_action' ? action : null
       });
       if (existing) {
         return { ...existing, duplicate: true };
@@ -1931,6 +1940,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       appbeg_creation_complete: true,
       ready_to_create_player: false
     };
+    delete mergedInfo.appbeg_password;
+    mergedInfo.appbeg_password_redacted_at = nowIso();
     await updateRegistrationInfo(userId, mergedInfo, actorName);
     await db.prepare(`
       UPDATE telegram_users
@@ -2723,18 +2734,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   }
 
   async function getContactPreferredMessageSource(telegramUserId) {
-    const user = await db.prepare('SELECT telegram_sync_source FROM telegram_users WHERE id = ?').get(telegramUserId);
-    if (user?.telegram_sync_source === 'business_account') {
-      return 'business_account';
-    }
-    const businessCount = (await db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM messages
-      WHERE telegram_user_id = ? AND source = 'business_account'
-    `).get(telegramUserId))?.count ?? 0;
-    if (businessCount > 0) {
-      return 'business_account';
-    }
+    const user = await db.prepare('SELECT active_messaging_source, telegram_sync_source FROM telegram_users WHERE id = ?').get(telegramUserId);
+    if (!user) return 'none';
+    if (user.active_messaging_source === 'none') return 'none';
     return 'bot_api';
   }
 
@@ -4145,6 +4147,7 @@ async function migrate(db) {
     ['telegram_sync_source', 'TEXT'],
     ['telegram_source_account_id', 'TEXT'],
     ['telegram_source_account_username', 'TEXT'],
+    ['active_messaging_source', "TEXT NOT NULL DEFAULT 'bot_api'"],
     ['registration_method', 'TEXT'],
     ['bot_enabled', 'INTEGER NOT NULL DEFAULT 1'],
     ['bot_paused', 'INTEGER NOT NULL DEFAULT 0'],
@@ -4490,16 +4493,16 @@ async function migrate(db) {
   await db.exec('CREATE INDEX IF NOT EXISTS idx_staff_ai_training_approved_sent ON staff_ai_training_examples(approved, sent_at DESC)');
   await db.exec(`
     UPDATE staff_ai_training_examples
-    SET approved = ${sql.boolTrue},
+    SET approved = 1,
         feedback = COALESCE(feedback, reply_used, CASE WHEN was_edited = 0 THEN 'good' ELSE 'bad' END),
         ai_reply_rejected = CASE
-          WHEN COALESCE(feedback, reply_used) = 'bad' THEN ${sql.boolTrue}
-          WHEN was_edited = 1 AND COALESCE(feedback, reply_used) IS NULL THEN ${sql.boolTrue}
-          ELSE ${sql.boolFalse}
+          WHEN COALESCE(feedback, reply_used) = 'bad' THEN 1
+          WHEN was_edited = 1 AND COALESCE(feedback, reply_used) IS NULL THEN 1
+          ELSE 0
         END
     WHERE sent_at IS NOT NULL
       AND TRIM(COALESCE(final_staff_reply, staff_reply, '')) != ''
-      AND approved = ${sql.boolFalse}
+      AND approved = 0
   `);
 
   await db.exec(`

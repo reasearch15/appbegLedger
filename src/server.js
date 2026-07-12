@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -53,6 +54,32 @@ const io = new SocketIOServer(server, {
 });
 let store;
 let appbegStore;
+
+function getSyncToken() {
+  return process.env.SYNC_INTERNAL_TOKEN || process.env.SYNC_NOTIFY_TOKEN || 'change_this_local_sync_token';
+}
+
+function hasValidSyncToken(req) {
+  const expected = String(getSyncToken() || '');
+  const provided = String(req.get('X-Sync-Token') || '');
+  if (!expected || !provided) return false;
+  const expectedBuffer = Buffer.from(expected);
+  const providedBuffer = Buffer.from(provided);
+  return expectedBuffer.length === providedBuffer.length
+    && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+}
+
+function redactRegistrationSecrets(value) {
+  if (!value || typeof value !== 'object') return value;
+  const copy = Array.isArray(value) ? [...value] : { ...value };
+  if (copy.registration_info && typeof copy.registration_info === 'object') {
+    copy.registration_info = { ...copy.registration_info };
+    if (copy.registration_info.appbeg_password) {
+      copy.registration_info.appbeg_password = '[redacted]';
+    }
+  }
+  return copy;
+}
 
 async function initStore() {
   const dbConfig = resolveDatabaseConfig();
@@ -181,7 +208,7 @@ app.get('/api/contacts/:id', async (req, res) => {
     timeline: await store.listTimelineForUser(user.id),
     tags: await store.listTags(),
     quickReplies: await store.listQuickReplies(),
-    automationState: await store.getAutomationState(user.id),
+    automationState: redactRegistrationSecrets(await store.getAutomationState(user.id)),
     automationLogs: await store.listAutomationLogsForUser(user.id),
     staffAiDraft: await store.getLatestStaffAiTrainingDraftForContact(user.id)
   });
@@ -658,81 +685,14 @@ app.post('/api/deposit-events/:id/cancel', async (req, res) => {
 });
 
 app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
-  if (req.get('X-Sync-Token') !== (process.env.SYNC_NOTIFY_TOKEN || 'change_this_local_sync_token')) {
+  if (!hasValidSyncToken(req)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
   const payload = req.body?.payload || {};
   const notifyType = req.body?.type || 'unknown';
 
-  try {
-    const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
-
-    if (req.body?.type === 'message' && payload.contactId && payload.direction === 'incoming' && payload.text) {
-      const user = await store.getUserProfile(payload.contactId);
-      if (user) {
-        console.log(`[chatbot] inbound message saved contact=${user.id} telegram_message_id=${payload.telegramMessageId || 'n/a'} text_len=${String(payload.text || '').length}`);
-        const messageId = await store.findLatestIncomingMessageId(user.id, payload.telegramMessageId || null);
-        const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
-          CHATBOT_ENABLED,
-          contact: user,
-          sentAt: payload.sentAt || payload.messageDate || null,
-          enqueueParams: {
-            contactId: user.id,
-            telegramUserId: user.telegram_id,
-            messageId,
-            incomingTelegramMessageId: payload.telegramMessageId || null,
-            jobType: 'inbound_message',
-            inputText: payload.text
-          }
-        });
-        if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
-          const autoBot = await store.getAutoRegistrationBotSettings();
-          if (autoBot.enabled) {
-            console.log(`[chatbot] legacy_automation_fallback_suppressed contact=${user.id} ai_mode=${user.ai_mode || 'train'}`);
-          }
-        } else if (!enqueueResult.enqueued) {
-          console.log(`[chatbot] bot job skipped reason=${enqueueResult.reason || 'inactive'} contact=${user.id}`);
-        }
-      }
-    }
-
-    if (req.body?.type === 'callback' && payload.contactId && payload.action) {
-      const user = await store.getUserProfile(payload.contactId);
-      if (user) {
-        const action = payload.action;
-        const callbackMessageId = payload.messageId || payload.telegramMessageId || null;
-        let callbackSentAt = payload.sentAt || null;
-        if (!callbackSentAt && callbackMessageId) {
-          callbackSentAt = await store.getIncomingMessageSentAt(user.id, callbackMessageId);
-        }
-        const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
-          CHATBOT_ENABLED,
-          contact: user,
-          sentAt: callbackSentAt,
-          requireChatbotAction: true,
-          enqueueParams: {
-            contactId: user.id,
-            telegramUserId: user.telegram_id,
-            incomingTelegramMessageId: callbackMessageId,
-            jobType: 'callback_action',
-            inputText: '',
-            action
-          }
-        });
-        if (!enqueueResult.enqueued && !user.bot_paused && !user.needs_staff_review) {
-          const autoBot = await store.getAutoRegistrationBotSettings();
-          if (autoBot.enabled && !isChatbotButtonAction(action)) {
-            console.log(`[chatbot] legacy_callback_fallback_suppressed contact=${user.id} action=${action} ai_mode=${user.ai_mode || 'train'}`);
-          }
-        } else if (enqueueResult.enqueued) {
-          console.log(`[chatbot] callback_received contact=${user.id} action=${action}`);
-        }
-      }
-    }
-  } catch (error) {
-    console.error('Account sync automation failed:', error.message);
-  }
+  console.log(`[account-sync] ignored notify type=${notifyType}; personal Telegram account sync is disabled.`);
 
   const affectsContacts = Boolean(payload.contactId || notifyType === 'message' || notifyType === 'callback');
   const affectsStats = notifyType === 'message';
@@ -758,7 +718,7 @@ app.post('/api/internal/telegram-account-sync/notify', async (req, res) => {
 });
 
 app.post('/api/internal/payment-sync/notify', async (req, res) => {
-  if (req.get('X-Sync-Token') !== (process.env.SYNC_NOTIFY_TOKEN || 'change_this_local_sync_token')) {
+  if (!hasValidSyncToken(req)) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -1124,53 +1084,18 @@ async function sendTelegramMessage(req, res) {
     return res.status(409).json({ error: 'An identical send request is already in progress.' });
   }
 
-  const preferredSource = await store.getContactPreferredMessageSource(user.id);
-  const accountSyncEnabled = process.env.TELEGRAM_ACCOUNT_SYNC_ENABLED === 'true';
   const botEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN && globalThis.telegramBot);
+  const preferredSource = await store.getContactPreferredMessageSource(user.id);
 
   try {
     let response;
     let storedMessageId = null;
 
-    if (preferredSource === 'business_account' && accountSyncEnabled) {
-      const temporaryTelegramMessageId = -Number(`${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
-      const stored = await store.storeOutgoingMessage({
-        telegramUserId: user.id,
-        telegramMessageId: temporaryTelegramMessageId,
-        text,
-        payload: {
-          queued: true,
-          clientRequestId: clientRequestId || null,
-          sync_kind: 'queued',
-          source: 'business_account'
-        },
-        senderType: 'staff',
-        staffName: req.body.staffName || 'Staff',
-        source: 'business_account',
-        sentAt: new Date().toISOString()
-      });
-      storedMessageId = stored.messageId;
-      const outbound = await store.queueTelegramOutboundMessage({
-        contactId: user.id,
-        telegramUserId: user.telegram_id,
-        body: text,
-        localMessageId: storedMessageId,
-        clientRequestId
-      });
-      console.log(`[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id}`);
-      await store.db.prepare(`
-        INSERT INTO sync_state (key, value, updated_at)
-        VALUES ('outbound_queue:nudge', ?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-      `).run(String(outbound.id), new Date().toISOString());
-      response = {
-        ok: true,
-        source: 'business_account',
-        queued: true,
-        outboundId: outbound.id,
-        messageId: storedMessageId
-      };
-    } else if (botEnabled) {
+    if (preferredSource !== 'bot_api') {
+      return res.status(400).json({ error: 'This contact is not available through the official Bot API.' });
+    }
+
+    if (botEnabled) {
       const telegramResponse = await globalThis.telegramBot.telegram.sendMessage(user.telegram_id, text);
       const stored = await store.storeOutgoingMessage({
         telegramUserId: user.id,
@@ -1183,10 +1108,6 @@ async function sendTelegramMessage(req, res) {
       });
       storedMessageId = stored.messageId;
       response = { ok: true, source: 'bot_api', messageId: storedMessageId };
-    } else if (preferredSource === 'business_account') {
-      return res.status(400).json({
-        error: 'This contact uses the business Telegram account. Enable TELEGRAM_ACCOUNT_SYNC_ENABLED and run npm run telegram:login.'
-      });
     } else {
       return res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN is required to send Telegram messages.' });
     }

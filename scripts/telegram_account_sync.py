@@ -34,6 +34,7 @@ SYNC_ACCOUNT = {"id": None, "username": None}
 PROFILE_PHOTOS_ENABLED = False
 DEBUG = os.getenv("DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG = os.getenv("DEBUG", "").strip().lower() in ("1", "true", "yes")
+PERSONAL_PRIVATE_SYNC_DISABLED = True
 
 
 def now_iso():
@@ -82,6 +83,20 @@ def log_sync(db, event_type, message, level="info", metadata=None, commit=True):
 def log_debug(db, event_type, message, metadata=None, commit=False):
     if DEBUG:
         log_sync(db, event_type, message, metadata=metadata, commit=commit)
+
+
+def personal_private_sync_disabled_reason():
+    return (
+        "Personal Telegram private-chat sync is permanently disabled. "
+        "Use TELEGRAM_BOT_TOKEN / the official BotFather bot for user contacts."
+    )
+
+
+def is_personal_private_sync_enabled():
+    # Fail closed by design. This worker must never import or process PeerUser
+    # private chats, even if launched directly or TELEGRAM_ACCOUNT_SYNC_ENABLED
+    # is accidentally set to true.
+    return False
 
 
 def database_label(db):
@@ -589,6 +604,8 @@ def set_checkpoint(db, telegram_id, message_id):
 
 
 async def sync_dialog(client, db, entity, full_import=False):
+    if not is_personal_private_sync_enabled():
+        return 0, 0
     if not isinstance(entity, User) or entity.bot or entity.deleted:
         return 0, 0
 
@@ -675,6 +692,12 @@ async def sync_dialog(client, db, entity, full_import=False):
 
 
 async def initial_import(client, db):
+    if not is_personal_private_sync_enabled():
+        update_sync_state(db, status="disabled", last_error=None)
+        log_sync(db, "private_sync_disabled", "Private dialog import skipped. Personal Telegram sync is disabled.")
+        notify_node("disabled", {"reason": "personal_private_sync_disabled"})
+        return
+
     contacts = 0
     messages = 0
     update_sync_state(db, status="importing", last_error=None)
@@ -721,8 +744,8 @@ async def initial_import(client, db):
 
 
 def credentials():
-    api_id = os.getenv("TELEGRAM_ACCOUNT_API_ID") or os.getenv("PAYMENT_TELEGRAM_API_ID")
-    api_hash = os.getenv("TELEGRAM_ACCOUNT_API_HASH") or os.getenv("PAYMENT_TELEGRAM_API_HASH")
+    api_id = os.getenv("TELEGRAM_ACCOUNT_API_ID")
+    api_hash = os.getenv("TELEGRAM_ACCOUNT_API_HASH")
     if not api_id or not api_hash:
         raise RuntimeError("TELEGRAM_ACCOUNT_API_ID and TELEGRAM_ACCOUNT_API_HASH are required.")
     return int(api_id), api_hash
@@ -1313,6 +1336,14 @@ async def sync_forever():
     db = connect_db()
     ensure_checkpoint_storage(db)
     ensure_outbound_queue_storage(db)
+    if not is_personal_private_sync_enabled():
+        update_sync_state(db, status="disabled", last_error=None)
+        log_sync(db, "private_sync_disabled", personal_private_sync_disabled_reason())
+        print("[account-sync] Personal Telegram private-chat sync is disabled; worker exiting without importing contacts.", flush=True)
+        notify_node("disabled", {"reason": "personal_private_sync_disabled"})
+        db.close()
+        return
+
     backfilled = backfill_typed_checkpoints(db)
     counts = checkpoint_counts(db)
     update_sync_state(db, status="starting", last_started_at=now_iso(), last_error=None)
@@ -1334,6 +1365,8 @@ async def sync_forever():
     @client.on(events.NewMessage)
     async def on_new_message(event):
         try:
+            if not is_personal_private_sync_enabled():
+                return
             if not isinstance(event.message.peer_id, PeerUser):
                 return
             entity = await event.get_chat()
@@ -1382,6 +1415,8 @@ async def sync_forever():
     @client.on(events.CallbackQuery)
     async def on_callback(event):
         try:
+            if not is_personal_private_sync_enabled():
+                return
             if not isinstance(event.peer, PeerUser):
                 return
             entity = await event.get_chat()

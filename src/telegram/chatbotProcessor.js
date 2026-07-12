@@ -3,7 +3,8 @@ import {
   decideBotReply,
   isBotActiveForContact,
   isChatbotButtonAction,
-  normalizeCallbackAction
+  normalizeCallbackAction,
+  PAYMENT_WAITING_BUTTONS
 } from './chatbotEngine.js';
 import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
@@ -111,6 +112,14 @@ async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot 
     user: contact,
     text: caption,
     mediaPath: qr.file_path,
+    bot: bot || globalThis.telegramBot || null
+  });
+
+  await queueBotReply({
+    store,
+    user: contact,
+    text: `When you have sent your ${sendPaymentQr.paymentMethodName || 'payment'}, press I Have Paid.`,
+    buttons: PAYMENT_WAITING_BUTTONS,
     bot: bot || globalThis.telegramBot || null
   });
 

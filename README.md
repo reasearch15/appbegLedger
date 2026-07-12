@@ -22,22 +22,25 @@ npm start
 
 If `TELEGRAM_BOT_TOKEN` is missing, the dashboard and API still run, but the Telegram listener is disabled.
 
-## Business Telegram Account Sync
+## Telegram Architecture
 
-This uses Telethon and is separate from the Telegram Bot API listener.
+User contacts are created only when a person interacts with the official BotFather bot configured by `TELEGRAM_BOT_TOKEN`.
 
-1. Set `TELEGRAM_ACCOUNT_API_ID`, `TELEGRAM_ACCOUNT_API_HASH`, and `TELEGRAM_ACCOUNT_SESSION` in `.env`.
-2. Run the interactive login once:
+Personal Telegram private-chat sync is disabled at startup and in `scripts/telegram_account_sync.py`. Do not enable `TELEGRAM_ACCOUNT_SYNC_ENABLED` for user support or registration.
 
-```bash
-npm run telegram:login
+Payment notifications remain separate. Configure the payment group listener with:
+
+```env
+PAYMENT_TELEGRAM_SYNC_ENABLED=true
+PAYMENT_TELEGRAM_API_ID=...
+PAYMENT_TELEGRAM_API_HASH=...
+PAYMENT_TELEGRAM_SESSION=./data/appbeg-payment.session
+PAYMENT_TELEGRAM_GROUP=...
 ```
 
-3. Set `TELEGRAM_ACCOUNT_SYNC_ENABLED=true`.
-4. Restart the app:
+Preview and run the one-time cleanup for old personal-account contacts with:
 
 ```bash
-npm start
+npm run cleanup:business-contacts:preview
+npm run cleanup:business-contacts:execute
 ```
-
-The sync reuses the saved session file, imports private dialogs incrementally, and then listens for live incoming/outgoing account messages.

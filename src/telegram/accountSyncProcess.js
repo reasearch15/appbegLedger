@@ -4,14 +4,21 @@ import { createWorkerSupervisor } from './workerSupervisor.js';
 let activeSupervisor = null;
 
 export async function startTelegramAccountSync({ rootDir, store, io }) {
+  await store.updateTelegramAccountSyncState({
+    status: 'disabled',
+    last_error: null
+  });
+  console.log('Personal Telegram account sync is disabled. Official Bot API is the only user contact channel.');
+  return null;
+
   if (process.env.TELEGRAM_ACCOUNT_SYNC_ENABLED !== 'true') {
     await store.updateTelegramAccountSyncState({ status: 'disabled' });
     console.log('Business Telegram account sync is disabled.');
     return null;
   }
 
-  const apiId = process.env.TELEGRAM_ACCOUNT_API_ID || process.env.PAYMENT_TELEGRAM_API_ID;
-  const apiHash = process.env.TELEGRAM_ACCOUNT_API_HASH || process.env.PAYMENT_TELEGRAM_API_HASH;
+  const apiId = process.env.TELEGRAM_ACCOUNT_API_ID;
+  const apiHash = process.env.TELEGRAM_ACCOUNT_API_HASH;
   if (!apiId || !apiHash) {
     await store.updateTelegramAccountSyncState({
       status: 'misconfigured',

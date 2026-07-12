@@ -10,6 +10,9 @@ function createFakeStore(initial = {}) {
   return {
     async ensureAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
+    },
+    async listActivePaymentMethodsForRegistration() {
+      return [{ id: 1, name: 'Cash App', key: 'cash_app' }];
     }
   };
 }
@@ -32,15 +35,15 @@ async function run() {
   assertIncludes(welcome.replies[0].text, "I'm here to help you get started.");
   assertIncludes(welcome.replies[0].text, 'Register');
   assertIncludes(welcome.replies[0].text, 'Staff');
-  assertEqual(Boolean(welcome.replies[0].buttons), false);
-  console.log('ok welcome text copy (no buttons)');
+  assertEqual(Boolean(welcome.replies[0].buttons), true);
+  console.log('ok welcome text copy with buttons');
 
   const register = await decideBotReply({
     store: createFakeStore({ current_flow: 'bot_registration', current_step: 'welcome' }),
     contact,
     messageText: 'Register'
   });
-  assertEqual(register.kind, 'registration_ask_username');
+  assertEqual(register.kind, 'registration_ask_payment_app');
   console.log('ok Register text command');
 
   const staff = await decideBotReply({
@@ -61,10 +64,10 @@ async function run() {
     contact,
     messageText: 'luckyalex'
   });
-  assertEqual(payment.kind, 'registration_ask_payment_app');
-  assertIncludes(payment.replies[0].text, 'Cash App');
+  assertEqual(payment.kind, 'registration_waiting_payment_confirmation');
+  assertIncludes(payment.replies[0].text, 'checking your payment');
   assertEqual(Boolean(payment.replies[0].buttons), false);
-  console.log('ok payment app text prompt');
+  console.log('ok username waits for payment confirmation');
 
   console.log('ALL TEXT WELCOME CHECKS PASSED');
 }

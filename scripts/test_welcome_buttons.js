@@ -12,6 +12,9 @@ function createFakeStore() {
   return {
     async ensureAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
+    },
+    async listActivePaymentMethodsForRegistration() {
+      return [{ id: 1, name: 'Cash App', key: 'cash_app' }];
     }
   };
 }
@@ -19,8 +22,8 @@ function createFakeStore() {
 async function run() {
   // Helpers still normalize if Bot API is used later.
   const normalized = normalizeButtonRows(WELCOME_BUTTONS);
-  assert.equal(normalized[0][0].data, 'register');
-  assert.equal(normalized[1][0].data, 'staff');
+  assert.equal(normalized[0][0].data, 'bot:register');
+  assert.equal(normalized[1][1].data, 'staff:takeover');
   console.log('ok welcome button normalization helpers');
 
   assert.equal(normalizeCallbackAction('register'), 'bot:register');
@@ -44,9 +47,9 @@ async function run() {
     messageText: 'hi'
   });
   assert.equal(welcome.kind, 'welcome');
-  assert.equal(Boolean(welcome.replies[0].buttons), false);
+  assert.equal(Boolean(welcome.replies[0].buttons), true);
   assert.ok(welcome.replies[0].text.includes("I'm here to help you get started."));
-  console.log('ok decideBotReply welcome is text-only');
+  console.log('ok decideBotReply welcome includes Bot API buttons');
 
   const started = await decideBotReply({
     store: createFakeStore(),
@@ -58,7 +61,7 @@ async function run() {
     },
     messageText: 'Register'
   });
-  assert.equal(started.kind, 'registration_ask_username');
+  assert.equal(started.kind, 'registration_ask_payment_app');
   console.log('ok Register text starts flow');
 
   console.log('ALL BUTTON DELIVERY CHECKS PASSED');

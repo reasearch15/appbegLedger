@@ -113,6 +113,10 @@ export async function migratePostgres(driver) {
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_enabled BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS needs_staff_review BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS active_messaging_source TEXT NOT NULL DEFAULT 'bot_api';
+    ALTER TABLE telegram_users DROP CONSTRAINT IF EXISTS telegram_users_active_messaging_source_check;
+    ALTER TABLE telegram_users ADD CONSTRAINT telegram_users_active_messaging_source_check
+      CHECK (active_messaging_source IN ('bot_api', 'none'));
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused_at TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused_by TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_reason TEXT;

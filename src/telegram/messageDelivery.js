@@ -103,58 +103,7 @@ export function createBotPhotoSender(bot, store) {
 
 export function createAccountReplySender({ store }) {
   return async function sendReply({ user, text, buttons = [], messageType = 'text', mediaPath = null }) {
-    const normalizedButtons = normalizeButtonRows(buttons);
-    if (normalizedButtons.length) {
-      throw new Error(
-        'Inline buttons cannot be sent via the Telethon business-account queue. ' +
-        'Configure TELEGRAM_BOT_TOKEN so welcome/register buttons go through Bot API.'
-      );
-    }
-
-    const temporaryTelegramMessageId = -Number(`${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`);
-    const resolvedMessageType = mediaPath ? 'image' : messageType;
-    const stored = await store.storeOutgoingMessage({
-      telegramUserId: user.id,
-      telegramMessageId: temporaryTelegramMessageId,
-      text,
-      payload: {
-        queued: true,
-        buttons: normalizedButtons,
-        mediaPath: mediaPath || null,
-        sync_kind: 'queued',
-        source: 'business_account'
-      },
-      senderType: 'bot',
-      source: 'business_account',
-      messageType: resolvedMessageType,
-      sentAt: new Date().toISOString()
-    });
-    const outbound = await store.queueTelegramOutboundMessage({
-      contactId: user.id,
-      telegramUserId: user.telegram_id,
-      body: text,
-      buttons: normalizedButtons,
-      localMessageId: stored.messageId,
-      mediaPath,
-      messageType: resolvedMessageType
-    });
-    await store.db.prepare(`
-      INSERT INTO sync_state (key, value, updated_at)
-      VALUES ('outbound_queue:nudge', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(String(outbound.id), new Date().toISOString());
-    console.log(
-      `[telegram-outbound] queued id=${outbound.id} contact=${user.id} telegram=${user.telegram_id} ` +
-      `buttons=0 media=${mediaPath ? 'yes' : 'no'}`
-    );
-    return {
-      ok: true,
-      queued: true,
-      source: 'business_account',
-      outboundId: outbound.id,
-      buttons: normalizedButtons,
-      mediaPath: mediaPath || null
-    };
+    throw new Error('Personal Telegram account delivery is disabled. Staff and automation replies must use the official Bot API.');
   };
 }
 
@@ -164,47 +113,30 @@ export function createAccountReplySender({ store }) {
  */
 export async function createReplySender({ store, user, rootDir, bot }) {
   const preferredSource = await store.getContactPreferredMessageSource(user.id);
-  const accountEnabled = process.env.TELEGRAM_ACCOUNT_SYNC_ENABLED === 'true';
 
   return async function sendReply(options = {}) {
     const normalizedButtons = normalizeButtonRows(options.buttons);
     const hasButtons = normalizedButtons.length > 0;
     const hasMedia = Boolean(options.mediaPath);
 
+    if (preferredSource !== 'bot_api') {
+      throw new Error('This contact is not available through the official Bot API.');
+    }
+
+    if (!bot) {
+      throw new Error('TELEGRAM_BOT_TOKEN bot is required for contact delivery.');
+    }
+
     if (hasMedia) {
-      if (bot) {
-        return createBotPhotoSender(bot, store)(options);
-      }
-      if (preferredSource === 'business_account' && accountEnabled) {
-        return createAccountReplySender({ store })(options);
-      }
-      if (accountEnabled) {
-        return createAccountReplySender({ store })(options);
-      }
-      throw new Error('No Telegram photo channel is available for this contact.');
+      return createBotPhotoSender(bot, store)(options);
     }
 
     if (hasButtons) {
-      if (!bot) {
-        throw new Error(
-          'Cannot send welcome/register inline buttons: TELEGRAM_BOT_TOKEN bot is not running. ' +
-          'User/business Telethon sessions cannot render Button.inline callback keyboards.'
-        );
-      }
       console.log(`[telegram-outbound] routing button message via bot_api contact=${user.id}`);
       return createBotReplySender(bot, store)({ ...options, buttons: normalizedButtons });
     }
 
-    if (preferredSource === 'business_account' && accountEnabled) {
-      return createAccountReplySender({ store })(options);
-    }
-    if (bot) {
-      return createBotReplySender(bot, store)(options);
-    }
-    if (accountEnabled) {
-      return createAccountReplySender({ store })(options);
-    }
-    throw new Error('No Telegram reply channel is available for this contact.');
+    return createBotReplySender(bot, store)(options);
   };
 }
 
