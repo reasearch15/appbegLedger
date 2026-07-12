@@ -17,7 +17,7 @@ import {
   normalizeCustomerMessage,
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
-import { depositWindowMinutes } from '../payments/constants.js';
+import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 import {
   CONVERSATION_STATUSES,
   DEFAULT_AUTOMATION_RULES,
@@ -2331,7 +2331,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const row = await db.prepare(`
       SELECT
         SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
-        SUM(CASE WHEN routing_status = 'registered_player_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
+        SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
         SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
         SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
@@ -2431,7 +2431,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       handled_by: patch.handled_by ?? current.handled_by
     };
     let processingStatus = current.processing_status;
-    if (next.routing_status === 'registered_player_deposit') processingStatus = 'Parsed';
+    if (next.routing_status === 'registered_player_deposit' || next.routing_status === 'deposit_window_matched') processingStatus = 'Matched';
     else if (next.routing_status === 'registration_payment_matched' || next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
     else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
@@ -3573,17 +3573,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     paymentQrCodeId = null,
     paymentDisplayName,
     firstDepositAmount,
-    windowMinutes = 5
+    flowType = 'registration',
+    windowMinutes = null
   }) {
+    const minutes = windowMinutes == null ? paymentWindowMinutes() : Number(windowMinutes);
+    const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
+      ? PAYMENT_WINDOW_FLOW.DEPOSIT
+      : PAYMENT_WINDOW_FLOW.REGISTRATION;
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + windowMinutes * 60 * 1000).toISOString();
+    const expiresAt = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
     const nowText = nowIso();
     const result = await db.prepare(`
       INSERT INTO registration_payment_windows (
         contact_id, telegram_user_id, payment_method_id, payment_qr_code_id,
-        payment_display_name, first_deposit_amount, status, expires_at, created_at, updated_at
+        payment_display_name, first_deposit_amount, flow_type, status, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId),
@@ -3591,31 +3596,62 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       paymentQrCodeId,
       paymentDisplayName || null,
       firstDepositAmount,
+      normalizedFlow,
       expiresAt,
       nowText,
       nowText
     );
-    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid);
+    return hydratePaymentWindow(
+      await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid)
+    );
   }
 
-  async function getActiveRegistrationPaymentWindow(contactId) {
-    return await db.prepare(`
+  function hydratePaymentWindow(row) {
+    if (!row) return null;
+    const status = row.status === 'completed' ? 'matched' : row.status;
+    return {
+      ...row,
+      flow_type: row.flow_type || 'registration',
+      status,
+      status_raw: row.status,
+      matched_payment_event_id: row.matched_payment_event_id ?? null
+    };
+  }
+
+  async function getActiveRegistrationPaymentWindow(contactId, { flowType = null } = {}) {
+    const now = nowIso();
+    if (flowType) {
+      return hydratePaymentWindow(await db.prepare(`
+        SELECT *
+        FROM registration_payment_windows
+        WHERE contact_id = ?
+          AND status = 'active'
+          AND flow_type = ?
+          AND expires_at >= ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(contactId, flowType, now));
+    }
+    return hydratePaymentWindow(await db.prepare(`
       SELECT *
       FROM registration_payment_windows
       WHERE contact_id = ?
         AND status = 'active'
+        AND expires_at >= ?
       ORDER BY id DESC
       LIMIT 1
-    `).get(contactId);
+    `).get(contactId, now));
   }
 
   async function getRegistrationPaymentWindow(windowId) {
-    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    return hydratePaymentWindow(
+      await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId)
+    );
   }
 
   async function listActiveRegistrationPaymentWindows(limit = 200) {
     const now = nowIso();
-    return await db.prepare(`
+    const rows = await db.prepare(`
       SELECT w.*, pm.name AS payment_method_name, pm.key AS payment_method_key
       FROM registration_payment_windows w
       LEFT JOIN payment_methods pm ON pm.id = w.payment_method_id
@@ -3624,11 +3660,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ORDER BY w.id DESC
       LIMIT ?
     `).all(now, Math.min(Math.max(Number(limit) || 200, 1), 1000));
+    return rows.map(hydratePaymentWindow);
   }
 
   async function listExpiredRegistrationPaymentWindowsForMatch(limit = 200) {
     const now = nowIso();
-    return await db.prepare(`
+    const rows = await db.prepare(`
       SELECT w.*, pm.name AS payment_method_name, pm.key AS payment_method_key
       FROM registration_payment_windows w
       LEFT JOIN payment_methods pm ON pm.id = w.payment_method_id
@@ -3637,16 +3674,66 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ORDER BY w.expires_at DESC, w.id DESC
       LIMIT ?
     `).all(now, Math.min(Math.max(Number(limit) || 200, 1), 1000));
+    return rows.map(hydratePaymentWindow);
   }
 
-  async function completeRegistrationPaymentWindow(windowId) {
+  /**
+   * Atomically attach a payment event to an active unexpired window.
+   * Guarantees one payment ↔ one window.
+   */
+  async function claimPaymentWindowMatch(windowId, paymentEventId) {
+    const now = nowIso();
+    const existingLink = await db.prepare(`
+      SELECT id FROM registration_payment_windows
+      WHERE matched_payment_event_id = ?
+      LIMIT 1
+    `).get(paymentEventId);
+    if (existingLink && Number(existingLink.id) !== Number(windowId)) {
+      return { ok: false, reason: 'payment_already_matched_other_window', window: null };
+    }
+
+    const payment = await getPaymentEvent(paymentEventId);
+    if (payment?.registration_payment_window_id
+      && Number(payment.registration_payment_window_id) !== Number(windowId)) {
+      return { ok: false, reason: 'payment_already_linked_other_window', window: null };
+    }
+
+    const result = await db.prepare(`
+      UPDATE registration_payment_windows
+      SET status = 'completed',
+          matched_payment_event_id = ?,
+          completed_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'active'
+        AND expires_at >= ?
+        AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
+    `).run(paymentEventId, now, now, windowId, now, paymentEventId);
+
+    if (!result.changes) {
+      const current = await getRegistrationPaymentWindow(windowId);
+      if (current && (current.status === 'matched' || current.status_raw === 'completed')
+        && Number(current.matched_payment_event_id) === Number(paymentEventId)) {
+        return { ok: true, reason: 'already_matched', window: current };
+      }
+      return { ok: false, reason: 'claim_failed', window: current };
+    }
+
+    return { ok: true, reason: 'matched', window: await getRegistrationPaymentWindow(windowId) };
+  }
+
+  async function completeRegistrationPaymentWindow(windowId, { paymentEventId = null } = {}) {
+    if (paymentEventId != null) {
+      const claimed = await claimPaymentWindowMatch(windowId, paymentEventId);
+      if (claimed.ok) return claimed.window;
+    }
     const now = nowIso();
     await db.prepare(`
       UPDATE registration_payment_windows
-      SET status = 'completed', completed_at = ?, updated_at = ?
+      SET status = 'completed', completed_at = COALESCE(completed_at, ?), updated_at = ?
       WHERE id = ? AND status = 'active'
     `).run(now, now, windowId);
-    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    return await getRegistrationPaymentWindow(windowId);
   }
 
   async function expireRegistrationPaymentWindow(windowId, { suppressNotification = false } = {}) {
@@ -3666,7 +3753,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function listRegistrationPaymentWindowsForExpiryWorker(limit = 100) {
     const now = nowIso();
-    return await db.prepare(`
+    const rows = await db.prepare(`
       SELECT *
       FROM registration_payment_windows
       WHERE expires_at <= ?
@@ -3675,6 +3762,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ORDER BY expires_at ASC, id ASC
       LIMIT ?
     `).all(now, limit);
+    return rows.map(hydratePaymentWindow);
   }
 
   async function listDueRegistrationPaymentWindows(limit = 100) {
@@ -3960,6 +4048,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getRegistrationPaymentWindow,
     listActiveRegistrationPaymentWindows,
     listExpiredRegistrationPaymentWindowsForMatch,
+    claimPaymentWindowMatch,
     completeRegistrationPaymentWindow,
     expireRegistrationPaymentWindow,
     listDueRegistrationPaymentWindows,
@@ -4417,6 +4506,10 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_qr_code_id', 'INTEGER');
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_display_name', 'TEXT');
   await addColumnIfMissing(db, 'registration_payment_windows', 'expiry_notified_at', 'TEXT');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'flow_type', "TEXT NOT NULL DEFAULT 'registration'");
+  await addColumnIfMissing(db, 'registration_payment_windows', 'matched_payment_event_id', 'INTEGER');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_flow_status ON registration_payment_windows(flow_type, status, expires_at DESC)');
+  await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_payment_windows_matched_event ON registration_payment_windows(matched_payment_event_id) WHERE matched_payment_event_id IS NOT NULL');
 
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order ON payment_methods(is_active, display_order ASC, id ASC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC)');

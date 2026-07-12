@@ -3,42 +3,48 @@ import {
   buildIdempotencyKey,
   DEPOSIT_STATUS,
   HANDLED_BY_APPBEG_BOT,
+  PAYMENT_WINDOW_FLOW,
   ROUTING_OWNER,
   ROUTING_REASON,
-  ROUTING_STATUS
+  ROUTING_STATUS,
+  UNMATCHED_REASON
 } from './constants.js';
-import { amountsMatch, paymentNamesMatch } from './matchUtils.js';
-import { findRegisteredPlayerMatch } from './registeredPlayerMatcher.js';
+import {
+  classifyUnmatchedReason,
+  findMatchingActivePaymentWindow,
+  isDepositWindow,
+  isRegistrationWindow
+} from './paymentWindowMatcher.js';
 import { continueBotRegistrationAfterPayment } from './registrationPaymentFlow.js';
+import { continueRegisteredDepositAfterPayment } from './depositPaymentFlow.js';
 
 function isAlreadyRouted(payment) {
   return Boolean(payment.routed_at);
 }
 
-/**
- * Registration windows match on Payment Name + Requested Amount only.
- * Never guess when multiple windows match — leave for manual review.
- */
-function windowMatchesParsed(window, parsed) {
-  if (!paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name)) return false;
-  if (!amountsMatch(window.first_deposit_amount, parsed.amount)) return false;
-  return true;
-}
-
-async function findActiveRegistrationMatches(store, parsed) {
-  const windows = await store.listActiveRegistrationPaymentWindows();
-  return windows.filter((window) => windowMatchesParsed(window, parsed));
-}
-
-async function findExpiredRegistrationMatches(store, parsed) {
-  const windows = await store.listExpiredRegistrationPaymentWindowsForMatch();
-  return windows.filter((window) => windowMatchesParsed(window, parsed));
-}
-
-function uniqueMatchOrNull(matches) {
-  if (!matches.length) return { match: null, ambiguous: false };
-  if (matches.length > 1) return { match: null, ambiguous: true, matches };
-  return { match: matches[0], ambiguous: false };
+async function freezePayment(store, payment, {
+  reason,
+  unmatchedReason,
+  contactId = null,
+  windowId = null,
+  metadata = {}
+}) {
+  console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id} reason=${unmatchedReason || 'manual_review'}`);
+  await store.updatePaymentRouting(payment.id, {
+    routing_status: ROUTING_STATUS.MANUAL_REVIEW,
+    routing_owner: ROUTING_OWNER.APPBEG,
+    routing_reason: reason,
+    contact_id: contactId,
+    registration_payment_window_id: windowId,
+    routed_at: new Date().toISOString(),
+    handled_by: null
+  });
+  await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', reason, {
+    unmatchedReason,
+    status: 'frozen',
+    ...metadata
+  });
+  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW, unmatchedReason };
 }
 
 export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null } = {}) {
@@ -85,153 +91,158 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     senderName: parsed.payment_sender_name
   });
 
-  console.log(`[payment-router] registered_player_checked payment=${payment.id}`);
-  await store.logPaymentRouting(payment.id, 'registered_player_checked', 'Checking registered AppBeg players before registration windows.', {
+  console.log(`[payment-router] payment_window_checked payment=${payment.id}`);
+  await store.logPaymentRouting(payment.id, 'payment_window_checked', 'Checking active payment windows (registration + deposit).', {
     amount: parsed.amount,
     paymentApp: parsed.payment_app,
     senderName: parsed.payment_sender_name
   });
 
-  const registeredPlayer = await findRegisteredPlayerMatch(store, parsed);
-  if (registeredPlayer) {
-    console.log(`[payment-router] registered_player_matched payment=${payment.id} contact=${registeredPlayer.id}`);
-    await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT,
-      routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: ROUTING_REASON.MATCHED_REGISTERED_PLAYER,
-      contact_id: registeredPlayer.id,
-      registration_payment_window_id: null,
-      routed_at: new Date().toISOString(),
-      handled_by: HANDLED_BY_APPBEG_BOT
+  const activeWindows = await store.listActiveRegistrationPaymentWindows();
+  const match = findMatchingActivePaymentWindow(activeWindows, parsed);
+
+  if (match.result === 'ambiguous_match') {
+    return freezePayment(store, payment, {
+      reason: ROUTING_REASON.AMBIGUOUS_MATCH,
+      unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+      metadata: {
+        amount: parsed.amount,
+        paymentApp: parsed.payment_app,
+        senderName: parsed.payment_sender_name,
+        matchCount: match.windows.length,
+        windowIds: match.windows.map((item) => item.id),
+        flowTypes: match.windows.map((item) => item.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION)
+      }
     });
-    await store.logPaymentRouting(payment.id, 'registered_player_matched', 'Payment matched a registered AppBeg player deposit profile.', {
-      contactId: registeredPlayer.id,
-      appbegUsername: registeredPlayer.appbeg_username || null,
-      status: 'pending_review'
-    });
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT };
   }
 
-  console.log(`[payment-router] registration_window_checked payment=${payment.id}`);
-  await store.logPaymentRouting(payment.id, 'registration_window_checked', 'No registered player match; checking active registration payment windows.', {
-    amount: parsed.amount,
-    paymentApp: parsed.payment_app,
-    senderName: parsed.payment_sender_name
-  });
+  if (match.result === 'exact_match') {
+    const activeWindow = match.window;
+    const claim = typeof store.claimPaymentWindowMatch === 'function'
+      ? await store.claimPaymentWindowMatch(activeWindow.id, payment.id)
+      : { ok: true, reason: 'matched', window: activeWindow };
 
-  const activeMatches = await findActiveRegistrationMatches(store, parsed);
-  const activeResult = uniqueMatchOrNull(activeMatches);
-  if (activeResult.ambiguous) {
-    const freezeReason = 'Multiple active registration payment windows matched the same payment name and amount.';
-    console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id} reason=ambiguous_registration_match count=${activeMatches.length}`);
-    await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.MANUAL_REVIEW,
-      routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: freezeReason,
-      contact_id: null,
-      registration_payment_window_id: null,
-      routed_at: new Date().toISOString(),
-      handled_by: null
-    });
-    await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', freezeReason, {
-      amount: parsed.amount,
-      paymentApp: parsed.payment_app,
-      senderName: parsed.payment_sender_name,
-      matchCount: activeMatches.length,
-      windowIds: activeMatches.map((item) => item.id),
-      status: 'frozen'
-    });
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW };
-  }
+    if (!claim.ok) {
+      return freezePayment(store, payment, {
+        reason: `Payment window claim failed (${claim.reason}).`,
+        unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+        metadata: {
+          windowId: activeWindow.id,
+          claimReason: claim.reason
+        }
+      });
+    }
 
-  const activeWindow = activeResult.match;
-  if (activeWindow) {
-    console.log(`[payment-router] registration_window_matched payment=${payment.id} window=${activeWindow.id} contact=${activeWindow.contact_id}`);
+    const flowType = activeWindow.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const isDeposit = isDepositWindow(activeWindow);
+    const routingStatus = isDeposit
+      ? ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
+      : ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED;
+    const routingReason = isDeposit
+      ? ROUTING_REASON.MATCHED_DEPOSIT_WINDOW
+      : ROUTING_REASON.MATCHED_REGISTRATION_WINDOW;
+
+    console.log(
+      `[payment-router] payment_window_matched payment=${payment.id} window=${activeWindow.id} ` +
+      `flow=${flowType} contact=${activeWindow.contact_id}`
+    );
+
     await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
+      routing_status: routingStatus,
       routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: ROUTING_REASON.MATCHED_REGISTRATION_WINDOW,
+      routing_reason: routingReason,
       contact_id: activeWindow.contact_id,
       registration_payment_window_id: activeWindow.id,
       routed_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
-    await store.logPaymentRouting(payment.id, 'registration_window_matched', 'Payment matched an active registration payment window.', {
+    await store.logPaymentRouting(payment.id, 'payment_window_matched', `Payment matched an active ${flowType} payment window.`, {
       contactId: activeWindow.contact_id,
-      windowId: activeWindow.id
+      windowId: activeWindow.id,
+      flowType,
+      claimReason: claim.reason
     });
+
+    if (isDeposit) {
+      await continueRegisteredDepositAfterPayment(store, {
+        contactId: activeWindow.contact_id,
+        windowId: activeWindow.id,
+        paymentEventId: payment.id,
+        bot,
+        io
+      });
+      return {
+        ok: true,
+        payment: await store.getPaymentEvent(payment.id),
+        outcome: routingStatus,
+        flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
+      };
+    }
 
     await continueBotRegistrationAfterPayment(store, {
       contactId: activeWindow.contact_id,
       windowId: activeWindow.id,
       paymentEventId: payment.id,
       bot,
-      io
+      io,
+      alreadyClaimed: true
     });
 
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED };
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: routingStatus,
+      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION
+    };
   }
 
-  const expiredMatches = await findExpiredRegistrationMatches(store, parsed);
-  const expiredResult = uniqueMatchOrNull(expiredMatches);
-  if (expiredResult.ambiguous) {
-    const freezeReason = 'Multiple expired registration payment windows matched the same payment name and amount.';
-    console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id} reason=ambiguous_expired_match count=${expiredMatches.length}`);
-    await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.MANUAL_REVIEW,
-      routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: freezeReason,
-      contact_id: null,
-      registration_payment_window_id: null,
-      routed_at: new Date().toISOString(),
-      handled_by: null
-    });
-    await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', freezeReason, {
-      amount: parsed.amount,
-      senderName: parsed.payment_sender_name,
-      matchCount: expiredMatches.length,
-      status: 'frozen'
-    });
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW };
-  }
-
-  const expiredWindow = expiredResult.match;
-  if (expiredWindow) {
-    console.log(`[payment-router] registration_payment_expired_match payment=${payment.id} window=${expiredWindow.id}`);
+  const expiredWindows = await store.listExpiredRegistrationPaymentWindowsForMatch();
+  const expiredMatch = findMatchingActivePaymentWindow(expiredWindows, parsed);
+  if (expiredMatch.result === 'exact_match' || expiredMatch.result === 'ambiguous_match') {
+    const expiredWindow = expiredMatch.window || expiredMatch.windows?.[0] || null;
+    const unmatchedReason = UNMATCHED_REASON.WINDOW_EXPIRED;
+    console.log(`[payment-router] payment_window_expired_match payment=${payment.id} window=${expiredWindow?.id || 'n/a'}`);
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.EXPIRED_DEPOSIT,
       routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED,
-      contact_id: expiredWindow.contact_id,
-      registration_payment_window_id: expiredWindow.id,
+      routing_reason: isDepositWindow(expiredWindow)
+        ? ROUTING_REASON.DEPOSIT_WINDOW_EXPIRED
+        : ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED,
+      contact_id: expiredWindow?.contact_id || null,
+      registration_payment_window_id: expiredWindow?.id || null,
       routed_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
-    await store.logPaymentRouting(payment.id, 'registration_payment_expired_match', 'Payment matched a registration window but the window had expired.', {
-      contactId: expiredWindow.contact_id,
-      windowId: expiredWindow.id
+    await store.logPaymentRouting(payment.id, 'payment_window_expired_match', 'Payment matched a window but the window had expired.', {
+      contactId: expiredWindow?.contact_id || null,
+      windowId: expiredWindow?.id || null,
+      unmatchedReason,
+      flowType: expiredWindow?.flow_type || null,
+      status: 'frozen'
     });
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.EXPIRED_DEPOSIT };
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: ROUTING_STATUS.EXPIRED_DEPOSIT,
+      unmatchedReason
+    };
   }
 
-  const freezeReason = 'No registered player match and no active registration payment window.';
-  console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id}`);
-  await store.updatePaymentRouting(payment.id, {
-    routing_status: ROUTING_STATUS.MANUAL_REVIEW,
-    routing_owner: ROUTING_OWNER.APPBEG,
-    routing_reason: freezeReason,
-    contact_id: null,
-    registration_payment_window_id: null,
-    routed_at: new Date().toISOString(),
-    handled_by: null
+  const unmatchedReason = classifyUnmatchedReason({
+    activeWindows,
+    expiredWindows,
+    parsed
   });
-  await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', freezeReason, {
-    amount: parsed.amount,
-    paymentApp: parsed.payment_app,
-    senderName: parsed.payment_sender_name,
-    status: 'frozen'
+
+  return freezePayment(store, payment, {
+    reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+    unmatchedReason,
+    metadata: {
+      amount: parsed.amount,
+      paymentApp: parsed.payment_app,
+      senderName: parsed.payment_sender_name
+    }
   });
-  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW };
 }
 
 export async function routeUnprocessedPayments(store, { limit = 50, bot = null, io = null } = {}) {
@@ -254,22 +265,38 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
     throw new Error('contactId and registrationPaymentWindowId are required.');
   }
 
+  const window = await store.getRegistrationPaymentWindow(registrationPaymentWindowId);
   await store.manuallyLinkPaymentEvent(paymentId, {
     contactId,
     registrationPaymentWindowId,
     staffName,
-    routingStatus: ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
-    routingReason: ROUTING_REASON.MATCHED_REGISTRATION_WINDOW
+    routingStatus: isDepositWindow(window)
+      ? ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
+      : ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
+    routingReason: isDepositWindow(window)
+      ? ROUTING_REASON.MATCHED_DEPOSIT_WINDOW
+      : ROUTING_REASON.MATCHED_REGISTRATION_WINDOW
   });
 
-  await continueBotRegistrationAfterPayment(store, {
-    contactId,
-    windowId: registrationPaymentWindowId,
-    paymentEventId: paymentId,
-    actorName: staffName,
-    bot,
-    io
-  });
+  if (isDepositWindow(window)) {
+    await continueRegisteredDepositAfterPayment(store, {
+      contactId,
+      windowId: registrationPaymentWindowId,
+      paymentEventId: paymentId,
+      actorName: staffName,
+      bot,
+      io
+    });
+  } else {
+    await continueBotRegistrationAfterPayment(store, {
+      contactId,
+      windowId: registrationPaymentWindowId,
+      paymentEventId: paymentId,
+      actorName: staffName,
+      bot,
+      io
+    });
+  }
 
   return { ok: true, payment: await store.getPaymentEvent(paymentId) };
 }
@@ -299,4 +326,4 @@ export async function startDepositEventForContact(store, { contactId, startedBy 
   });
 }
 
-export { DEPOSIT_STATUS, ROUTING_STATUS };
+export { DEPOSIT_STATUS, ROUTING_STATUS, isRegistrationWindow, isDepositWindow };

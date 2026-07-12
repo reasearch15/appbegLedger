@@ -585,7 +585,7 @@ export async function continueRoyalVipRegistration({
       replies: [{
         text: [
           'We will automatically verify your payment and continue your registration.',
-          'Please complete the QR payment within 5 minutes.'
+          'Please complete the QR payment within 7 minutes.'
         ].join('\n'),
         buttons: cancelButtons
       }],

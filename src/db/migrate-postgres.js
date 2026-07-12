@@ -57,10 +57,19 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS payment_display_name TEXT;
     ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS expiry_notified_at TEXT;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS flow_type TEXT NOT NULL DEFAULT 'registration';
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS matched_payment_event_id BIGINT;
   `);
   await driver.exec(`
     CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
       ON registration_payment_windows(contact_id, status, expires_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_flow_status
+      ON registration_payment_windows(flow_type, status, expires_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_payment_windows_matched_event
+      ON registration_payment_windows(matched_payment_event_id)
+      WHERE matched_payment_event_id IS NOT NULL;
   `);
 
   const chimeTable = await driver.get(`

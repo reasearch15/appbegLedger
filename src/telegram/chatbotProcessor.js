@@ -25,9 +25,9 @@ export function shouldUseRegistrationBot(job, automationState = {}, contact = nu
   if (job.job_type === 'callback_action') return true;
   if (job.force_entry_menu) return true;
   const flow = automationState.current_flow || automationState.currentFlow;
-  if (flow === 'bot_registration' || flow === 'registration_info') return true;
+  if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
   const text = String(job.input_text || '').trim();
-  if (/^\/(start|register|status|support|cancel)(@\w+)?(\s|$)/i.test(text)) return true;
+  if (/^\/(start|register|status|support|cancel|deposit)(@\w+)?(\s|$)/i.test(text)) return true;
   if (/^(staff|done|confirm|cancel|stop)$/i.test(text)) return true;
   // Empty / media updates use the shared entry menu.
   if (!text) return true;

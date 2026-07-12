@@ -3,16 +3,19 @@ import {
   REGISTRATION_QR_LOAD_FAILED_MESSAGE,
   resolvePaymentQrTelegramInput
 } from '../payments/methodUtils.js';
-import { paymentQrRetryButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
+import { PAYMENT_WINDOW_FLOW, paymentWindowMinutes } from '../payments/constants.js';
+import { paymentQrRetryButtons, registeredMenuButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
 import { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
 
-async function recoverRegistrationQrFailure({
+async function recoverQrFailure({
   store,
   contact,
   sendPaymentQr,
   bot,
   reason,
-  logAsSendFailed = true
+  logAsSendFailed = true,
+  recoverStep = 'first_deposit_amount',
+  buttons = paymentQrRetryButtons()
 }) {
   const safeReason = String(reason || 'unknown').slice(0, 200);
   if (logAsSendFailed) {
@@ -24,11 +27,12 @@ async function recoverRegistrationQrFailure({
   }
 
   await store.updateAutomationState(contact.id, {
-    currentStep: 'first_deposit_amount'
+    currentStep: recoverStep
   }).catch(() => null);
 
-  const activeWindow = await store.getActiveRegistrationPaymentWindow?.(contact.id).catch(() => null);
-  if (!activeWindow && store.updateRegistrationStatus) {
+  const flowType = sendPaymentQr.flowType || PAYMENT_WINDOW_FLOW.REGISTRATION;
+  const activeWindow = await store.getActiveRegistrationPaymentWindow?.(contact.id, { flowType }).catch(() => null);
+  if (!activeWindow && store.updateRegistrationStatus && flowType === PAYMENT_WINDOW_FLOW.REGISTRATION) {
     if (contact.registration_status === 'Waiting For Payment') {
       await store.updateRegistrationStatus(contact.id, 'Collecting Info', 'Chatbot').catch(() => null);
     }
@@ -38,23 +42,38 @@ async function recoverRegistrationQrFailure({
     store,
     user: contact,
     text: REGISTRATION_QR_LOAD_FAILED_MESSAGE,
-    buttons: paymentQrRetryButtons(),
+    buttons,
     bot: bot || globalThis.telegramBot || null
   });
 }
 
 /**
- * Send registration QR photo, then open the 5-minute payment window.
- * Order is intentional: QR must succeed before Waiting For Payment.
+ * Send QR photo, then open the 7-minute payment window.
+ * Order is intentional: QR must succeed before waiting / timer start.
  */
 export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot }) {
   const contactId = contact.id;
   const paymentMethodId = sendPaymentQr.paymentMethodId;
   const amount = sendPaymentQr.firstDepositAmount;
+  const flowType = sendPaymentQr.flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
+    ? PAYMENT_WINDOW_FLOW.DEPOSIT
+    : PAYMENT_WINDOW_FLOW.REGISTRATION;
+  const isDeposit = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT;
+  const recoverStep = isDeposit ? 'deposit_amount' : 'first_deposit_amount';
+  const waitingStep = isDeposit ? 'deposit_await_payment' : 'await_payment';
+  const cancelButtons = isDeposit
+    ? [[{ label: '❌ Cancel Deposit', action: 'deposit:cancel', text: 'Cancel Deposit', data: 'deposit:cancel' }]]
+    : waitingPaymentCancelButtons();
+  const failureButtons = isDeposit
+    ? [
+      [{ label: '🔄 Try Again', action: 'deposit:retry_qr', text: 'Try Again', data: 'deposit:retry_qr' }],
+      ...registeredMenuButtons()
+    ]
+    : paymentQrRetryButtons();
 
   console.log(
     `[chatbot] registration_qr_lookup_started contact=${contactId} ` +
-    `payment_method_id=${paymentMethodId || 'n/a'} amount=${amount ?? 'n/a'}`
+    `payment_method_id=${paymentMethodId || 'n/a'} amount=${amount ?? 'n/a'} flow=${flowType}`
   );
 
   const qr = typeof store.getActivePaymentQrForRegistration === 'function'
@@ -66,13 +85,15 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       `[chatbot] registration_qr_missing contact=${contactId} ` +
       `payment_method_id=${paymentMethodId || 'n/a'} amount=${amount ?? 'n/a'}`
     );
-    await recoverRegistrationQrFailure({
+    await recoverQrFailure({
       store,
       contact,
       sendPaymentQr,
       bot,
       reason: 'qr_missing',
-      logAsSendFailed: false
+      logAsSendFailed: false,
+      recoverStep,
+      buttons: failureButtons
     });
     return { ok: false, reason: 'qr_missing' };
   }
@@ -84,12 +105,14 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
 
   const resolved = resolvePaymentQrTelegramInput(qr.file_path);
   if (!resolved.ok) {
-    await recoverRegistrationQrFailure({
+    await recoverQrFailure({
       store,
       contact,
       sendPaymentQr,
       bot,
-      reason: resolved.reason || 'file_unresolved'
+      reason: resolved.reason || 'file_unresolved',
+      recoverStep,
+      buttons: failureButtons
     });
     return { ok: false, reason: resolved.reason || 'file_unresolved' };
   }
@@ -97,7 +120,8 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
   const caption = paymentQrCaption({
     paymentMethodName: sendPaymentQr.paymentMethodName,
     firstDepositAmount: amount,
-    paymentDisplayName: sendPaymentQr.paymentDisplayName
+    paymentDisplayName: sendPaymentQr.paymentDisplayName,
+    flowType
   });
 
   console.log(
@@ -112,16 +136,18 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       user: contact,
       text: caption,
       mediaPath: resolved.mediaPath,
-      buttons: waitingPaymentCancelButtons(),
+      buttons: cancelButtons,
       bot: bot || globalThis.telegramBot || null
     });
   } catch (error) {
-    await recoverRegistrationQrFailure({
+    await recoverQrFailure({
       store,
       contact,
       sendPaymentQr,
       bot,
-      reason: error?.message || 'send_failed'
+      reason: error?.message || 'send_failed',
+      recoverStep,
+      buttons: failureButtons
     });
     return { ok: false, reason: 'send_failed' };
   }
@@ -132,7 +158,7 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `message_id=${photoResult?.messageId || 'n/a'} amount=${amount ?? 'n/a'}`
   );
 
-  let paymentWindow = await store.getActiveRegistrationPaymentWindow?.(contactId).catch(() => null);
+  let paymentWindow = await store.getActiveRegistrationPaymentWindow?.(contactId, { flowType }).catch(() => null);
   let windowCreated = false;
   if (!paymentWindow) {
     paymentWindow = await store.createRegistrationPaymentWindow({
@@ -142,40 +168,50 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       paymentQrCodeId: qr.id,
       paymentDisplayName: sendPaymentQr.paymentDisplayName,
       firstDepositAmount: amount,
-      windowMinutes: 5
+      flowType,
+      windowMinutes: paymentWindowMinutes()
     });
     windowCreated = true;
     console.log(
       `[chatbot] registration_payment_window_created contact=${contactId} ` +
       `window=${paymentWindow.id} payment_method_id=${paymentMethodId} ` +
-      `qr_id=${qr.id} amount=${amount ?? 'n/a'} expires_at=${paymentWindow.expires_at}`
+      `qr_id=${qr.id} amount=${amount ?? 'n/a'} flow=${flowType} expires_at=${paymentWindow.expires_at}`
     );
   } else {
     console.log(
       `[chatbot] registration_payment_window_reused contact=${contactId} ` +
-      `window=${paymentWindow.id} payment_method_id=${paymentMethodId} qr_id=${qr.id}`
+      `window=${paymentWindow.id} payment_method_id=${paymentMethodId} qr_id=${qr.id} flow=${flowType}`
     );
   }
 
   const currentInfo = (await store.getAutomationState(contactId))?.registration_info || {};
   await store.updateAutomationState(contactId, {
-    currentStep: 'await_payment',
+    currentFlow: isDeposit ? 'registered_deposit' : 'bot_registration',
+    currentStep: waitingStep,
     registrationInfo: {
       ...currentInfo,
       payment_qr_code_id: qr.id,
       payment_window_id: paymentWindow.id,
       payment_qr_telegram_message_id: photoResult?.messageId || null,
-      payment_window_expires_at: paymentWindow.expires_at
+      payment_window_expires_at: paymentWindow.expires_at,
+      ...(isDeposit
+        ? {
+          deposit_in_progress: true,
+          deposit_awaiting_payment: true,
+          deposit_requested_amount: amount,
+          deposit_payment_window_id: paymentWindow.id
+        }
+        : {})
     }
   });
 
-  if (store.updateRegistrationStatus) {
+  if (!isDeposit && store.updateRegistrationStatus) {
     await store.updateRegistrationStatus(contactId, 'Waiting For Payment', 'Chatbot').catch(() => null);
   }
 
   console.log(
     `[chatbot] registration_payment_window_started contact=${contactId} ` +
-    `window=${paymentWindow.id} expires_at=${paymentWindow.expires_at} created=${windowCreated}`
+    `window=${paymentWindow.id} expires_at=${paymentWindow.expires_at} created=${windowCreated} flow=${flowType}`
   );
 
   return {
@@ -184,6 +220,7 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     paymentWindow,
     qr,
     messageId: photoResult?.messageId || null,
-    caption
+    caption,
+    flowType
   };
 }

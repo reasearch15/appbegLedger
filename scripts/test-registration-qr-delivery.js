@@ -84,7 +84,8 @@ function createQrStore({
       window = {
         id: 100 + windowsCreated,
         status: 'active',
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        flow_type: payload.flowType || 'registration',
+        expires_at: new Date(Date.now() + 7 * 60 * 1000).toISOString(),
         ...payload
       };
       return window;
@@ -131,7 +132,7 @@ async function run() {
   assert.match(caption, /Please send \$9 using the QR code above/);
   assert.match(caption, /Payment Name: Amy fei/);
   assert.match(caption, /Amount: \$9/);
-  assert.match(caption, /5 minutes/);
+  assert.match(caption, /7 minutes/);
   console.log('ok caption includes payment name and amount');
 
   // Local filesystem resolve
@@ -313,11 +314,11 @@ async function run() {
   assert.notEqual(missingStore.status, 'Waiting For Payment');
   console.log('ok payment window is not created when QR lookup fails');
 
-  // 5-minute expiry still set on created window
+  // 7-minute expiry still set on created window
   const expiresAt = new Date(ok.paymentWindow.expires_at).getTime();
   const delta = expiresAt - Date.now();
-  assert.ok(delta > 4 * 60 * 1000 && delta <= 5 * 60 * 1000 + 2000);
-  console.log('ok 5-minute expiry still works');
+  assert.ok(delta > 6 * 60 * 1000 && delta <= 7 * 60 * 1000 + 2000);
+  console.log('ok 7-minute expiry still works');
 
   console.log('ALL REGISTRATION QR CHECKS PASSED');
 }

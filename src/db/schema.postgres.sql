@@ -485,8 +485,10 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   payment_qr_code_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL,
   payment_display_name TEXT,
   first_deposit_amount NUMERIC(12, 2) NOT NULL,
+  flow_type TEXT NOT NULL DEFAULT 'registration',
+  matched_payment_event_id BIGINT,
   status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
+    CHECK (status IN ('active', 'completed', 'expired', 'cancelled', 'manual_review')),
   expires_at TEXT NOT NULL,
   completed_at TEXT,
   expiry_notified_at TEXT,

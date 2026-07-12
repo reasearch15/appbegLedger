@@ -307,7 +307,7 @@ async function run() {
 
   // Expiry copy
   assert.match(REGISTRATION_PAYMENT_EXPIRY_MESSAGE, /Registration failed/);
-  assert.match(REGISTRATION_PAYMENT_EXPIRY_MESSAGE, /5-minute/);
+  assert.match(REGISTRATION_PAYMENT_EXPIRY_MESSAGE, /7-minute/);
   console.log('ok payment timeout message');
 
   // Password redaction for API

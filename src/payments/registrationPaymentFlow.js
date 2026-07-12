@@ -21,7 +21,8 @@ export async function continueBotRegistrationAfterPayment(store, {
   paymentEventId = null,
   actorName = 'PaymentGroupListener',
   bot = null,
-  io = null
+  io = null,
+  alreadyClaimed = false
 }) {
   const contact = await store.getUserProfile(contactId);
   if (!contact) throw new Error('Contact not found for registration payment continuation.');
@@ -29,7 +30,11 @@ export async function continueBotRegistrationAfterPayment(store, {
   const window = await store.getRegistrationPaymentWindow(windowId);
   if (!window) throw new Error('Registration payment window not found.');
 
-  await store.completeRegistrationPaymentWindow(windowId);
+  if (!alreadyClaimed && paymentEventId != null && typeof store.claimPaymentWindowMatch === 'function') {
+    await store.claimPaymentWindowMatch(windowId, paymentEventId);
+  } else if (!alreadyClaimed) {
+    await store.completeRegistrationPaymentWindow(windowId, { paymentEventId });
+  }
 
   const automation = await store.getAutomationState(contactId);
   const info = {

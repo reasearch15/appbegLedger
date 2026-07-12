@@ -78,7 +78,7 @@ async function run() {
   assertEqual(queuedMessages.length, 1, 'one expiry message queued');
   assertEqual(queuedMessages[0].text, REGISTRATION_PAYMENT_EXPIRY_MESSAGE);
   assertIncludes(queuedMessages[0].text, 'Registration failed');
-  assertIncludes(queuedMessages[0].text, '5-minute payment window');
+  assertIncludes(queuedMessages[0].text, '7-minute payment window');
 
   const outbound = await store.db.prepare(`
     SELECT body

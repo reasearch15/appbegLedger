@@ -558,12 +558,19 @@ app.get('/api/payments/:id', async (req, res) => {
   if (payment.registration_payment_window_id) {
     registrationWindow = await store.getRegistrationPaymentWindow(payment.registration_payment_window_id);
   }
+  const routingLogs = await store.listPaymentRoutingLogs(payment.id, 100);
+  const unmatchedReason = routingLogs.find((log) => log?.metadata?.unmatchedReason)?.metadata?.unmatchedReason || null;
   res.json({
-    payment,
+    payment: {
+      ...payment,
+      unmatched_reason: unmatchedReason,
+      window_flow_type: registrationWindow?.flow_type || null,
+      window_expires_at: registrationWindow?.expires_at || null
+    },
     registrationWindow,
     sync: await store.getPaymentSyncState(),
     logs: await store.listPaymentListenerLogs(50),
-    routingLogs: await store.listPaymentRoutingLogs(payment.id, 100)
+    routingLogs
   });
 });
 

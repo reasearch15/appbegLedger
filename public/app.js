@@ -190,6 +190,15 @@ function fmtDateTime(value) {
   }).format(new Date(value));
 }
 
+function formatWindowRemaining(expiresAt) {
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return '-';
+  if (ms <= 0) return 'Expired';
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
 function fmtTime(value) {
   if (!value) return '';
   return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
@@ -1960,7 +1969,8 @@ function automationLogItems() {
 function paymentRoutingLabel(routingStatus) {
   switch (routingStatus) {
     case 'registered_player_deposit':
-      return 'Registered Player Deposit';
+    case 'deposit_window_matched':
+      return 'Registered Deposit Matched';
     case 'registration_payment_matched':
     case 'appbeg_owned':
       return 'Registration Matched';
@@ -1968,7 +1978,7 @@ function paymentRoutingLabel(routingStatus) {
     case 'untouched_unmatched':
       return 'Frozen / Manual Review';
     case 'expired_deposit':
-      return 'Expired Registration Window';
+      return 'Expired Payment Window';
     case 'parse_failed':
       return 'Parse Failed';
     case 'ignored':
@@ -1985,11 +1995,13 @@ function paymentRoutingReason(payment = {}) {
   switch (payment.routing_status) {
     case 'registered_player_deposit':
       return 'Matched registered player';
+    case 'deposit_window_matched':
+      return 'Matched active deposit payment window';
     case 'registration_payment_matched':
     case 'appbeg_owned':
       return 'Matched registration payment window';
     case 'expired_deposit':
-      return 'Registration window expired';
+      return 'Payment window expired';
     case 'parse_failed':
       return 'Unable to parse payment';
     case 'manual_review':
@@ -2002,7 +2014,7 @@ function paymentRoutingReason(payment = {}) {
 
 function paymentProcessingLabel(payment = {}) {
   const routing = payment.routing_status;
-  if (routing === 'registered_player_deposit') return 'pending_review';
+  if (routing === 'registered_player_deposit' || routing === 'deposit_window_matched') return 'matched';
   if (routing === 'manual_review' || routing === 'untouched_unmatched') return 'frozen';
   if (routing === 'registration_payment_matched' || routing === 'appbeg_owned') return 'matched';
   if (routing === 'parse_failed') return 'parse_failed';
@@ -2082,15 +2094,19 @@ function paymentDetailPanel() {
         ${infoRow('Routing', paymentRoutingLabel(payment.routing_status))}
         ${infoRow('Reason', paymentRoutingReason(payment))}
         ${payment.routing_status === 'manual_review' || payment.routing_status === 'untouched_unmatched'
-    ? '<p class="modal-error">This payment is frozen for manual staff review. Do not auto-assign or ignore without review.</p>'
+    ? `<p class="modal-error">This payment is frozen for manual staff review. Do not auto-assign or ignore without review.${payment.unmatched_reason ? ` Reason code: ${escapeHtml(payment.unmatched_reason)}.` : ''}</p>`
+    : ''}
+        ${payment.routing_status === 'deposit_window_matched'
+    ? '<p class="subtle">Registered deposit matched an active 7-minute deposit window.</p>'
     : ''}
         ${payment.routing_status === 'registered_player_deposit'
-    ? '<p class="subtle">Registered player deposit — pending staff review. Balance is not auto-credited.</p>'
+    ? '<p class="subtle">Legacy registered-player routing — prefer deposit windows going forward.</p>'
     : ''}
         ${infoRow('Owner', payment.routing_owner || '-')}
         ${infoRow('Handled By', payment.handled_by || '-')}
         ${infoRow('Matched Contact', payment.contact_id || '-')}
         ${infoRow('Payment Window', payment.registration_payment_window_id || '-')}
+        ${infoRow('Unmatched Reason', payment.unmatched_reason || '-')}
         ${infoRow('Sender', payment.sender_name || payment.sender_username || 'Unknown')}
         ${infoRow('Timestamp', fmtDateTime(payment.message_date))}
         ${infoRow('Group', payment.telegram_group_title || payment.telegram_group_id)}
@@ -2121,17 +2137,21 @@ function paymentDetailPanel() {
       </section>
 
       <section class="card">
-        <div class="card-title">Registration Match</div>
+        <div class="card-title">Payment Window</div>
         ${window
     ? `
           ${infoRow('Window ID', window.id)}
+          ${infoRow('Flow Type', window.flow_type || 'registration')}
           ${infoRow('Contact', window.contact_id)}
           ${infoRow('Display Name', window.payment_display_name || '-')}
           ${infoRow('Expected Amount', window.first_deposit_amount != null ? `$${window.first_deposit_amount}` : '-')}
           ${infoRow('Window Status', window.status)}
+          ${infoRow('Matched Payment Event', window.matched_payment_event_id || '-')}
+          ${infoRow('Created', window.created_at ? fmtDateTime(window.created_at) : '-')}
           ${infoRow('Expires', window.expires_at ? fmtDateTime(window.expires_at) : '-')}
+          ${infoRow('Remaining', window.expires_at ? formatWindowRemaining(window.expires_at) : '-')}
         `
-    : '<div class="subtle">No registration payment window linked.</div>'}
+    : '<div class="subtle">No payment window linked.</div>'}
         <div class="payment-link-form">
           <label class="field-label">
             <span>Contact ID</span>

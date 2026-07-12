@@ -1,15 +1,28 @@
 import { queueBotReply } from './chatbotProcessor.js';
+import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
+import { registeredMenuButtons } from './botRegistrationState.js';
 
 export const REGISTRATION_PAYMENT_EXPIRY_MESSAGE = [
   'Registration failed.',
   '',
-  'We did not receive your payment within the 5-minute payment window.',
+  'We did not receive your payment within the 7-minute payment window.',
   '',
-  'Please press Register to start again.'
+  'Press Register to start again.'
+].join('\n');
+
+export const DEPOSIT_PAYMENT_EXPIRY_MESSAGE = [
+  'Your deposit request expired because no matching payment was received within 7 minutes.',
+  '',
+  'Press Deposit to try again.'
 ].join('\n');
 
 export const REGISTRATION_PAYMENT_EXPIRY_BUTTONS = [
   [{ label: '👑 Register', action: 'menu:register', text: 'Register', data: 'menu:register' }]
+];
+
+export const DEPOSIT_PAYMENT_EXPIRY_BUTTONS = [
+  [{ label: '💰 Deposit', action: 'menu:deposit', text: 'Deposit', data: 'menu:deposit' }],
+  ...registeredMenuButtons().slice(1)
 ];
 
 export async function processPaymentWindowExpiryTick({
@@ -22,12 +35,15 @@ export async function processPaymentWindowExpiryTick({
   let notifiedCount = 0;
 
   for (const window of windows) {
-    if (window.status === 'completed') continue;
+    if (window.status === 'completed' || window.status === 'matched') continue;
 
     const expired = await store.expireRegistrationPaymentWindowIfDue(window.id);
     if (expired) {
       expiredCount += 1;
-      console.log(`[chatbot] payment_window_expired contact=${window.contact_id} window=${window.id}`);
+      console.log(
+        `[chatbot] payment_window_expired contact=${window.contact_id} window=${window.id} ` +
+        `flow=${window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION}`
+      );
     }
 
     const claimed = await store.claimRegistrationPaymentWindowExpiryNotification(window.id);
@@ -36,10 +52,28 @@ export async function processPaymentWindowExpiryTick({
     const contact = await store.getUserProfile(window.contact_id);
     if (!contact) continue;
 
+    const flowType = window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const isDeposit = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT;
     const automationState = await store.getAutomationState(window.contact_id);
-    if (automationState?.current_flow === 'bot_registration') {
+
+    if (!isDeposit && automationState?.current_flow === 'bot_registration') {
       await store.resetRegistrationFlowToIdle(window.contact_id, 'PaymentWindowExpiry');
       console.log(`[chatbot] registration_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
+    }
+
+    if (isDeposit) {
+      await store.updateAutomationState(window.contact_id, {
+        currentFlow: null,
+        currentStep: null,
+        registrationInfo: {
+          ...(automationState?.registration_info || {}),
+          deposit_in_progress: false,
+          deposit_awaiting_payment: false,
+          deposit_requested_amount: undefined,
+          deposit_payment_window_id: undefined
+        }
+      }).catch(() => null);
+      console.log(`[chatbot] deposit_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
     }
 
     const autoBot = await store.getAutoRegistrationBotSettings();
@@ -52,12 +86,12 @@ export async function processPaymentWindowExpiryTick({
     await sendExpiryMessage({
       store,
       user: contact,
-      text: REGISTRATION_PAYMENT_EXPIRY_MESSAGE,
-      buttons: REGISTRATION_PAYMENT_EXPIRY_BUTTONS,
+      text: isDeposit ? DEPOSIT_PAYMENT_EXPIRY_MESSAGE : REGISTRATION_PAYMENT_EXPIRY_MESSAGE,
+      buttons: isDeposit ? DEPOSIT_PAYMENT_EXPIRY_BUTTONS : REGISTRATION_PAYMENT_EXPIRY_BUTTONS,
       bot: globalThis.telegramBot || null
     });
     notifiedCount += 1;
-    console.log(`[chatbot] expiry_notification_sent contact=${window.contact_id} window=${window.id}`);
+    console.log(`[chatbot] expiry_notification_sent contact=${window.contact_id} window=${window.id} flow=${flowType}`);
 
     if (io) {
       io.emit('message:new', { userId: contact.id, contactId: contact.id, telegramId: contact.telegram_id });

@@ -44,6 +44,12 @@ import {
   reviewDecision as royalVipReviewDecision
 } from './royalVipBotRegistration.js';
 import {
+  continueRegisteredDeposit,
+  isRegisteredDepositFlow,
+  startRegisteredDeposit,
+  REGISTERED_DEPOSIT_FLOW
+} from './registeredDepositFlow.js';
+import {
   buildStateAwareEntryMenu,
   isPlainRegisterText,
   shouldShowEntryMenu
@@ -191,6 +197,8 @@ export function normalizeCallbackAction(action) {
     'register:cancel_confirm': 'bot:stop',
     'register:cancel_abort': 'bot:continue_registration',
     'register:retry_payment_qr': 'bot:retry_payment_qr',
+    'deposit:cancel': 'deposit:cancel',
+    'deposit:retry_qr': 'deposit:retry_qr',
     'menu:main': 'bot:main_menu',
     'menu:registration_status': 'bot:status',
     'menu:deposit': 'bot:deposit',
@@ -451,6 +459,24 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (effective.is_registered || effective.effective_status === 'Registered') {
+    if (
+      action === 'bot:deposit'
+      || action === 'deposit:cancel'
+      || action === 'deposit:retry_qr'
+      || isRegisteredDepositFlow(flow, normalizedStep)
+    ) {
+      if (action === 'bot:deposit' && !isRegisteredDepositFlow(flow, normalizedStep)) {
+        return await startRegisteredDeposit(contact, info);
+      }
+      return await continueRegisteredDeposit({
+        store,
+        contact,
+        text,
+        action,
+        step: normalizedStep,
+        info
+      });
+    }
     return decideRegisteredSupport({ text, action, contact, effective });
   }
 
@@ -673,9 +699,8 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     return talkToStaffDecision();
   }
 
-  if (['bot:deposit', 'bot:cashout', 'bot:my_account', 'bot:my_games', 'bot:my_games'].includes(action)) {
+  if (['bot:cashout', 'bot:my_account', 'bot:my_games', 'bot:my_game'].includes(action)) {
     const label = {
-      'bot:deposit': 'deposit',
       'bot:cashout': 'cash out',
       'bot:my_account': 'account',
       'bot:my_game': 'games',
@@ -692,7 +717,8 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     };
   }
 
-  const name = contact?.display_name || 'there';
+  void contact;
+  void effective;
   return {
     kind: 'registered_support',
     replies: [{
