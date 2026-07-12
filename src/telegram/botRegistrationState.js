@@ -410,10 +410,18 @@ export function parseBotCommand(text = '') {
   };
 }
 
-export function clearedBotRegistrationInfo(contact) {
-  return {
-    telegram_display_name: contact?.display_name || null,
-    telegram_username: contact?.username || null,
-    telegram_user_id: contact?.telegram_id || null
+export function clearedBotRegistrationInfo(contact, existingInfo = null) {
+  const previous = existingInfo && typeof existingInfo === 'object' ? existingInfo : {};
+  const cleared = {
+    telegram_display_name: contact?.display_name || previous.telegram_display_name || null,
+    telegram_username: contact?.username || previous.telegram_username || null,
+    telegram_user_id: contact?.telegram_id || previous.telegram_user_id || null
   };
+  // Coadmin is assigned once at BotFather contact creation — never wipe it on restart/cancel.
+  for (const key of ['coadmin_name', 'coadmin_code', 'appbeg_coadmin_uid']) {
+    if (previous[key] != null && previous[key] !== '') {
+      cleared[key] = previous[key];
+    }
+  }
+  return cleared;
 }

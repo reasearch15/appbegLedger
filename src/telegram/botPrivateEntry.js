@@ -14,10 +14,19 @@ import { chatbotWelcomeCooldownMs } from '../registration/utils.js';
 /**
  * Upsert a Bot API contact from a Telegram private-chat user object.
  * Sets telegram_sync_source / active_messaging_source to bot_api via store.upsertTelegramUser.
+ * Brand-new contacts receive the Settings default coadmin (via upsertTelegramUser INSERT).
+ * Existing contacts are never reassigned here.
  */
 export async function ensureBotApiPrivateContact(store, telegramFrom, seenAt = null) {
   if (!telegramFrom) throw new Error('Telegram from user is required.');
   const when = seenAt || new Date().toISOString();
+  const telegramId = Number(telegramFrom.telegram_id ?? telegramFrom.id);
+  let isNewContact = false;
+  if (Number.isFinite(telegramId) && store.db?.prepare) {
+    const existingRow = await store.db.prepare('SELECT id FROM telegram_users WHERE telegram_id = ?').get(telegramId);
+    isNewContact = !existingRow;
+  }
+
   const user = await store.upsertTelegramUser(telegramFrom, when);
   await store.ensureConversation(user.id, when);
   if (store.ensureBotSession) {
@@ -26,6 +35,12 @@ export async function ensureBotApiPrivateContact(store, telegramFrom, seenAt = n
   if (store.ensureAutomationState) {
     await store.ensureAutomationState(user.id);
   }
+
+  // Defense-in-depth for brand-new contacts only (upsert already assigns on INSERT).
+  if (isNewContact && typeof store.assignCoadminToUser === 'function') {
+    await store.assignCoadminToUser(user.id, 'System');
+  }
+
   return store.getUserProfile(user.id);
 }
 

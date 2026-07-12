@@ -451,7 +451,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     if (store.expireActiveRegistrationPaymentWindows) {
       await store.expireActiveRegistrationPaymentWindows(contact.id, { suppressNotification: true }).catch(() => null);
     }
-    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact, info), store);
   }
 
   if (action === 'bot:stop' || action === 'bot:cancel') {
@@ -506,11 +506,11 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         effective
       });
     }
-    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact, info), store);
   }
 
   if (String(action || '').startsWith('bot:payment_app:') || String(action || '').startsWith('register:payment_app:')) {
-    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact, info), store);
   }
 
   if (action === 'bot:edit_username' || action === 'bot:edit_password' || action === 'bot:edit_referral' || action === 'bot:enter_referral' || action === 'bot:skip_referral') {
@@ -547,7 +547,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       return await mainMenuDecision(contact, info, automationState, effective);
     }
     if (isStartRegistrationCommand(text)) {
-      return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
+      return await startRegistrationDecision(contact, clearedRegistrationInfo(contact, info), store);
     }
     return await mainMenuDecision(contact, info, automationState, effective);
   }
@@ -571,8 +571,8 @@ function talkToStaffDecision() {
   };
 }
 
-function clearedRegistrationInfo(contact) {
-  return clearedBotRegistrationInfo(contact);
+function clearedRegistrationInfo(contact, existingInfo = null) {
+  return clearedBotRegistrationInfo(contact, existingInfo);
 }
 
 function registrationStoppedMessage() {
@@ -618,7 +618,7 @@ async function stopRegistrationDecision({ store, contact, flow, step, info }) {
     statePatch: {
       currentFlow: null,
       currentStep: null,
-      registrationInfo: clearedRegistrationInfo(contact)
+      registrationInfo: clearedRegistrationInfo(contact, info)
     },
     replaceRegistrationInfo: true,
     setStatus: ['Collecting Info', 'Waiting For Payment'].includes(contact.registration_status) ? 'New' : undefined,

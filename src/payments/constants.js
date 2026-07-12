@@ -1,5 +1,6 @@
 export const ROUTING_STATUS = {
   UNROUTED: 'unrouted',
+  SEARCHING: 'searching',
   REGISTERED_PLAYER_DEPOSIT: 'registered_player_deposit',
   DEPOSIT_WINDOW_MATCHED: 'deposit_window_matched',
   REGISTRATION_PAYMENT_MATCHED: 'registration_payment_matched',
@@ -61,6 +62,9 @@ export const PAYMENT_WINDOW_FLOW = {
 /** Canonical window duration for registration and registered deposits. */
 export const PAYMENT_WINDOW_MINUTES = 7;
 
+/** How long an unmatched payment keeps searching for an active window before freeze. */
+export const PAYMENT_SEARCH_MINUTES = 5;
+
 export const PAYMENT_WINDOW_STATUS = {
   ACTIVE: 'active',
   /** Stored historically as `completed`; hydrate maps both. */
@@ -79,13 +83,25 @@ export function paymentWindowMinutes() {
   return Math.max(Number(process.env.PAYMENT_WINDOW_MINUTES || PAYMENT_WINDOW_MINUTES), 1);
 }
 
+export function paymentSearchMinutes() {
+  return Math.max(Number(process.env.PAYMENT_SEARCH_MINUTES || PAYMENT_SEARCH_MINUTES), 1);
+}
+
 /** @deprecated Use paymentWindowMinutes — all live payment windows are 7 minutes. */
 export function depositWindowMinutes() {
   return paymentWindowMinutes();
 }
 
+export function computePaymentFreezeAt(fromDate = new Date(), searchMinutes = paymentSearchMinutes()) {
+  const start = fromDate instanceof Date ? fromDate : new Date(fromDate);
+  const base = Number.isNaN(start.getTime()) ? new Date() : start;
+  return new Date(base.getTime() + searchMinutes * 60 * 1000).toISOString();
+}
+
 export function paymentRoutingLabel(routingStatus) {
   switch (routingStatus) {
+    case ROUTING_STATUS.SEARCHING:
+      return 'Searching Active Windows';
     case ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT:
     case ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED:
       return 'Registered Deposit Matched';
@@ -134,6 +150,7 @@ export function paymentRoutingReason(payment = {}) {
 
 export function paymentProcessingLabel(payment = {}) {
   const routing = payment.routing_status;
+  if (routing === ROUTING_STATUS.SEARCHING) return 'searching';
   if (
     routing === ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT
     || routing === ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED

@@ -1,6 +1,7 @@
 import { parsePaymentMessage } from './parser.js';
 import {
   buildIdempotencyKey,
+  computePaymentFreezeAt,
   DEPOSIT_STATUS,
   HANDLED_BY_APPBEG_BOT,
   PAYMENT_WINDOW_FLOW,
@@ -18,8 +19,10 @@ import {
 import { continueBotRegistrationAfterPayment } from './registrationPaymentFlow.js';
 import { continueRegisteredDepositAfterPayment } from './depositPaymentFlow.js';
 
-function isAlreadyRouted(payment) {
-  return Boolean(payment.routed_at);
+function isTerminalRouted(payment) {
+  if (!payment?.routed_at) return false;
+  const status = payment.routing_status;
+  return status !== ROUTING_STATUS.SEARCHING && status !== ROUTING_STATUS.UNROUTED;
 }
 
 async function freezePayment(store, payment, {
@@ -47,22 +50,55 @@ async function freezePayment(store, payment, {
   return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW, unmatchedReason };
 }
 
-export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null } = {}) {
+async function keepSearching(store, payment, { freezeAt, unmatchedReason, metadata = {} }) {
+  const nextFreezeAt = freezeAt || payment.freeze_at || computePaymentFreezeAt(payment.message_date || payment.created_at || new Date());
+  console.log(
+    `[payment-router] payment_searching payment=${payment.id} freeze_at=${nextFreezeAt} reason=${unmatchedReason || 'no_active_window'}`
+  );
+  await store.updatePaymentRouting(payment.id, {
+    routing_status: ROUTING_STATUS.SEARCHING,
+    routing_owner: ROUTING_OWNER.APPBEG,
+    routing_reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+    contact_id: null,
+    registration_payment_window_id: null,
+    routed_at: null,
+    handled_by: null,
+    freeze_at: nextFreezeAt
+  });
+  await store.logPaymentRouting(payment.id, 'payment_searching', 'No eligible active payment window yet; continuing search until freeze_at.', {
+    unmatchedReason,
+    freezeAt: nextFreezeAt,
+    status: 'searching',
+    ...metadata
+  });
+  return {
+    ok: true,
+    payment: await store.getPaymentEvent(payment.id),
+    outcome: ROUTING_STATUS.SEARCHING,
+    unmatchedReason,
+    freezeAt: nextFreezeAt
+  };
+}
+
+function hasSearchExpired(payment, now = new Date()) {
+  const freezeAt = payment.freeze_at ? new Date(payment.freeze_at).getTime() : null;
+  if (!Number.isFinite(freezeAt)) return false;
+  return now.getTime() >= freezeAt;
+}
+
+export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null, now = new Date() } = {}) {
   const payment = await store.getPaymentEvent(paymentId);
   if (!payment) {
     return { ok: false, error: 'Payment event not found.' };
   }
 
-  if (!force && isAlreadyRouted(payment)) {
+  if (!force && isTerminalRouted(payment)) {
     console.log(`[payment-router] payment_message_duplicate_skipped payment=${payment.id}`);
     await store.logPaymentRouting(payment.id, 'duplicate_ignored', 'Payment already routed; idempotency guard applied.', {
       routingStatus: payment.routing_status,
       idempotencyKey: payment.idempotency_key
     });
-    if (payment.routing_status !== ROUTING_STATUS.DUPLICATE_IGNORED) {
-      await store.updatePaymentRouting(payment.id, { routing_status: ROUTING_STATUS.DUPLICATE_IGNORED });
-    }
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.DUPLICATE_IGNORED };
+    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: payment.routing_status || ROUTING_STATUS.DUPLICATE_IGNORED };
   }
 
   const idempotencyKey = payment.idempotency_key || buildIdempotencyKey(payment.telegram_group_id, payment.telegram_message_id);
@@ -92,14 +128,14 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   });
 
   console.log(`[payment-router] payment_window_checked payment=${payment.id}`);
-  await store.logPaymentRouting(payment.id, 'payment_window_checked', 'Checking active payment windows (registration + deposit).', {
+  await store.logPaymentRouting(payment.id, 'payment_window_checked', 'Checking eligible active payment windows only (registration + deposit).', {
     amount: parsed.amount,
     paymentApp: parsed.payment_app,
     senderName: parsed.payment_sender_name
   });
 
   const activeWindows = await store.listActiveRegistrationPaymentWindows();
-  const match = findMatchingActivePaymentWindow(activeWindows, parsed);
+  const match = findMatchingActivePaymentWindow(activeWindows, parsed, { now });
 
   if (match.result === 'ambiguous_match') {
     return freezePayment(store, payment, {
@@ -123,13 +159,18 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       : { ok: true, reason: 'matched', window: activeWindow };
 
     if (!claim.ok) {
-      return freezePayment(store, payment, {
-        reason: `Payment window claim failed (${claim.reason}).`,
+      // Another worker may have claimed it; keep searching unless search window expired.
+      if (hasSearchExpired(payment, now) || hasSearchExpired({ freeze_at: payment.freeze_at || computePaymentFreezeAt(payment.message_date || new Date()) }, now)) {
+        return freezePayment(store, payment, {
+          reason: `Payment window claim failed (${claim.reason}).`,
+          unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+          metadata: { windowId: activeWindow.id, claimReason: claim.reason }
+        });
+      }
+      return keepSearching(store, payment, {
+        freezeAt: payment.freeze_at,
         unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
-        metadata: {
-          windowId: activeWindow.id,
-          claimReason: claim.reason
-        }
+        metadata: { claimReason: claim.reason, windowId: activeWindow.id }
       });
     }
 
@@ -169,7 +210,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
         windowId: activeWindow.id,
         paymentEventId: payment.id,
         bot,
-        io
+        io,
+        alreadyClaimed: true
       });
       return {
         ok: true,
@@ -196,46 +238,28 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     };
   }
 
-  const expiredWindows = await store.listExpiredRegistrationPaymentWindowsForMatch();
-  const expiredMatch = findMatchingActivePaymentWindow(expiredWindows, parsed);
-  if (expiredMatch.result === 'exact_match' || expiredMatch.result === 'ambiguous_match') {
-    const expiredWindow = expiredMatch.window || expiredMatch.windows?.[0] || null;
-    const unmatchedReason = UNMATCHED_REASON.WINDOW_EXPIRED;
-    console.log(`[payment-router] payment_window_expired_match payment=${payment.id} window=${expiredWindow?.id || 'n/a'}`);
-    await store.updatePaymentRouting(payment.id, {
-      routing_status: ROUTING_STATUS.EXPIRED_DEPOSIT,
-      routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: isDepositWindow(expiredWindow)
-        ? ROUTING_REASON.DEPOSIT_WINDOW_EXPIRED
-        : ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED,
-      contact_id: expiredWindow?.contact_id || null,
-      registration_payment_window_id: expiredWindow?.id || null,
-      routed_at: new Date().toISOString(),
-      handled_by: HANDLED_BY_APPBEG_BOT
-    });
-    await store.logPaymentRouting(payment.id, 'payment_window_expired_match', 'Payment matched a window but the window had expired.', {
-      contactId: expiredWindow?.contact_id || null,
-      windowId: expiredWindow?.id || null,
-      unmatchedReason,
-      flowType: expiredWindow?.flow_type || null,
-      status: 'frozen'
-    });
-    return {
-      ok: true,
-      payment: await store.getPaymentEvent(payment.id),
-      outcome: ROUTING_STATUS.EXPIRED_DEPOSIT,
-      unmatchedReason
-    };
-  }
-
+  // No eligible active window. Keep searching until freeze_at; never auto-match expired/history.
+  const freezeAt = payment.freeze_at || computePaymentFreezeAt(payment.message_date || payment.created_at || now);
   const unmatchedReason = classifyUnmatchedReason({
-    activeWindows,
-    expiredWindows,
+    activeWindows: match.eligibleWindows || activeWindows,
     parsed
   });
 
-  return freezePayment(store, payment, {
-    reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+  if (hasSearchExpired({ freeze_at: freezeAt }, now)) {
+    return freezePayment(store, payment, {
+      reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+      unmatchedReason,
+      metadata: {
+        amount: parsed.amount,
+        paymentApp: parsed.payment_app,
+        senderName: parsed.payment_sender_name,
+        freezeAt
+      }
+    });
+  }
+
+  return keepSearching(store, payment, {
+    freezeAt,
     unmatchedReason,
     metadata: {
       amount: parsed.amount,
@@ -246,7 +270,9 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 }
 
 export async function routeUnprocessedPayments(store, { limit = 50, bot = null, io = null } = {}) {
-  const pending = await store.listUnroutedPaymentEvents(limit);
+  const pending = typeof store.listSearchingOrUnroutedPaymentEvents === 'function'
+    ? await store.listSearchingOrUnroutedPaymentEvents(limit)
+    : await store.listUnroutedPaymentEvents(limit);
   const results = [];
   for (const payment of pending) {
     results.push(await routePaymentEvent(store, payment.id, { bot, io }));

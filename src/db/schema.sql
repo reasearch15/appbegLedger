@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS payment_events (
   teleledger_sync_status TEXT,
   idempotency_key TEXT,
   routed_at TEXT,
+  freeze_at TEXT,
   handled_by TEXT,
   is_edited INTEGER NOT NULL DEFAULT 0,
   is_deleted INTEGER NOT NULL DEFAULT 0,

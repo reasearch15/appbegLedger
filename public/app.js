@@ -1968,6 +1968,8 @@ function automationLogItems() {
 
 function paymentRoutingLabel(routingStatus) {
   switch (routingStatus) {
+    case 'searching':
+      return 'Searching Active Windows';
     case 'registered_player_deposit':
     case 'deposit_window_matched':
       return 'Registered Deposit Matched';
@@ -2014,6 +2016,7 @@ function paymentRoutingReason(payment = {}) {
 
 function paymentProcessingLabel(payment = {}) {
   const routing = payment.routing_status;
+  if (routing === 'searching') return 'searching';
   if (routing === 'registered_player_deposit' || routing === 'deposit_window_matched') return 'matched';
   if (routing === 'manual_review' || routing === 'untouched_unmatched') return 'frozen';
   if (routing === 'registration_payment_matched' || routing === 'appbeg_owned') return 'matched';
@@ -2025,6 +2028,7 @@ function paymentProcessingLabel(payment = {}) {
 function paymentProcessingDisplay(payment = {}) {
   const label = paymentProcessingLabel(payment);
   switch (label) {
+    case 'searching': return 'Searching';
     case 'pending_review': return 'Pending Review';
     case 'frozen': return 'Frozen';
     case 'matched': return 'Matched';

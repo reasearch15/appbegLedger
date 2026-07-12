@@ -24,6 +24,7 @@
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",
     "test:payment-windows": "node scripts/test-unified-payment-windows.js",
     "test:bot-private-entry": "node scripts/test-bot-private-entry.js",
+    "test:default-coadmin": "node scripts/test-default-coadmin-on-contact.js",
     "test:telegram-cleanup": "node scripts/test-telegram-cleanup-architecture.js"
   },
   "dependencies": {

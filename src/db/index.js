@@ -2367,9 +2367,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT *
       FROM payment_events
       WHERE routed_at IS NULL
+         OR routing_status IN ('unrouted', 'searching')
       ORDER BY message_date ASC, id ASC
       LIMIT ?
     `).all(Math.min(Math.max(Number(limit) || 50, 1), 500))).map(hydratePaymentEvent);
+  }
+
+  async function listSearchingOrUnroutedPaymentEvents(limit = 50) {
+    return listUnroutedPaymentEvents(limit);
   }
 
   async function ensurePaymentIdempotencyKey(paymentEventId, idempotencyKey) {
@@ -2422,16 +2427,20 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       routing_status: patch.routing_status ?? current.routing_status,
       routing_owner: patch.routing_owner ?? current.routing_owner,
       routing_reason: patch.routing_reason ?? current.routing_reason,
-      contact_id: patch.contact_id ?? current.contact_id,
+      contact_id: patch.contact_id === undefined ? current.contact_id : patch.contact_id,
       deposit_event_id: patch.deposit_event_id ?? current.deposit_event_id,
-      registration_payment_window_id: patch.registration_payment_window_id ?? current.registration_payment_window_id,
+      registration_payment_window_id: patch.registration_payment_window_id === undefined
+        ? current.registration_payment_window_id
+        : patch.registration_payment_window_id,
       teleledger_payment_id: patch.teleledger_payment_id ?? current.teleledger_payment_id,
       teleledger_sync_status: patch.teleledger_sync_status ?? current.teleledger_sync_status,
-      routed_at: patch.routed_at ?? current.routed_at,
-      handled_by: patch.handled_by ?? current.handled_by
+      routed_at: patch.routed_at === undefined ? current.routed_at : patch.routed_at,
+      handled_by: patch.handled_by === undefined ? current.handled_by : patch.handled_by,
+      freeze_at: patch.freeze_at === undefined ? current.freeze_at : patch.freeze_at
     };
     let processingStatus = current.processing_status;
-    if (next.routing_status === 'registered_player_deposit' || next.routing_status === 'deposit_window_matched') processingStatus = 'Matched';
+    if (next.routing_status === 'searching') processingStatus = 'Parsed';
+    else if (next.routing_status === 'registered_player_deposit' || next.routing_status === 'deposit_window_matched') processingStatus = 'Matched';
     else if (next.routing_status === 'registration_payment_matched' || next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
     else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
@@ -2450,6 +2459,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         teleledger_sync_status = ?,
         routed_at = ?,
         handled_by = ?,
+        freeze_at = ?,
         processing_status = ?,
         updated_at = ?
       WHERE id = ?
@@ -2464,6 +2474,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       next.teleledger_sync_status,
       next.routed_at,
       next.handled_by,
+      next.freeze_at,
       processingStatus,
       nowIso(),
       paymentEventId
@@ -2504,6 +2515,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           teleledger_sync_status = NULL,
           routed_at = NULL,
           handled_by = NULL,
+          freeze_at = NULL,
           updated_at = ?
       WHERE id = ?
     `).run(nowIso(), paymentEventId);
@@ -3052,13 +3064,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const snapshot = options.snapshot || (await buildCoadminSnapshot());
     const hasData = snapshot.coadmin_name || snapshot.coadmin_code || snapshot.appbeg_coadmin_uid;
     if (!hasData) {
-      return { changed: false, state: await getAutomationState(userId) };
+      console.warn(
+        `[coadmin] no default coadmin configured in Settings; contact=${userId} created without coadmin assignment`
+      );
+      return { changed: false, missingDefault: true, state: await getAutomationState(userId) };
     }
 
     const current = await ensureAutomationState(userId);
     const previous = current.registration_info || {};
     if (await coadminSnapshotMatches(previous, snapshot)) {
-      return { changed: false, state: current };
+      return { changed: false, missingDefault: false, state: current };
+    }
+
+    // Only assign when the contact has no coadmin yet, unless force is set (settings backfill).
+    const alreadyAssigned = Boolean(previous.coadmin_name || previous.coadmin_code || previous.appbeg_coadmin_uid);
+    if (alreadyAssigned && !options.force) {
+      return { changed: false, missingDefault: false, state: current };
     }
 
     const next = { ...previous };
@@ -3072,7 +3093,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     }
 
     if (!changed) {
-      return { changed: false, state: current };
+      return { changed: false, missingDefault: false, state: current };
     }
 
     await updateAutomationState(userId, { registrationInfo: next });
@@ -3094,7 +3115,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       actorName,
       metadata: snapshot
     });
-    return { changed: true, state: await getAutomationState(userId) };
+    console.log(
+      `[coadmin] assigned contact=${userId} name=${snapshot.coadmin_name || 'n/a'} ` +
+      `code=${snapshot.coadmin_code || 'n/a'} uid=${snapshot.appbeg_coadmin_uid || 'n/a'}`
+    );
+    return { changed: true, missingDefault: false, state: await getAutomationState(userId) };
   }
 
   async function applyCoadminToExistingBusinessContacts(actorName = 'Staff', { settings = null } = {}) {
@@ -3112,6 +3137,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       await stampBusinessSourceAccount(userId, activeSettings);
       const result = await assignCoadminToUser(userId, actorName, {
         snapshot,
+        force: true,
         eventType: 'coadmin_assigned_from_settings',
         eventTitle: 'Coadmin Assigned From Settings'
       });
@@ -3627,7 +3653,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         WHERE contact_id = ?
           AND status = 'active'
           AND flow_type = ?
-          AND expires_at >= ?
+          AND expires_at > ?
+          AND matched_payment_event_id IS NULL
         ORDER BY id DESC
         LIMIT 1
       `).get(contactId, flowType, now));
@@ -3637,7 +3664,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM registration_payment_windows
       WHERE contact_id = ?
         AND status = 'active'
-        AND expires_at >= ?
+        AND expires_at > ?
+        AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
+        AND matched_payment_event_id IS NULL
       ORDER BY id DESC
       LIMIT 1
     `).get(contactId, now));
@@ -3656,11 +3685,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM registration_payment_windows w
       LEFT JOIN payment_methods pm ON pm.id = w.payment_method_id
       WHERE w.status = 'active'
-        AND w.expires_at >= ?
+        AND w.expires_at > ?
+        AND COALESCE(w.flow_type, 'registration') IN ('registration', 'deposit')
+        AND w.matched_payment_event_id IS NULL
       ORDER BY w.id DESC
       LIMIT ?
     `).all(now, Math.min(Math.max(Number(limit) || 200, 1), 1000));
-    return rows.map(hydratePaymentWindow);
+    return rows.map(hydratePaymentWindow).filter((window) => window?.status === 'active');
   }
 
   async function listExpiredRegistrationPaymentWindowsForMatch(limit = 200) {
@@ -3706,7 +3737,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           updated_at = ?
       WHERE id = ?
         AND status = 'active'
-        AND expires_at >= ?
+        AND expires_at > ?
+        AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
         AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
     `).run(paymentEventId, now, now, windowId, now, paymentEventId);
 
@@ -3802,13 +3834,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (['Collecting Info', 'Waiting For Payment'].includes(user.registration_status)) {
       await updateRegistrationStatus(userId, 'New', actorName);
     }
+    const previous = (await getAutomationState(userId))?.registration_info || {};
     return await updateAutomationState(userId, {
       currentFlow: null,
       currentStep: null,
       registrationInfo: {
         telegram_display_name: user.display_name,
         telegram_username: user.username || null,
-        telegram_user_id: user.telegram_id
+        telegram_user_id: user.telegram_id,
+        ...(previous.coadmin_name ? { coadmin_name: previous.coadmin_name } : {}),
+        ...(previous.coadmin_code ? { coadmin_code: previous.coadmin_code } : {}),
+        ...(previous.appbeg_coadmin_uid ? { appbeg_coadmin_uid: previous.appbeg_coadmin_uid } : {})
       }
     });
   }
@@ -3994,6 +4030,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getPaymentEventByTelegramMessageId,
     getPaymentStats,
     listUnroutedPaymentEvents,
+    listSearchingOrUnroutedPaymentEvents,
     ensurePaymentIdempotencyKey,
     applyPaymentParseResult,
     updatePaymentRouting,
@@ -4345,7 +4382,8 @@ async function migrate(db) {
     ['parsed_payment_app', 'TEXT'],
     ['parsed_message_time', 'TEXT'],
     ['registration_payment_window_id', 'INTEGER'],
-    ['routing_reason', 'TEXT']
+    ['routing_reason', 'TEXT'],
+    ['freeze_at', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
   }

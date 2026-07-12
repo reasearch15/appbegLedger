@@ -188,6 +188,7 @@ export async function startRoyalVipRegistration(contact, info, store, { resumed 
     };
   }
 
+  const existingInfo = info && typeof info === 'object' ? info : {};
   return {
     kind: 'registration_ask_payment_name',
     replies: [{
@@ -198,7 +199,7 @@ export async function startRoyalVipRegistration(contact, info, store, { resumed 
       currentFlow: BOT_REGISTRATION_FLOW,
       currentStep: 'payment_name',
       registrationInfo: {
-        ...clearedBotRegistrationInfo(contact),
+        ...clearedBotRegistrationInfo(contact, existingInfo),
         telegram_display_name: contact.display_name,
         telegram_username: contact.username || null,
         telegram_user_id: contact.telegram_id,
@@ -403,7 +404,7 @@ export async function continueRoyalVipRegistration({
 
   if (normalizedStep === 'welcome') {
     if (/^register$/i.test(String(text || '').trim())) {
-      return startRoyalVipRegistration(contact, clearedBotRegistrationInfo(contact), store);
+      return startRoyalVipRegistration(contact, info, store);
     }
     const state = effective || await resolveEffectiveRegistrationState({ contact, automationState });
     return {
@@ -724,7 +725,7 @@ export async function continueRoyalVipRegistration({
       escalate: false
     };
   }
-  return startRoyalVipRegistration(contact, clearedBotRegistrationInfo(contact), store, { resumed: true });
+  return startRoyalVipRegistration(contact, info, store, { resumed: true });
 }
 
 export function isWelcomeThrottled(automationState) {
