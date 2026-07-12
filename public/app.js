@@ -11,23 +11,26 @@ import {
   REGISTRATION_WIZARD_STEPS,
   isRegistrationComplete
 } from './contactOverview.js';
+import {
+  PAYMENT_STATUS_FILTERS,
+  deriveMatchingStatus,
+  matchingStatusLabel,
+  matchingStatusFilterLabel,
+  matchingStatusEmoji,
+  paymentStatusDetailCopy,
+  renderPaymentStatusCell,
+  remainingSecondsUntil,
+  formatFreezeCountdown,
+  sortPaymentsByStatus,
+  MATCHING_STATUS
+} from './paymentStatus.js';
 
 const app = document.querySelector('#app');
 const socket = io({ withCredentials: true });
 
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
 const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
-const paymentStatusFilters = ['All', 'New', 'Parsed', 'Matched', 'Failed'];
-const paymentRoutingFilters = [
-  'All',
-  'registered_player_deposit',
-  'registration_payment_matched',
-  'manual_review',
-  'untouched_unmatched',
-  'expired_deposit',
-  'parse_failed',
-  'ignored'
-];
+const paymentStatusFilters = PAYMENT_STATUS_FILTERS;
 
 let state = {
   section: 'contacts',
@@ -48,7 +51,6 @@ let state = {
   paymentRoutingLogs: [],
   paymentQuery: '',
   paymentStatusFilter: 'All',
-  paymentRoutingFilter: 'All',
   paymentExceptionsOnly: false,
   selectedContactId: null,
   contact: null,
@@ -1218,13 +1220,16 @@ function normalizePaymentStats(stats = {}) {
     messagesToday: Number(stats.messagesToday ?? stats.messagestoday ?? 0) || 0,
     registeredPlayerDeposits: Number(stats.registeredPlayerDeposits ?? stats.registeredplayerdeposits ?? 0) || 0,
     registrationMatched: Number(stats.registrationMatched ?? stats.registrationmatched ?? 0) || 0,
+    waiting: Number(stats.waiting ?? 0) || 0,
+    matched: Number(stats.matched ?? 0) || 0,
+    frozen: Number(stats.frozen ?? 0) || 0,
+    manualReview: Number(stats.manualReview ?? stats.manualreview ?? 0) || 0,
+    completed: Number(stats.completed ?? 0) || 0,
     frozenManualReview: Number(stats.frozenManualReview ?? stats.frozenmanualreview ?? 0) || 0,
     expiredWindowMatch: Number(stats.expiredWindowMatch ?? stats.expiredwindowmatch ?? 0) || 0,
     parseFailed: Number(stats.parseFailed ?? stats.parsefailed ?? 0) || 0,
     ignored: Number(stats.ignored ?? 0) || 0,
     exceptions: Number(stats.exceptions ?? 0) || 0,
-    waiting: Number(stats.waiting ?? 0) || 0,
-    unrouted: Number(stats.unrouted ?? 0) || 0,
     appbegOwned: Number(stats.appbegOwned ?? stats.appbegowned ?? 0) || 0,
     failed: Number(stats.failed ?? 0) || 0,
     totalMessages: Number(stats.totalMessages ?? stats.totalmessages ?? 0) || 0
@@ -1233,8 +1238,7 @@ function normalizePaymentStats(stats = {}) {
 
 async function refreshPayments({ keepSelection = true } = {}) {
   const query = new URLSearchParams({
-    status: state.paymentStatusFilter,
-    routingStatus: state.paymentRoutingFilter,
+    matchingStatus: state.paymentStatusFilter,
     exceptionsOnly: state.paymentExceptionsOnly ? 'true' : 'false',
     query: state.paymentQuery,
     limit: '500'
@@ -1245,12 +1249,11 @@ async function refreshPayments({ keepSelection = true } = {}) {
     api('/api/payment-sync/status')
   ]);
   const payments = Array.isArray(paymentsPayload?.payments) ? paymentsPayload.payments : [];
-  state.payments = payments;
+  state.payments = sortPaymentsByStatus(payments);
   state.paymentStats = normalizePaymentStats(statsPayload?.stats || {});
   state.paymentSync = syncPayload?.sync || {};
   console.log(`[payments-ui] loaded ${payments.length} payments`, {
-    status: state.paymentStatusFilter,
-    routingStatus: state.paymentRoutingFilter,
+    matchingStatus: state.paymentStatusFilter,
     exceptionsOnly: state.paymentExceptionsOnly,
     totalMessages: state.paymentStats.totalMessages
   });
@@ -1395,8 +1398,8 @@ function syncStatus() {
 
 function filterButtons(items, active, attr) {
   return items.map((item) => {
-    const label = attr === 'payment-routing'
-      ? (item === 'All' ? 'All' : paymentRoutingLabel(item))
+    const label = attr === 'payment-status'
+      ? matchingStatusFilterLabel(item)
       : item;
     return `
     <button class="filter-chip ${active === item ? 'active' : ''}" data-${attr}="${item}">${escapeHtml(label)}</button>
@@ -1966,87 +1969,14 @@ function automationLogItems() {
   `).join('');
 }
 
-function paymentRoutingLabel(routingStatus) {
-  switch (routingStatus) {
-    case 'searching':
-      return 'Searching Active Windows';
-    case 'registered_player_deposit':
-    case 'deposit_window_matched':
-      return 'Registered Deposit Matched';
-    case 'registration_payment_matched':
-    case 'appbeg_owned':
-      return 'Registration Matched';
-    case 'manual_review':
-    case 'untouched_unmatched':
-      return 'Frozen / Manual Review';
-    case 'expired_deposit':
-      return 'Expired Payment Window';
-    case 'parse_failed':
-      return 'Parse Failed';
-    case 'ignored':
-      return 'Ignored';
-    case 'duplicate_ignored':
-      return 'Duplicate Skipped';
-    default:
-      return routingStatus || 'Pending';
-  }
-}
-
-function paymentRoutingReason(payment = {}) {
-  if (payment.routing_reason) return payment.routing_reason;
-  switch (payment.routing_status) {
-    case 'registered_player_deposit':
-      return 'Matched registered player';
-    case 'deposit_window_matched':
-      return 'Matched active deposit payment window';
-    case 'registration_payment_matched':
-    case 'appbeg_owned':
-      return 'Matched registration payment window';
-    case 'expired_deposit':
-      return 'Payment window expired';
-    case 'parse_failed':
-      return 'Unable to parse payment';
-    case 'manual_review':
-    case 'untouched_unmatched':
-      return 'Waiting for manual review';
-    default:
-      return payment.parse_error ? 'Unable to parse payment' : '—';
-  }
-}
-
-function paymentProcessingLabel(payment = {}) {
-  const routing = payment.routing_status;
-  if (routing === 'searching') return 'searching';
-  if (routing === 'registered_player_deposit' || routing === 'deposit_window_matched') return 'matched';
-  if (routing === 'manual_review' || routing === 'untouched_unmatched') return 'frozen';
-  if (routing === 'registration_payment_matched' || routing === 'appbeg_owned') return 'matched';
-  if (routing === 'parse_failed') return 'parse_failed';
-  if (routing === 'expired_deposit') return 'expired_window';
-  return String(payment.processing_status || 'new').toLowerCase();
-}
-
-function paymentProcessingDisplay(payment = {}) {
-  const label = paymentProcessingLabel(payment);
-  switch (label) {
-    case 'searching': return 'Searching';
-    case 'pending_review': return 'Pending Review';
-    case 'frozen': return 'Frozen';
-    case 'matched': return 'Matched';
-    case 'parse_failed': return 'Parse Failed';
-    case 'expired_window': return 'Expired Window';
-    default: return label;
-  }
-}
-
 function paymentStatCards() {
   const cards = [
     ['Messages Today', state.paymentStats.messagesToday || 0],
-    ['Registered Deposits', state.paymentStats.registeredPlayerDeposits || 0],
-    ['Registration Matched', state.paymentStats.registrationMatched || 0],
-    ['Frozen / Review', state.paymentStats.frozenManualReview || 0],
-    ['Unrouted', state.paymentStats.unrouted || 0],
-    ['Expired Window', state.paymentStats.expiredWindowMatch || 0],
-    ['Parse Failed', state.paymentStats.parseFailed || 0],
+    ['Waiting', state.paymentStats.waiting || 0],
+    ['Matched', state.paymentStats.matched || 0],
+    ['Completed', state.paymentStats.completed || 0],
+    ['Frozen', state.paymentStats.frozen || 0],
+    ['Manual Review', state.paymentStats.manualReview || 0],
     ['Total', state.paymentStats.totalMessages || 0]
   ];
   return cards.map(([label, value]) => `
@@ -2070,6 +2000,7 @@ function paymentSyncStatus() {
 
 function paymentRows() {
   if (!state.payments.length) return '<div class="empty-state">No payment messages match the current filters.</div>';
+  const now = Date.now();
   return state.payments.map((payment) => `
     <button class="payment-row ${Number(state.selectedPaymentId) === Number(payment.id) ? 'selected' : ''}" data-payment-id="${payment.id}">
       <span>${fmtDateTime(payment.message_date)}</span>
@@ -2078,9 +2009,7 @@ function paymentRows() {
       <span class="truncate">${escapeHtml(payment.parsed_payment_app || '—')}</span>
       <span class="truncate">${escapeHtml(payment.message_text || '[non-text message]')}</span>
       <span>${payment.telegram_message_id}</span>
-      <span class="badge routing-${escapeHtml(payment.routing_status || 'pending')}">${escapeHtml(paymentRoutingLabel(payment.routing_status))}</span>
-      <span class="truncate subtle">${escapeHtml(paymentRoutingReason(payment))}</span>
-      <span class="badge status-${escapeHtml(paymentProcessingLabel(payment))}">${escapeHtml(paymentProcessingDisplay(payment))}</span>
+      ${renderPaymentStatusCell(payment, now)}
     </button>
   `).join('');
 }
@@ -2090,21 +2019,31 @@ function paymentDetailPanel() {
   if (!payment) return '<aside class="payment-detail"><section class="chat-empty-panel">Select a payment message to inspect it.</section></aside>';
   const busy = state.paymentActionBusy;
   const window = state.registrationWindow;
+  const status = deriveMatchingStatus(payment);
+  const statusLabel = `${matchingStatusEmoji(status)} ${matchingStatusLabel(status)}`;
+  const remaining = status === MATCHING_STATUS.SEARCHING
+    ? remainingSecondsUntil(payment.freeze_at)
+    : null;
   return `
     <aside class="payment-detail">
       <section class="card">
         <div class="card-title">Payment Message</div>
-        ${infoRow('Processing', paymentProcessingDisplay(payment))}
-        ${infoRow('Routing', paymentRoutingLabel(payment.routing_status))}
-        ${infoRow('Reason', paymentRoutingReason(payment))}
-        ${payment.routing_status === 'manual_review' || payment.routing_status === 'untouched_unmatched'
-    ? `<p class="modal-error">This payment is frozen for manual staff review. Do not auto-assign or ignore without review.${payment.unmatched_reason ? ` Reason code: ${escapeHtml(payment.unmatched_reason)}.` : ''}</p>`
+        ${infoRow('Status', statusLabel)}
+        ${status === MATCHING_STATUS.SEARCHING
+    ? infoRow('Freeze in', formatFreezeCountdown(remaining))
     : ''}
-        ${payment.routing_status === 'deposit_window_matched'
-    ? '<p class="subtle">Registered deposit matched an active 7-minute deposit window.</p>'
+        ${infoRow('Details', paymentStatusDetailCopy(payment))}
+        ${payment.flow_type || payment.window_flow_type
+    ? infoRow('Flow', payment.flow_type || payment.window_flow_type)
     : ''}
-        ${payment.routing_status === 'registered_player_deposit'
-    ? '<p class="subtle">Legacy registered-player routing — prefer deposit windows going forward.</p>'
+        ${status === MATCHING_STATUS.FROZEN || status === MATCHING_STATUS.MANUAL_REVIEW
+    ? `<p class="modal-error">${escapeHtml(paymentStatusDetailCopy(payment))}${payment.unmatched_reason ? ` Reason code: ${escapeHtml(payment.unmatched_reason)}.` : ''}</p>`
+    : ''}
+        ${status === MATCHING_STATUS.MATCHED && (payment.flow_type === 'deposit' || payment.routing_status === 'deposit_window_matched')
+    ? '<p class="subtle">Deposit accepted. Waiting for remaining processing if applicable.</p>'
+    : ''}
+        ${status === MATCHING_STATUS.MATCHED && (payment.flow_type === 'registration' || payment.routing_status === 'registration_payment_matched' || payment.routing_status === 'appbeg_owned')
+    ? '<p class="subtle">Payment verified. Registration continues.</p>'
     : ''}
         ${infoRow('Owner', payment.routing_owner || '-')}
         ${infoRow('Handled By', payment.handled_by || '-')}
@@ -2173,7 +2112,7 @@ function paymentDetailPanel() {
       </section>
 
       <section class="card">
-        <div class="card-title">Routing Audit</div>
+        <div class="card-title">Status History</div>
         ${(state.paymentRoutingLogs || []).length
     ? state.paymentRoutingLogs.map((log) => `
           <article class="timeline-item">
@@ -2185,7 +2124,7 @@ function paymentDetailPanel() {
             </div>
           </article>
         `).join('')
-    : '<div class="empty-state">No routing audit entries yet.</div>'}
+    : '<div class="empty-state">No status history yet.</div>'}
       </section>
 
       <section class="card">
@@ -2302,7 +2241,6 @@ function paymentsWorkspace() {
           <div class="payments-toolbar">
             <input id="paymentSearchInput" class="search" value="${escapeHtml(state.paymentQuery)}" placeholder="Search sender, preview, message ID" />
             <div class="filter-row">${filterButtons(paymentStatusFilters, state.paymentStatusFilter, 'payment-status')}</div>
-            <div class="filter-row">${filterButtons(paymentRoutingFilters, state.paymentRoutingFilter, 'payment-routing')}</div>
             <label class="checkbox-inline">
               <input id="paymentExceptionsOnly" type="checkbox" ${state.paymentExceptionsOnly ? 'checked' : ''} />
               Exceptions &amp; frozen only
@@ -2315,8 +2253,6 @@ function paymentsWorkspace() {
             <span>Payment App</span>
             <span>Preview</span>
             <span>Telegram ID</span>
-            <span>Routing</span>
-            <span>Reason</span>
             <span>Status</span>
           </div>
           <div class="payment-table">${paymentRows()}</div>
@@ -2577,7 +2513,69 @@ function render() {
   if (state.section === 'appbeg-players') {
     appbegPlayersController.bindAppBegPlayersEvents(app);
   }
+  syncPaymentFreezeTicker();
   scrollChatToBottom();
+}
+
+let paymentFreezeTickerId = null;
+
+function stopPaymentFreezeTicker() {
+  if (paymentFreezeTickerId != null) {
+    clearInterval(paymentFreezeTickerId);
+    paymentFreezeTickerId = null;
+  }
+}
+
+function syncPaymentFreezeTicker() {
+  stopPaymentFreezeTicker();
+  if (state.section !== 'payments') return;
+  tickPaymentFreezeCountdowns();
+  paymentFreezeTickerId = setInterval(() => {
+    if (state.section !== 'payments') {
+      stopPaymentFreezeTicker();
+      return;
+    }
+    tickPaymentFreezeCountdowns();
+  }, 1000);
+}
+
+function tickPaymentFreezeCountdowns() {
+  const now = Date.now();
+  let anyExpired = false;
+  document.querySelectorAll('[data-freeze-at]').forEach((cell) => {
+    const freezeAt = cell.getAttribute('data-freeze-at');
+    const countdown = cell.querySelector('[data-freeze-countdown]');
+    const remaining = remainingSecondsUntil(freezeAt, now);
+    if (countdown) countdown.textContent = formatFreezeCountdown(remaining);
+    if (remaining === 0) {
+      anyExpired = true;
+      const paymentId = Number(cell.getAttribute('data-payment-status-id'));
+      const payment = state.payments.find((entry) => Number(entry.id) === paymentId);
+      if (payment && payment.matching_status === MATCHING_STATUS.SEARCHING) {
+        payment.matching_status = MATCHING_STATUS.FROZEN;
+        payment.remaining_seconds = 0;
+      }
+      cell.setAttribute('data-matching-status', MATCHING_STATUS.FROZEN);
+      cell.removeAttribute('data-freeze-at');
+      cell.innerHTML = `<span class="badge matching-frozen">${matchingStatusEmoji(MATCHING_STATUS.FROZEN)} ${matchingStatusLabel(MATCHING_STATUS.FROZEN)}</span>`;
+    }
+  });
+  if (anyExpired) {
+    state.payments = sortPaymentsByStatus(state.payments, now);
+    const table = document.querySelector('.payment-table');
+    if (table) table.innerHTML = paymentRows();
+    if (state.payment && deriveMatchingStatus(state.payment, now) === MATCHING_STATUS.FROZEN) {
+      // Keep detail panel in sync without full app re-render.
+      const detail = document.querySelector('.payment-detail-wrap');
+      if (detail) detail.innerHTML = `
+          <div class="details-sheet-bar mobile-only">
+            <button type="button" class="icon-back" data-mobile-back="payments" aria-label="Back to payments">←</button>
+            <strong>Payment detail</strong>
+          </div>
+          ${paymentDetailPanel()}
+        `;
+    }
+  }
 }
 
 function bindPersistentEvents() {
@@ -2736,7 +2734,6 @@ function bindEvents() {
       if (state.section === 'payments') {
         state.mobilePaymentsPane = 'list';
         state.paymentStatusFilter = 'All';
-        state.paymentRoutingFilter = 'All';
         state.paymentExceptionsOnly = false;
         state.paymentQuery = '';
         await refreshPayments({ keepSelection: true });
@@ -2857,15 +2854,6 @@ function bindEvents() {
   document.querySelectorAll('[data-payment-status]').forEach((button) => {
     button.addEventListener('click', async () => {
       state.paymentStatusFilter = button.dataset.paymentStatus;
-      await refreshPayments({ keepSelection: false });
-      await refreshSelectedPayment();
-      render();
-    });
-  });
-
-  document.querySelectorAll('[data-payment-routing]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      state.paymentRoutingFilter = button.dataset.paymentRouting;
       await refreshPayments({ keepSelection: false });
       await refreshSelectedPayment();
       render();

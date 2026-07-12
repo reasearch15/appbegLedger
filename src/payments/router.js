@@ -32,22 +32,37 @@ async function freezePayment(store, payment, {
   windowId = null,
   metadata = {}
 }) {
-  console.log(`[payment-router] payment_frozen_manual_review payment=${payment.id} reason=${unmatchedReason || 'manual_review'}`);
+  const isAmbiguous = unmatchedReason === UNMATCHED_REASON.AMBIGUOUS_MATCH;
+  const routingStatus = isAmbiguous ? ROUTING_STATUS.MANUAL_REVIEW : ROUTING_STATUS.FROZEN;
+  console.log(
+    `[payment-router] payment_${routingStatus} payment=${payment.id} reason=${unmatchedReason || routingStatus}`
+  );
   await store.updatePaymentRouting(payment.id, {
-    routing_status: ROUTING_STATUS.MANUAL_REVIEW,
+    routing_status: routingStatus,
     routing_owner: ROUTING_OWNER.APPBEG,
     routing_reason: reason,
     contact_id: contactId,
     registration_payment_window_id: windowId,
     routed_at: new Date().toISOString(),
-    handled_by: null
+    handled_by: null,
+    unmatched_reason: unmatchedReason || null
   });
-  await store.logPaymentRouting(payment.id, 'payment_frozen_manual_review', reason, {
-    unmatchedReason,
-    status: 'frozen',
-    ...metadata
-  });
-  return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.MANUAL_REVIEW, unmatchedReason };
+  await store.logPaymentRouting(
+    payment.id,
+    isAmbiguous ? 'payment_manual_review' : 'payment_frozen',
+    reason,
+    {
+      unmatchedReason,
+      status: isAmbiguous ? 'manual_review' : 'frozen',
+      ...metadata
+    }
+  );
+  return {
+    ok: true,
+    payment: await store.getPaymentEvent(payment.id),
+    outcome: routingStatus,
+    unmatchedReason
+  };
 }
 
 async function keepSearching(store, payment, { freezeAt, unmatchedReason, metadata = {} }) {
@@ -63,7 +78,8 @@ async function keepSearching(store, payment, { freezeAt, unmatchedReason, metada
     registration_payment_window_id: null,
     routed_at: null,
     handled_by: null,
-    freeze_at: nextFreezeAt
+    freeze_at: nextFreezeAt,
+    unmatched_reason: unmatchedReason || UNMATCHED_REASON.NO_ACTIVE_WINDOW
   });
   await store.logPaymentRouting(payment.id, 'payment_searching', 'No eligible active payment window yet; continuing search until freeze_at.', {
     unmatchedReason,

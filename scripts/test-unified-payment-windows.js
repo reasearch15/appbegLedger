@@ -295,7 +295,7 @@ async function run() {
       routing_status: ROUTING_STATUS.SEARCHING
     });
     const result = await routePaymentEvent(store, 5, { now: new Date() });
-    assert.equal(result.outcome, ROUTING_STATUS.MANUAL_REVIEW);
+    assert.equal(result.outcome, ROUTING_STATUS.FROZEN);
     assert.equal(result.unmatchedReason, UNMATCHED_REASON.NO_ACTIVE_WINDOW);
     assert.ok(result.payment.routed_at);
     console.log('ok payment freezes after 5 minutes when no active window appears');

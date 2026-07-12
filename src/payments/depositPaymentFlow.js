@@ -112,6 +112,9 @@ export async function continueRegisteredDepositAfterPayment(store, {
       windowId,
       amount: window.first_deposit_amount
     });
+    if (typeof store.updatePaymentRouting === 'function') {
+      await store.updatePaymentRouting(paymentEventId, { processing_status: 'Completed' });
+    }
   }
 
   if (io) {

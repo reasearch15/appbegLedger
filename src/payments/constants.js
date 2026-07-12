@@ -5,7 +5,9 @@ export const ROUTING_STATUS = {
   DEPOSIT_WINDOW_MATCHED: 'deposit_window_matched',
   REGISTRATION_PAYMENT_MATCHED: 'registration_payment_matched',
   MANUAL_REVIEW: 'manual_review',
-  /** @deprecated use MANUAL_REVIEW */
+  /** Frozen after search window expires with no active match. */
+  FROZEN: 'frozen',
+  /** @deprecated use MANUAL_REVIEW or FROZEN */
   UNTOUCHED_UNMATCHED: 'untouched_unmatched',
   APPBEG_OWNED: 'appbeg_owned',
   TELELEDGER_PENDING: 'teleledger_pending',
@@ -15,6 +17,24 @@ export const ROUTING_STATUS = {
   IGNORED: 'ignored',
   PARSE_FAILED: 'parse_failed',
   ROUTE_FAILED: 'route_failed'
+};
+
+/** Staff-facing payment queue status (derived from routing_status). */
+export const MATCHING_STATUS = {
+  SEARCHING: 'searching',
+  MATCHED: 'matched',
+  COMPLETED: 'completed',
+  FROZEN: 'frozen',
+  MANUAL_REVIEW: 'manual_review'
+};
+
+/** Default queue sort: Waiting → Manual Review → Frozen → Matched → Completed. */
+export const MATCHING_STATUS_SORT_PRIORITY = {
+  [MATCHING_STATUS.SEARCHING]: 1,
+  [MATCHING_STATUS.MANUAL_REVIEW]: 2,
+  [MATCHING_STATUS.FROZEN]: 3,
+  [MATCHING_STATUS.MATCHED]: 4,
+  [MATCHING_STATUS.COMPLETED]: 5
 };
 
 export const ROUTING_REASON = {
@@ -98,31 +118,186 @@ export function computePaymentFreezeAt(fromDate = new Date(), searchMinutes = pa
   return new Date(base.getTime() + searchMinutes * 60 * 1000).toISOString();
 }
 
+export function paymentFlowType(payment = {}) {
+  if (payment.flow_type === PAYMENT_WINDOW_FLOW.DEPOSIT || payment.flow_type === PAYMENT_WINDOW_FLOW.REGISTRATION) {
+    return payment.flow_type;
+  }
+  if (payment.window_flow_type === PAYMENT_WINDOW_FLOW.DEPOSIT || payment.window_flow_type === PAYMENT_WINDOW_FLOW.REGISTRATION) {
+    return payment.window_flow_type;
+  }
+  const routing = payment.routing_status;
+  if (routing === ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED || routing === ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT) {
+    return PAYMENT_WINDOW_FLOW.DEPOSIT;
+  }
+  if (routing === ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED || routing === ROUTING_STATUS.APPBEG_OWNED) {
+    return PAYMENT_WINDOW_FLOW.REGISTRATION;
+  }
+  return null;
+}
+
+export function remainingSecondsUntil(freezeAt, now = new Date()) {
+  if (!freezeAt) return null;
+  const end = new Date(freezeAt).getTime();
+  if (!Number.isFinite(end)) return null;
+  const base = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  return Math.max(0, Math.ceil((end - base) / 1000));
+}
+
+/**
+ * Derive staff-facing matching_status from internal routing fields.
+ * Possible values: searching | matched | completed | frozen | manual_review
+ */
+export function deriveMatchingStatus(payment = {}, now = new Date()) {
+  const routing = payment.routing_status;
+  const unmatched = payment.unmatched_reason || payment.unmatchedReason || null;
+  const processing = String(payment.processing_status || '').toLowerCase();
+
+  if (processing === 'completed') return MATCHING_STATUS.COMPLETED;
+
+  if (routing === ROUTING_STATUS.SEARCHING || routing === ROUTING_STATUS.UNROUTED) {
+    const remaining = remainingSecondsUntil(payment.freeze_at, now);
+    if (remaining === 0) return MATCHING_STATUS.FROZEN;
+    return MATCHING_STATUS.SEARCHING;
+  }
+
+  if (routing === ROUTING_STATUS.FROZEN) return MATCHING_STATUS.FROZEN;
+
+  if (routing === ROUTING_STATUS.MANUAL_REVIEW || routing === ROUTING_STATUS.UNTOUCHED_UNMATCHED) {
+    if (unmatched === UNMATCHED_REASON.AMBIGUOUS_MATCH) return MATCHING_STATUS.MANUAL_REVIEW;
+    if (
+      unmatched === UNMATCHED_REASON.NO_ACTIVE_WINDOW
+      || unmatched === UNMATCHED_REASON.WINDOW_EXPIRED
+      || unmatched === UNMATCHED_REASON.AMOUNT_MISMATCH
+      || unmatched === UNMATCHED_REASON.NAME_MISMATCH
+    ) {
+      return MATCHING_STATUS.FROZEN;
+    }
+    // Legacy frozen/manual_review without reason → treat as frozen (search timed out).
+    if (!unmatched) return MATCHING_STATUS.FROZEN;
+    return MATCHING_STATUS.MANUAL_REVIEW;
+  }
+
+  if (
+    routing === ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT
+    || routing === ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
+    || routing === ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED
+    || routing === ROUTING_STATUS.APPBEG_OWNED
+  ) {
+    return MATCHING_STATUS.MATCHED;
+  }
+
+  if (
+    routing === ROUTING_STATUS.PARSE_FAILED
+    || routing === ROUTING_STATUS.ROUTE_FAILED
+    || routing === ROUTING_STATUS.EXPIRED_DEPOSIT
+    || routing === ROUTING_STATUS.IGNORED
+    || routing === ROUTING_STATUS.DUPLICATE_IGNORED
+  ) {
+    return MATCHING_STATUS.MANUAL_REVIEW;
+  }
+
+  return MATCHING_STATUS.MANUAL_REVIEW;
+}
+
+export function enrichPaymentQueueFields(payment = {}, now = new Date()) {
+  const matching_status = deriveMatchingStatus(payment, now);
+  const remaining_seconds = matching_status === MATCHING_STATUS.SEARCHING
+    ? remainingSecondsUntil(payment.freeze_at, now)
+    : null;
+  return {
+    ...payment,
+    matching_status,
+    remaining_seconds,
+    freeze_at: payment.freeze_at || null,
+    flow_type: paymentFlowType(payment)
+  };
+}
+
+export function matchingStatusLabel(matchingStatus) {
+  switch (matchingStatus) {
+    case MATCHING_STATUS.SEARCHING: return 'Waiting';
+    case MATCHING_STATUS.MATCHED: return 'Matched';
+    case MATCHING_STATUS.COMPLETED: return 'Completed';
+    case MATCHING_STATUS.FROZEN: return 'Frozen';
+    case MATCHING_STATUS.MANUAL_REVIEW: return 'Manual Review';
+    default: return matchingStatus || 'Waiting';
+  }
+}
+
+export function matchingStatusEmoji(matchingStatus) {
+  switch (matchingStatus) {
+    case MATCHING_STATUS.SEARCHING: return '🟡';
+    case MATCHING_STATUS.MATCHED: return '🟢';
+    case MATCHING_STATUS.COMPLETED: return '🔵';
+    case MATCHING_STATUS.FROZEN: return '🔴';
+    case MATCHING_STATUS.MANUAL_REVIEW: return '🟠';
+    default: return '🟡';
+  }
+}
+
+/** Map staff filter / matching_status → SQL routing_status sets. */
+export function routingStatusesForMatchingFilter(matchingStatus) {
+  switch (matchingStatus) {
+    case MATCHING_STATUS.SEARCHING:
+      return [ROUTING_STATUS.SEARCHING, ROUTING_STATUS.UNROUTED];
+    case MATCHING_STATUS.MATCHED:
+      return [
+        ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
+        ROUTING_STATUS.APPBEG_OWNED,
+        ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED,
+        ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT
+      ];
+    case MATCHING_STATUS.COMPLETED:
+      return [
+        ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
+        ROUTING_STATUS.APPBEG_OWNED,
+        ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED,
+        ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT
+      ];
+    case MATCHING_STATUS.FROZEN:
+      return [ROUTING_STATUS.FROZEN, ROUTING_STATUS.MANUAL_REVIEW, ROUTING_STATUS.UNTOUCHED_UNMATCHED];
+    case MATCHING_STATUS.MANUAL_REVIEW:
+      return [
+        ROUTING_STATUS.MANUAL_REVIEW,
+        ROUTING_STATUS.UNTOUCHED_UNMATCHED,
+        ROUTING_STATUS.PARSE_FAILED,
+        ROUTING_STATUS.ROUTE_FAILED,
+        ROUTING_STATUS.EXPIRED_DEPOSIT,
+        ROUTING_STATUS.IGNORED
+      ];
+    default:
+      return null;
+  }
+}
+
 export function paymentRoutingLabel(routingStatus) {
   switch (routingStatus) {
     case ROUTING_STATUS.SEARCHING:
-      return 'Searching Active Windows';
+      return 'Waiting';
     case ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT:
     case ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED:
-      return 'Registered Deposit Matched';
+      return 'Matched';
     case ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED:
     case ROUTING_STATUS.APPBEG_OWNED:
-      return 'Registration Matched';
+      return 'Matched';
+    case ROUTING_STATUS.FROZEN:
+      return 'Frozen';
     case ROUTING_STATUS.MANUAL_REVIEW:
+      return 'Manual Review';
     case ROUTING_STATUS.UNTOUCHED_UNMATCHED:
-      return 'Frozen / Manual Review';
+      return 'Frozen';
     case ROUTING_STATUS.EXPIRED_DEPOSIT:
-      return 'Expired Payment Window';
+      return 'Manual Review';
     case ROUTING_STATUS.PARSE_FAILED:
-      return 'Parse Failed';
+      return 'Manual Review';
     case ROUTING_STATUS.IGNORED:
-      return 'Ignored';
+      return 'Manual Review';
     case ROUTING_STATUS.DUPLICATE_IGNORED:
-      return 'Duplicate Skipped';
+      return 'Manual Review';
     case ROUTING_STATUS.UNROUTED:
-      return 'Pending Routing';
+      return 'Waiting';
     default:
-      return routingStatus || 'Pending';
+      return matchingStatusLabel(deriveMatchingStatus({ routing_status: routingStatus }));
   }
 }
 
@@ -140,30 +315,22 @@ export function paymentRoutingReason(payment = {}) {
       return ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED;
     case ROUTING_STATUS.PARSE_FAILED:
       return ROUTING_REASON.UNABLE_TO_PARSE;
+    case ROUTING_STATUS.FROZEN:
+      return ROUTING_REASON.NO_ACTIVE_WINDOW;
     case ROUTING_STATUS.MANUAL_REVIEW:
-    case ROUTING_STATUS.UNTOUCHED_UNMATCHED:
       return ROUTING_REASON.WAITING_MANUAL_REVIEW;
+    case ROUTING_STATUS.UNTOUCHED_UNMATCHED:
+      return ROUTING_REASON.NO_ACTIVE_WINDOW;
+    case ROUTING_STATUS.SEARCHING:
+    case ROUTING_STATUS.UNROUTED:
+      return ROUTING_REASON.NO_ACTIVE_WINDOW;
     default:
       return payment.parse_error ? ROUTING_REASON.UNABLE_TO_PARSE : '—';
   }
 }
 
 export function paymentProcessingLabel(payment = {}) {
-  const routing = payment.routing_status;
-  if (routing === ROUTING_STATUS.SEARCHING) return 'searching';
-  if (
-    routing === ROUTING_STATUS.REGISTERED_PLAYER_DEPOSIT
-    || routing === ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
-  ) {
-    return 'matched';
-  }
-  if (routing === ROUTING_STATUS.MANUAL_REVIEW || routing === ROUTING_STATUS.UNTOUCHED_UNMATCHED) return 'frozen';
-  if (routing === ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED || routing === ROUTING_STATUS.APPBEG_OWNED) {
-    return 'matched';
-  }
-  if (routing === ROUTING_STATUS.PARSE_FAILED) return 'parse_failed';
-  if (routing === ROUTING_STATUS.EXPIRED_DEPOSIT) return 'expired_window';
-  return String(payment.processing_status || 'new').toLowerCase();
+  return deriveMatchingStatus(payment);
 }
 
 export function normalizePaymentWindowStatus(status) {

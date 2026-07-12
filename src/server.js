@@ -526,17 +526,17 @@ app.get('/api/payment-stats', async (req, res) => {
 });
 
 app.get('/api/payments', async (req, res) => {
-  const options = {
+  const payments = await store.listPaymentEvents({
     limit: req.query.limit || 500,
     status: req.query.status || 'All',
-    routingStatus: req.query.routingStatus || 'All',
+    routingStatus: req.query.routingStatus || req.query.matchingStatus || 'All',
+    matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
     query: req.query.query || '',
     exceptionsOnly: req.query.exceptionsOnly === 'true'
-  };
-  const payments = await store.listPaymentEvents(options);
+  });
   console.log(`[payments-api] GET /api/payments returned ${payments.length} rows`, JSON.stringify({
-    ...options,
-    exceptionsOnly: options.exceptionsOnly
+    matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
+    exceptionsOnly: req.query.exceptionsOnly === 'true'
   }));
   res.json({ payments });
 });

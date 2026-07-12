@@ -17,7 +17,7 @@ import {
   normalizeCustomerMessage,
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
-import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
+import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY } from '../payments/constants.js';
 import {
   CONVERSATION_STATUSES,
   DEFAULT_AUTOMATION_RULES,
@@ -2249,20 +2249,46 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getUserProfile(id);
   }
 
-  function buildPaymentEventsQuery({ status = 'All', routingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
+  function buildPaymentEventsQuery({ status = 'All', routingStatus = 'All', matchingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
     const where = [];
     if (status && status !== 'All') where.push('processing_status = @status');
-    if (routingStatus && routingStatus !== 'All') {
-      if (routingStatus === 'registration_payment_matched') {
+
+    const matchingFilter = matchingStatus && matchingStatus !== 'All'
+      ? matchingStatus
+      : (routingStatus && routingStatus !== 'All' ? routingStatus : 'All');
+
+    if (matchingFilter && matchingFilter !== 'All') {
+      if (matchingFilter === 'searching' || matchingFilter === 'Waiting') {
+        where.push("routing_status IN ('searching', 'unrouted')");
+      } else if (matchingFilter === 'matched' || matchingFilter === 'Matched') {
+        where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned', 'deposit_window_matched', 'registered_player_deposit')");
+        where.push("LOWER(COALESCE(processing_status, '')) != 'completed'");
+      } else if (matchingFilter === 'completed' || matchingFilter === 'Completed') {
+        where.push("LOWER(COALESCE(processing_status, '')) = 'completed'");
+      } else if (matchingFilter === 'frozen' || matchingFilter === 'Frozen') {
+        where.push(`(
+          routing_status = 'frozen'
+          OR (
+            routing_status IN ('manual_review', 'untouched_unmatched')
+            AND (
+              unmatched_reason IS NULL
+              OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')
+            )
+          )
+        )`);
+      } else if (matchingFilter === 'manual_review' || matchingFilter === 'Manual Review') {
+        where.push(`(
+          (routing_status = 'manual_review' AND unmatched_reason = 'ambiguous_match')
+          OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit', 'ignored', 'duplicate_ignored')
+        )`);
+      } else if (matchingFilter === 'registration_payment_matched') {
         where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned')");
-      } else if (routingStatus === 'manual_review') {
-        where.push("routing_status IN ('manual_review', 'untouched_unmatched')");
       } else {
         where.push('routing_status = @routingStatus');
       }
     }
     if (exceptionsOnly) {
-      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review')`);
+      where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen')`);
     }
     if (String(query || '').trim()) {
       where.push(`(
@@ -2286,25 +2312,47 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return { querySql, where };
   }
 
-  async function listPaymentEvents({ limit = 200, status = 'All', routingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
+  async function listPaymentEvents({
+    limit = 200,
+    status = 'All',
+    routingStatus = 'All',
+    matchingStatus = 'All',
+    query = '',
+    exceptionsOnly = false
+  } = {}) {
     const params = {
       limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
       status,
       routingStatus,
       query: `%${String(query || '').trim().toLowerCase()}%`
     };
-    const { querySql, where } = buildPaymentEventsQuery({ status, routingStatus, query, exceptionsOnly });
+    const { querySql, where } = buildPaymentEventsQuery({
+      status,
+      routingStatus,
+      matchingStatus,
+      query,
+      exceptionsOnly
+    });
     console.log('[payments-api] listPaymentEvents', JSON.stringify({
       where,
-      orderBy: 'message_date DESC, id DESC',
+      orderBy: 'matching_status priority, message_date DESC, id DESC',
       limit: params.limit,
       status: params.status,
       routingStatus: params.routingStatus,
+      matchingStatus,
       exceptionsOnly: Boolean(exceptionsOnly),
       query: String(query || '').trim() || null
     }));
     const rows = await db.prepare(querySql).all(params);
-    const payments = rows.map(hydratePaymentEvent);
+    const payments = rows.map(hydratePaymentEvent).sort((a, b) => {
+      const pa = MATCHING_STATUS_SORT_PRIORITY[a.matching_status] ?? 99;
+      const pb = MATCHING_STATUS_SORT_PRIORITY[b.matching_status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      const ta = new Date(a.message_date || 0).getTime();
+      const tb = new Date(b.message_date || 0).getTime();
+      if (tb !== ta) return tb - ta;
+      return Number(b.id) - Number(a.id);
+    });
     console.log(`[payments-api] payment_visible_in_ui count=${payments.length}`);
     return payments;
   }
@@ -2331,15 +2379,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const row = await db.prepare(`
       SELECT
         SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
+        SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched', 'registration_payment_matched', 'appbeg_owned')
+          AND LOWER(COALESCE(processing_status, '')) != 'completed'
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('matched')},
         SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
-        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
+        SUM(CASE WHEN routing_status IN ('searching', 'unrouted') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
+        SUM(CASE WHEN routing_status = 'frozen'
+          OR (routing_status IN ('untouched_unmatched', 'manual_review') AND (unmatched_reason IS NULL OR unmatched_reason != 'ambiguous_match'))
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozen')},
+        SUM(CASE WHEN (routing_status = 'manual_review' AND unmatched_reason = 'ambiguous_match')
+          OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
+        SUM(CASE WHEN LOWER(COALESCE(processing_status, '')) = 'completed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('completed')},
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
         SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
         SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailed')},
         SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')},
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
-        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
-        SUM(CASE WHEN routing_status = 'unrouted' OR routed_at IS NULL THEN 1 ELSE 0 END) AS ${sql.quoteAlias('unrouted')},
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('appbegOwned')},
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('failed')},
         COUNT(*) AS ${sql.quoteAlias('totalMessages')}
@@ -2347,15 +2404,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).get({ today });
     return normalizeAggregateStats(row, [
       'messagesToday',
+      'matched',
       'registeredPlayerDeposits',
       'registrationMatched',
+      'waiting',
+      'frozen',
+      'manualReview',
+      'completed',
       'frozenManualReview',
       'expiredWindowMatch',
       'parseFailed',
       'ignored',
       'exceptions',
-      'waiting',
-      'unrouted',
       'appbegOwned',
       'failed',
       'totalMessages'
@@ -2436,13 +2496,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       teleledger_sync_status: patch.teleledger_sync_status ?? current.teleledger_sync_status,
       routed_at: patch.routed_at === undefined ? current.routed_at : patch.routed_at,
       handled_by: patch.handled_by === undefined ? current.handled_by : patch.handled_by,
-      freeze_at: patch.freeze_at === undefined ? current.freeze_at : patch.freeze_at
+      freeze_at: patch.freeze_at === undefined ? current.freeze_at : patch.freeze_at,
+      unmatched_reason: patch.unmatched_reason === undefined ? current.unmatched_reason : patch.unmatched_reason
     };
     let processingStatus = current.processing_status;
-    if (next.routing_status === 'searching') processingStatus = 'Parsed';
+    if (patch.processing_status) processingStatus = patch.processing_status;
+    else if (next.routing_status === 'searching') processingStatus = 'Parsed';
     else if (next.routing_status === 'registered_player_deposit' || next.routing_status === 'deposit_window_matched') processingStatus = 'Matched';
     else if (next.routing_status === 'registration_payment_matched' || next.routing_status === 'appbeg_owned') processingStatus = 'Matched';
-    else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched') processingStatus = 'Parsed';
+    else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched' || next.routing_status === 'frozen') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
     else if (['expired_deposit', 'parse_failed', 'route_failed'].includes(next.routing_status)) processingStatus = 'Failed';
 
@@ -2460,6 +2522,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         routed_at = ?,
         handled_by = ?,
         freeze_at = ?,
+        unmatched_reason = ?,
         processing_status = ?,
         updated_at = ?
       WHERE id = ?
@@ -2475,6 +2538,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       next.routed_at,
       next.handled_by,
       next.freeze_at,
+      next.unmatched_reason ?? null,
       processingStatus,
       nowIso(),
       paymentEventId
@@ -4194,7 +4258,7 @@ function hydratePaymentEvent(event) {
   } catch {
     raw_payload = { parseError: true };
   }
-  return {
+  const base = {
     ...event,
     id: event.id != null ? Number(event.id) : event.id,
     telegram_message_id: event.telegram_message_id != null ? Number(event.telegram_message_id) : event.telegram_message_id,
@@ -4202,8 +4266,11 @@ function hydratePaymentEvent(event) {
     registration_payment_window_id: event.registration_payment_window_id != null
       ? Number(event.registration_payment_window_id)
       : event.registration_payment_window_id,
+    unmatched_reason: event.unmatched_reason || null,
+    freeze_at: event.freeze_at || null,
     raw_payload
   };
+  return enrichPaymentQueueFields(base);
 }
 
 function hydrateDepositEvent(event) {
@@ -4383,7 +4450,8 @@ async function migrate(db) {
     ['parsed_message_time', 'TEXT'],
     ['registration_payment_window_id', 'INTEGER'],
     ['routing_reason', 'TEXT'],
-    ['freeze_at', 'TEXT']
+    ['freeze_at', 'TEXT'],
+    ['unmatched_reason', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
   }

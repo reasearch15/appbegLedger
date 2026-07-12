@@ -663,9 +663,7 @@ h2 {
     minmax(80px, 110px)
     minmax(0, 1fr)
     minmax(80px, 100px)
-    minmax(72px, 94px)
-    minmax(100px, 140px)
-    minmax(72px, 94px);
+    minmax(120px, 160px);
   gap: 10px;
   align-items: center;
 }
@@ -973,10 +971,41 @@ h2 {
 .badge.status-matched { color: #047857; background: #d1fae5; }
 .badge.status-parse_failed { color: var(--suspended); background: #fee2e2; }
 .badge.status-expired_window { color: #b45309; background: #fef3c7; }
+.badge.matching-searching { color: #854d0e; background: #fef3c7; font-weight: 800; }
+.badge.matching-matched { color: #047857; background: #d1fae5; font-weight: 800; }
+.badge.matching-completed { color: #1d4ed8; background: #dbeafe; font-weight: 800; }
+.badge.matching-frozen { color: #b91c1c; background: #fee2e2; font-weight: 800; }
+.badge.matching-manual_review { color: #c2410c; background: #ffedd5; font-weight: 800; }
+.payment-status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.payment-freeze-meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.payment-freeze-label {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.payment-freeze-countdown {
+  font-size: 13px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  color: #854d0e;
+}
 .badge.routing-registered_player_deposit { color: #1d4ed8; background: #dbeafe; }
 .badge.routing-registration_payment_matched,
 .badge.routing-appbeg_owned { color: #047857; background: #d1fae5; }
-.badge.routing-untouched_unmatched { color: #9a3412; background: #ffedd5; font-weight: 800; }
+.badge.routing-untouched_unmatched,
+.badge.routing-frozen { color: #b91c1c; background: #fee2e2; font-weight: 800; }
+.badge.routing-manual_review { color: #c2410c; background: #ffedd5; font-weight: 800; }
 .badge.routing-expired_deposit { color: #b45309; background: #fef3c7; }
 .badge.routing-parse_failed { color: var(--suspended); background: #fee2e2; }
 
@@ -2376,7 +2405,7 @@ textarea {
 
   .payment-table-header,
   .payment-row {
-    grid-template-columns: minmax(0, 130px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 100px) minmax(0, 90px) minmax(0, 90px);
+    grid-template-columns: minmax(0, 130px) minmax(0, 140px) minmax(0, 1fr) minmax(0, 100px) minmax(0, 140px);
   }
 
   .chat-header {
