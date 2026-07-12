@@ -2523,7 +2523,7 @@ function settingsWorkspace() {
         <div>
           <div class="eyebrow">Configuration</div>
           <h1>Coadmin Settings</h1>
-          <div class="subtle">Each connected Telegram business account belongs to one coadmin. Players are assigned automatically.</div>
+          <div class="subtle">BotFather contacts automatically inherit this default coadmin. Use Apply to assign unassigned existing Bot API contacts.</div>
         </div>
       </header>
       <section class="settings-layout">
@@ -2542,7 +2542,8 @@ function settingsWorkspace() {
               <span>AppBeg Coadmin UID / ID</span>
               <input id="appbegCoadminUid" value="${escapeHtml(settings.appbeg_coadmin_uid || '')}" placeholder="AppBeg coadmin identifier" />
             </label>
-            <div class="form-section-label">Telegram Business Account</div>
+            <div class="form-section-label">Telegram Business Account (historical)</div>
+            <p class="subtle">These fields are kept for historical configuration only. They do not control BotFather contact coadmin assignment.</p>
             <label class="field-label">
               <span>Telegram Account Username</span>
               <input id="telegramAccountUsername" value="${escapeHtml(settings.telegram_account_username || '')}" placeholder="@username" />
@@ -3453,11 +3454,24 @@ async function applyCoadminToExistingContacts() {
 
 function formatCoadminBackfillResult(backfill) {
   if (!backfill) return null;
-  if (!backfill.total) return 'No business-account contacts matched the configured Telegram account.';
-  if (!backfill.assigned) {
-    return `All ${backfill.total} matching contact(s) already have this coadmin assigned.`;
+  const name = backfill.coadminName || state.coadminSettings?.coadmin_name || 'coadmin';
+  if (backfill.assigned > 0) {
+    const n = backfill.assigned;
+    return `Assigned ${name} to ${n} existing Bot API contact${n === 1 ? '' : 's'}.`
+      + (backfill.skippedAlreadyAssigned
+        ? ` ${backfill.skippedAlreadyAssigned} skipped (already assigned).`
+        : '');
   }
-  return `Assigned coadmin to ${backfill.assigned} contact(s). ${backfill.skipped} already up to date.`;
+  if (backfill.skippedAlreadyAssigned > 0 && !(backfill.found > 0)) {
+    return `All ${backfill.skippedAlreadyAssigned} Bot API contact(s) already have a coadmin assigned.`;
+  }
+  if (!backfill.total && !backfill.found) {
+    return 'No Bot API contacts found to assign.';
+  }
+  if (!backfill.assigned) {
+    return 'No unassigned Bot API contacts needed an update.';
+  }
+  return `Assigned ${name} to ${backfill.assigned} contact(s).`;
 }
 
 async function controlAutomation(action) {

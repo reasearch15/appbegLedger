@@ -3250,6 +3250,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return Boolean(snapshot.coadmin_name || snapshot.coadmin_code || snapshot.appbeg_coadmin_uid);
   }
 
+  function contactHasCoadminAssignment(info = {}) {
+    return Boolean(
+      String(info.coadmin_name || '').trim()
+      || String(info.coadmin_code || '').trim()
+      || String(info.appbeg_coadmin_uid || '').trim()
+    );
+  }
+
   function contactMatchesCoadminAccount(row, settings) {
     const accountId = settings.telegram_account_id ? String(settings.telegram_account_id).trim() : '';
     const accountUsername = normalizeTelegramUsername(settings.telegram_account_username);
@@ -3265,6 +3273,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return false;
   }
 
+  /** @deprecated Business-account sync is disabled; kept for historical tooling only. */
   async function listBusinessAccountContactIds(settings = null) {
     const activeSettings = settings || (await getCoadminSettings());
     const rows = await db.prepare(`
@@ -3273,6 +3282,55 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE telegram_sync_source = 'business_account'
     `).all();
     return rows.filter((row) => contactMatchesCoadminAccount(row, activeSettings)).map((row) => row.id);
+  }
+
+  /**
+   * Bot API contacts eligible for default coadmin backfill:
+   * - telegram_sync_source = bot_api
+   * - not archived
+   * - not a Telegram bot user
+   * - coadmin fields currently blank
+   */
+  async function listEligibleBotApiContactIdsForDefaultCoadmin() {
+    const rows = await db.prepare(`
+      SELECT
+        u.id,
+        u.is_bot,
+        u.registration_status,
+        u.archived_at,
+        a.registration_info_json
+      FROM telegram_users u
+      LEFT JOIN contact_automation_state a ON a.telegram_user_id = u.id
+      WHERE COALESCE(u.telegram_sync_source, 'bot_api') = 'bot_api'
+    `).all();
+
+    const eligible = [];
+    let skippedAlreadyAssigned = 0;
+    let skippedInvalid = 0;
+
+    for (const row of rows) {
+      if (row.is_bot) {
+        skippedInvalid += 1;
+        continue;
+      }
+      if (row.archived_at || String(row.registration_status || '') === 'Archived') {
+        skippedInvalid += 1;
+        continue;
+      }
+      let info = {};
+      try {
+        info = JSON.parse(row.registration_info_json || '{}');
+      } catch {
+        info = {};
+      }
+      if (contactHasCoadminAssignment(info)) {
+        skippedAlreadyAssigned += 1;
+        continue;
+      }
+      eligible.push(row.id);
+    }
+
+    return { eligibleIds: eligible, skippedAlreadyAssigned, skippedInvalid, scanned: rows.length };
   }
 
   async function stampBusinessSourceAccount(userId, settings) {
@@ -3511,8 +3569,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
     const settings = await getCoadminSettings();
     const backfill = applyToExisting
-      ? await applyCoadminToExistingBusinessContacts(actorName, { settings })
-      : { assigned: 0, skipped: 0, total: 0 };
+      ? await applyCoadminToExistingContacts(actorName, { settings })
+      : {
+        assigned: 0,
+        skipped: 0,
+        skippedAlreadyAssigned: 0,
+        skippedInvalid: 0,
+        total: 0,
+        found: 0,
+        source: 'bot_api'
+      };
     return { settings, backfill };
   }
 
@@ -3578,30 +3644,69 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return { changed: true, missingDefault: false, state: await getAutomationState(userId) };
   }
 
-  async function applyCoadminToExistingBusinessContacts(actorName = 'Staff', { settings = null } = {}) {
+  /**
+   * Assign configured default coadmin to existing unassigned Bot API contacts.
+   * Never overwrites an existing coadmin assignment. Does not use business-account matching.
+   */
+  async function applyCoadminToExistingContacts(actorName = 'Staff', { settings = null } = {}) {
     const activeSettings = settings || (await getCoadminSettings());
     const snapshot = await buildCoadminSnapshot(activeSettings);
     if (!snapshot.coadmin_name && !snapshot.coadmin_code && !snapshot.appbeg_coadmin_uid) {
-      return { assigned: 0, skipped: 0, total: 0 };
+      return {
+        assigned: 0,
+        skipped: 0,
+        skippedAlreadyAssigned: 0,
+        skippedInvalid: 0,
+        total: 0,
+        found: 0,
+        coadminName: null,
+        source: 'bot_api'
+      };
     }
 
-    const contactIds = await listBusinessAccountContactIds(activeSettings);
-    let assigned = 0;
-    let skipped = 0;
+    const {
+      eligibleIds,
+      skippedAlreadyAssigned,
+      skippedInvalid,
+      scanned
+    } = await listEligibleBotApiContactIdsForDefaultCoadmin();
 
-    for (const userId of contactIds) {
-      await stampBusinessSourceAccount(userId, activeSettings);
+    let assigned = 0;
+    let skippedUnchanged = 0;
+
+    for (const userId of eligibleIds) {
       const result = await assignCoadminToUser(userId, actorName, {
         snapshot,
-        force: true,
+        force: false,
         eventType: 'coadmin_assigned_from_settings',
         eventTitle: 'Coadmin Assigned From Settings'
       });
       if (result.changed) assigned += 1;
-      else skipped += 1;
+      else skippedUnchanged += 1;
     }
 
-    return { assigned, skipped, total: contactIds.length };
+    const skipped = skippedAlreadyAssigned + skippedInvalid + skippedUnchanged;
+    console.log(
+      `[coadmin] apply_to_existing_bot_api scanned=${scanned} eligible=${eligibleIds.length} ` +
+      `assigned=${assigned} skipped_assigned=${skippedAlreadyAssigned} skipped_invalid=${skippedInvalid}`
+    );
+
+    return {
+      assigned,
+      skipped,
+      skippedAlreadyAssigned,
+      skippedInvalid,
+      skippedUnchanged,
+      total: scanned,
+      found: eligibleIds.length,
+      coadminName: snapshot.coadmin_name || snapshot.coadmin_code || null,
+      source: 'bot_api'
+    };
+  }
+
+  /** @deprecated Use applyCoadminToExistingContacts — business-account targeting is obsolete. */
+  async function applyCoadminToExistingBusinessContacts(actorName = 'Staff', options = {}) {
+    return applyCoadminToExistingContacts(actorName, options);
   }
 
   async function getTelegramAccountSyncState() {
@@ -4512,8 +4617,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     updateCoadminSettings,
     buildCoadminSnapshot,
     assignCoadminToUser,
+    applyCoadminToExistingContacts,
     applyCoadminToExistingBusinessContacts,
     listBusinessAccountContactIds,
+    listEligibleBotApiContactIdsForDefaultCoadmin,
     listSettingsAuditLog,
     listPaymentEvents,
     getPaymentEvent,

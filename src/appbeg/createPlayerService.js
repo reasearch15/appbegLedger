@@ -51,7 +51,11 @@ export async function createAppBegPlayerForContact(store, {
   const { username, password, referralCode } = registrationInfoForCreate(info);
 
   const settings = await store.getCoadminSettings();
-  const coadminUid = String(settings?.appbeg_coadmin_uid || '').trim();
+  const coadminUid = String(
+    info?.appbeg_coadmin_uid
+    || settings?.appbeg_coadmin_uid
+    || ''
+  ).trim();
   if (!coadminUid) {
     throw new Error('AppBeg coadmin UID is not configured in Settings.');
   }

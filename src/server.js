@@ -367,16 +367,26 @@ async function handleCoadminSettingsSave(req, res) {
 async function handleCoadminSettingsApply(req, res) {
   try {
     const actorName = req.body.staff_name || req.body.staffName || 'Staff';
-    const backfill = await store.applyCoadminToExistingBusinessContacts(actorName);
+    const backfill = typeof store.applyCoadminToExistingContacts === 'function'
+      ? await store.applyCoadminToExistingContacts(actorName)
+      : await store.applyCoadminToExistingBusinessContacts(actorName);
     if (backfill.assigned > 0) {
       io.emit('contacts:changed');
       io.emit('users:changed');
       io.emit('players:changed');
     }
+    const name = backfill.coadminName || (await store.getCoadminSettings()).coadmin_name || 'default coadmin';
+    const message = backfill.assigned > 0
+      ? `Assigned ${name} to ${backfill.assigned} existing Bot API contact${backfill.assigned === 1 ? '' : 's'}.`
+      : backfill.found === 0 && backfill.skippedAlreadyAssigned > 0
+        ? 'All existing Bot API contacts already have a coadmin assigned.'
+        : backfill.total === 0
+          ? 'No Bot API contacts found to assign.'
+          : 'No unassigned Bot API contacts needed an update.';
     res.json(await coadminSettingsResponse({
       settings: await store.getCoadminSettings(),
       backfill,
-      message: 'Coadmin assignment applied to existing contacts.'
+      message
     }));
   } catch (error) {
     console.error('[coadmin-settings] apply failed:', error);
