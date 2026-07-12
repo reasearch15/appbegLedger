@@ -195,6 +195,19 @@ async function run() {
     console.log('✓ payment stats endpoint succeeds');
   }
 
+  // API list heals missing freeze_at for Waiting rows
+  {
+    const received = new Date(now.getTime() - 90 * 1000).toISOString();
+    await insertPayment(store, { id: 10, routingStatus: 'unrouted', messageDate: received, freezeAt: null });
+    const payments = await store.listPaymentEvents({ limit: 50 });
+    const row = payments.find((p) => Number(p.id) === 10);
+    assert.ok(row, 'payment 10 listed');
+    assert.ok(row.freeze_at, 'freeze_at healed on list');
+    assert.equal(row.freeze_at, computePaymentFreezeAt(received));
+    assert.ok(row.matching_status === 'searching' || row.matching_status === 'frozen');
+    console.log('✓ listPaymentEvents heals missing freeze_at');
+  }
+
   // Frontend countdown helpers
   {
     const freezeAt = new Date(now.getTime() + 299000).toISOString();

@@ -22,7 +22,8 @@ import {
   remainingSecondsUntil,
   formatFreezeCountdown,
   sortPaymentsByStatus,
-  MATCHING_STATUS
+  MATCHING_STATUS,
+  resolvePaymentFreezeAt
 } from './paymentStatus.js';
 
 const app = document.querySelector('#app');
@@ -2026,9 +2027,10 @@ function paymentDetailPanel() {
   const status = deriveMatchingStatus(payment);
   const statusLabel = `${matchingStatusEmoji(status)} ${matchingStatusLabel(status)}`;
   const remaining = status === MATCHING_STATUS.SEARCHING
-    ? remainingSecondsUntil(payment.freeze_at)
+    ? remainingSecondsUntil(resolvePaymentFreezeAt(payment))
     : null;
   const countdownText = formatFreezeCountdown(remaining);
+  const freezeAt = resolvePaymentFreezeAt(payment);
   return `
     <aside class="payment-detail">
       <section class="card">
@@ -2036,12 +2038,12 @@ function paymentDetailPanel() {
         ${infoRow('Status', statusLabel)}
         ${status === MATCHING_STATUS.SEARCHING
     ? `
-          <div class="payment-detail-timer" data-detail-freeze-at="${escapeHtml(payment.freeze_at || '')}">
+          <div class="payment-detail-timer" data-detail-freeze-at="${escapeHtml(freezeAt || '')}">
             ${infoRow('Freeze in', countdownText != null
     ? `<span data-detail-freeze-countdown>${countdownText}</span>`
-    : 'Awaiting deadline…')}
+    : '<span class="payment-freeze-diagnostic">⚠ Missing timer data</span>')}
             ${infoRow('Received', fmtDateTime(payment.message_date))}
-            ${infoRow('Freeze deadline', payment.freeze_at ? fmtDateTime(payment.freeze_at) : '—')}
+            ${infoRow('Freeze deadline', freezeAt ? fmtDateTime(freezeAt) : '—')}
           </div>
         `
     : ''}
@@ -2274,16 +2276,21 @@ function paymentsWorkspace() {
               Exceptions &amp; frozen only
             </label>
           </div>
-          <div class="payment-table-header">
-            <span>Time</span>
-            <span>Sender</span>
-            <span>Amount</span>
-            <span>Payment App</span>
-            <span>Preview</span>
-            <span>Telegram ID</span>
-            <span>Status</span>
+          <div class="payment-hscroll-top" id="paymentHScrollTop" hidden aria-hidden="true">
+            <div class="payment-hscroll-spacer" id="paymentHScrollSpacer"></div>
           </div>
-          <div class="payment-table">${paymentRows()}</div>
+          <div class="payment-table-scroll" id="paymentTableScroll">
+            <div class="payment-table-header">
+              <span>Time</span>
+              <span>Sender</span>
+              <span>Amount</span>
+              <span>Payment App</span>
+              <span>Preview</span>
+              <span>Telegram ID</span>
+              <span>Status</span>
+            </div>
+            <div class="payment-table">${paymentRows()}</div>
+          </div>
         </section>
 
         <div class="payment-detail-wrap">
@@ -2542,7 +2549,66 @@ function render() {
     appbegPlayersController.bindAppBegPlayersEvents(app);
   }
   syncPaymentFreezeTicker();
+  syncPaymentTableHorizontalScroll();
   scrollChatToBottom();
+}
+
+let paymentHScrollSyncing = false;
+let paymentHScrollResizeObserver = null;
+let paymentHScrollResizeBound = false;
+let paymentHScrollUpdate = null;
+
+function syncPaymentTableHorizontalScroll() {
+  const top = document.querySelector('#paymentHScrollTop');
+  const spacer = document.querySelector('#paymentHScrollSpacer');
+  const body = document.querySelector('#paymentTableScroll');
+  if (!top || !spacer || !body) return;
+
+  const update = () => {
+    const overflow = body.scrollWidth > body.clientWidth + 1;
+    top.hidden = !overflow;
+    top.setAttribute('aria-hidden', overflow ? 'false' : 'true');
+    spacer.style.width = `${body.scrollWidth}px`;
+    if (!paymentHScrollSyncing) {
+      paymentHScrollSyncing = true;
+      top.scrollLeft = body.scrollLeft;
+      paymentHScrollSyncing = false;
+    }
+  };
+  paymentHScrollUpdate = update;
+
+  top.onscroll = () => {
+    if (paymentHScrollSyncing) return;
+    paymentHScrollSyncing = true;
+    body.scrollLeft = top.scrollLeft;
+    paymentHScrollSyncing = false;
+  };
+  body.onscroll = () => {
+    if (paymentHScrollSyncing) return;
+    paymentHScrollSyncing = true;
+    top.scrollLeft = body.scrollLeft;
+    paymentHScrollSyncing = false;
+  };
+
+  update();
+  requestAnimationFrame(update);
+  if (typeof ResizeObserver !== 'undefined') {
+    if (paymentHScrollResizeObserver) paymentHScrollResizeObserver.disconnect();
+    paymentHScrollResizeObserver = new ResizeObserver(() => {
+      if (paymentHScrollUpdate) paymentHScrollUpdate();
+    });
+    paymentHScrollResizeObserver.observe(body);
+    const feed = body.closest('.payments-feed');
+    if (feed) paymentHScrollResizeObserver.observe(feed);
+    const layout = body.closest('.payments-layout');
+    if (layout) paymentHScrollResizeObserver.observe(layout);
+  }
+  if (!paymentHScrollResizeBound) {
+    paymentHScrollResizeBound = true;
+    window.addEventListener('resize', () => {
+      if (paymentHScrollUpdate) paymentHScrollUpdate();
+    }, { passive: true });
+  }
 }
 
 let paymentFreezeTickerId = null;

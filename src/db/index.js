@@ -2344,7 +2344,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       query: String(query || '').trim() || null
     }));
     const rows = await db.prepare(querySql).all(params);
-    const payments = rows.map(hydratePaymentEvent).sort((a, b) => {
+    let needsHeal = false;
+    for (const row of rows) {
+      const status = String(row.routing_status || '');
+      if (!['searching', 'unrouted', 'waiting', 'parsed'].includes(status)) continue;
+      if (row.freeze_at) continue;
+      needsHeal = true;
+      await ensurePaymentSearchDeadline(row.id, {
+        receivedAt: row.message_date || row.created_at || nowIso()
+      });
+    }
+    if (needsHeal) {
+      await freezeOverdueSearchingPayments({ now: new Date() });
+    }
+    // Re-read after heal so freeze_at / frozen status are current for the UI.
+    const refreshed = needsHeal ? await db.prepare(querySql).all(params) : rows;
+    const payments = refreshed.map(hydratePaymentEvent).sort((a, b) => {
       const pa = MATCHING_STATUS_SORT_PRIORITY[a.matching_status] ?? 99;
       const pb = MATCHING_STATUS_SORT_PRIORITY[b.matching_status] ?? 99;
       if (pa !== pb) return pa - pb;
@@ -2620,7 +2635,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const rows = await db.prepare(`
       SELECT id, message_date, created_at
       FROM payment_events
-      WHERE routing_status IN ('searching', 'unrouted')
+      WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
         AND (freeze_at IS NULL OR freeze_at = '')
     `).all();
     let backfilled = 0;
@@ -2631,7 +2646,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SET freeze_at = ?, updated_at = ?
         WHERE id = ?
           AND (freeze_at IS NULL OR freeze_at = '')
-          AND routing_status IN ('searching', 'unrouted')
+          AND routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
       `).run(freezeAt, nowIso(), row.id);
       if (result.changes) backfilled += 1;
     }
@@ -2648,7 +2663,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const overdue = await db.prepare(`
       SELECT id, freeze_at, unmatched_reason, routing_status, registration_payment_window_id
       FROM payment_events
-      WHERE routing_status IN ('searching', 'unrouted')
+      WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
         AND freeze_at IS NOT NULL
         AND freeze_at != ''
         AND freeze_at <= ?
@@ -2681,7 +2696,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const payment = await getPaymentEvent(paymentEventId);
     if (!payment) return null;
     if (payment.freeze_at) return payment;
-    if (!['searching', 'unrouted', 'New', 'new'].includes(payment.routing_status)
+    if (!['searching', 'unrouted', 'waiting', 'parsed', 'New', 'new'].includes(payment.routing_status)
       && payment.routing_status !== ROUTING_STATUS.UNROUTED
       && payment.routing_status !== ROUTING_STATUS.SEARCHING) {
       return payment;
@@ -4142,6 +4157,40 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return toPublicLedgerUser(await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(userId));
   }
 
+  async function normalizePaymentDeadlinesOnBoot() {
+    try {
+      // Backfill freeze_at from message_date/created_at + 5m, then freeze overdue unmatched rows.
+      const result = await freezeOverdueSearchingPayments({ now: new Date() });
+      // Canonical vocabulary: legacy waiting/unrouted/parsed → searching while still in window.
+      await db.prepare(`
+        UPDATE payment_events
+        SET routing_status = 'searching', updated_at = ?
+        WHERE routing_status IN ('unrouted', 'waiting', 'parsed')
+          AND freeze_at IS NOT NULL
+          AND freeze_at != ''
+          AND freeze_at > ?
+          AND registration_payment_window_id IS NULL
+          AND routed_at IS NULL
+      `).run(nowIso(), new Date().toISOString());
+      const second = await freezeOverdueSearchingPayments({ now: new Date() });
+      console.log(
+        `[payments] payment_deadline_normalize_on_boot backfilled=${(result.backfilled || 0) + (second.backfilled || 0)} ` +
+        `frozen=${(result.count || 0) + (second.count || 0)}`
+      );
+      return {
+        backfilled: (result.backfilled || 0) + (second.backfilled || 0),
+        count: (result.count || 0) + (second.count || 0),
+        frozen: [...(result.frozen || []), ...(second.frozen || [])]
+      };
+    } catch (error) {
+      console.warn('[payments] payment_deadline_normalize_on_boot failed:', error.message);
+      return { backfilled: 0, count: 0, frozen: [] };
+    }
+  }
+
+  // Ensure legacy Waiting rows get freeze_at and overdue ones freeze immediately on boot.
+  await normalizePaymentDeadlinesOnBoot();
+
   return {
     db,
     upsertTelegramUser,
@@ -4405,6 +4454,10 @@ function hydratePaymentEvent(event) {
   } catch {
     raw_payload = { parseError: true };
   }
+  const freezeAt = pickRowValue(event, 'freeze_at');
+  const frozenAt = pickRowValue(event, 'frozen_at');
+  const matchedAt = pickRowValue(event, 'matched_at');
+  const unmatchedReason = pickRowValue(event, 'unmatched_reason');
   const base = {
     ...event,
     id: event.id != null ? Number(event.id) : event.id,
@@ -4413,10 +4466,10 @@ function hydratePaymentEvent(event) {
     registration_payment_window_id: event.registration_payment_window_id != null
       ? Number(event.registration_payment_window_id)
       : event.registration_payment_window_id,
-    unmatched_reason: event.unmatched_reason || null,
-    freeze_at: event.freeze_at || null,
-    frozen_at: event.frozen_at || null,
-    matched_at: event.matched_at || null,
+    unmatched_reason: unmatchedReason || null,
+    freeze_at: freezeAt || null,
+    frozen_at: frozenAt || null,
+    matched_at: matchedAt || null,
     raw_payload
   };
   return enrichPaymentQueueFields(base);

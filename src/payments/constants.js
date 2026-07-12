@@ -135,11 +135,24 @@ export function paymentFlowType(payment = {}) {
   return null;
 }
 
+function coerceIsoTimestamp(value) {
+  if (value == null || value === '') return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 export function remainingSecondsUntil(freezeAt, now = new Date()) {
-  if (!freezeAt) return null;
-  const end = new Date(freezeAt).getTime();
-  if (!Number.isFinite(end)) return null;
+  const endIso = coerceIsoTimestamp(freezeAt);
+  if (!endIso) return null;
+  const end = new Date(endIso).getTime();
   const base = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(end) || !Number.isFinite(base)) return null;
   return Math.max(0, Math.floor((end - base) / 1000));
 }
 
@@ -217,11 +230,11 @@ export function enrichPaymentQueueFields(payment = {}, now = new Date()) {
     ...payment,
     matching_status,
     remaining_seconds,
-    freeze_at: payment.freeze_at || null,
-    frozen_at: payment.frozen_at || null,
+    freeze_at: coerceIsoTimestamp(payment.freeze_at),
+    frozen_at: coerceIsoTimestamp(payment.frozen_at),
     unmatched_reason: payment.unmatched_reason || null,
     matched_window_id: matched_window_id != null ? Number(matched_window_id) : null,
-    matched_at,
+    matched_at: coerceIsoTimestamp(matched_at),
     flow_type: paymentFlowType(payment),
     server_now: now instanceof Date ? now.toISOString() : new Date(now).toISOString()
   };

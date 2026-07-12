@@ -344,6 +344,9 @@ export async function migratePostgres(driver) {
       ON payment_events(routing_status, freeze_at);
   `);
 
+  // Backfill freeze_at for searching/unrouted rows using message_date + 5 minutes (text ISO math done in app boot).
+  // Column creation alone is not enough — createDataStore runs normalizePaymentDeadlinesOnBoot next.
+
   await driver.exec(`
     CREATE TABLE IF NOT EXISTS ledger_users (
       id BIGSERIAL PRIMARY KEY,

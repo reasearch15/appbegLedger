@@ -537,9 +537,13 @@ app.get('/api/payments', async (req, res) => {
   });
   console.log(`[payments-api] GET /api/payments returned ${payments.length} rows`, JSON.stringify({
     matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
-    exceptionsOnly: req.query.exceptionsOnly === 'true'
+    exceptionsOnly: req.query.exceptionsOnly === 'true',
+    missingFreezeAt: payments.filter((p) => p.matching_status === 'searching' && !p.freeze_at).length
   }));
-  res.json({ payments });
+  res.json({
+    payments,
+    server_now: new Date().toISOString()
+  });
 });
 
 app.get('/api/payments/exceptions', async (req, res) => {
