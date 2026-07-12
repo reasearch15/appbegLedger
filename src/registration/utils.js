@@ -21,7 +21,7 @@ export function normalizeAppBegUsername(username) {
 }
 
 export function isUnregisteredStatus(status) {
-  return ['New', 'Collecting Info', 'Pending', 'Pending Verification'].includes(status);
+  return ['New', 'Collecting Info', 'Waiting For Payment', 'Pending', 'Pending Verification'].includes(status);
 }
 
 export function isReadyToCreateAppBegPlayer(contact, info = {}) {
@@ -61,15 +61,21 @@ Click Register to start.`;
 
 export const WELCOME_BUTTONS = [[{ label: 'Register', action: 'flow:registration_info' }]];
 
+/** Minimum first deposit for Royal VIP bot registration. */
+export const MIN_REGISTRATION_DEPOSIT = 5;
+
 /**
  * Parse a first-deposit amount for registration.
  * Accepts positive numbers like 10, 10.5, 25.00, 100.75.
  * Rejects text, zero, negatives, and symbols-only input.
+ * Enforces MIN_REGISTRATION_DEPOSIT ($5) by default.
  */
-export function parseFirstDepositAmount(text) {
+export function parseFirstDepositAmount(text, { minAmount = MIN_REGISTRATION_DEPOSIT } = {}) {
   const raw = String(text || '').trim();
   if (!raw || !/^\d+(?:\.\d+)?$/.test(raw)) return null;
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) return null;
-  return Math.round(value * 100) / 100;
+  const rounded = Math.round(value * 100) / 100;
+  if (minAmount != null && rounded < minAmount) return null;
+  return rounded;
 }

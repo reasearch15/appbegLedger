@@ -8,7 +8,15 @@ export function registrationTimeoutHours() {
   return Number(process.env.REGISTRATION_TIMEOUT_HOURS || 72);
 }
 
-export function computeRegistrationProgress(player, info = {}) {
+export function computeRegistrationProgress(player, info = {}, automationState = null) {
+  const useBotProgress = automationState?.current_flow === 'bot_registration'
+    || info.registration_method === 'chatbot'
+    || Boolean(info.payment_method_name || info.payment_display_name)
+    || info.first_deposit_amount != null;
+  if (useBotProgress) {
+    const { computeBotRegistrationProgress } = requireBotRegistrationState();
+    return computeBotRegistrationProgress(player, info, automationState);
+  }
   const steps = [
     {
       key: 'telegram',
@@ -23,7 +31,7 @@ export function computeRegistrationProgress(player, info = {}) {
     {
       key: 'payment',
       label: 'Payment Tag',
-      done: Boolean(info.payment_tag)
+      done: Boolean(info.payment_tag || info.payment_display_name)
     },
     {
       key: 'submitted',
@@ -37,6 +45,52 @@ export function computeRegistrationProgress(player, info = {}) {
     completed,
     total: steps.length,
     percent: Math.round((completed / steps.length) * 100)
+  };
+}
+
+function requireBotRegistrationState() {
+  return {
+    computeBotRegistrationProgress: (contact, info, automationState) => {
+      // Inline lightweight progress so playerModel stays usable without circular imports in tests.
+      const status = contact?.registration_status || 'New';
+      const step = automationState?.current_step || null;
+      const steps = [
+        { key: 'payment_app', label: 'Payment app', done: Boolean(info.payment_method_name || info.payment_app) },
+        { key: 'payment_tag', label: 'Payment account', done: Boolean(info.payment_tag) },
+        { key: 'payment_display_name', label: 'Payment name', done: Boolean(info.payment_display_name) },
+        { key: 'deposit', label: 'First deposit', done: info.first_deposit_amount != null },
+        { key: 'payment_confirmed', label: 'Payment verified', done: Boolean(info.payment_confirmed) },
+        { key: 'username', label: 'AppBeg username', done: Boolean(info.preferred_appbeg_username || contact?.appbeg_account_id) },
+        {
+          key: 'password',
+          label: 'Password set',
+          done: Boolean(info.appbeg_password)
+            || ['review', 'complete', 'referral_code'].includes(step)
+            || ['Pending Verification', 'Registered'].includes(status)
+        },
+        {
+          key: 'referral',
+          label: 'Referral',
+          done: Object.prototype.hasOwnProperty.call(info, 'referral_code')
+            || ['review', 'complete'].includes(step)
+            || ['Pending Verification', 'Registered'].includes(status)
+        },
+        {
+          key: 'submitted',
+          label: 'Submitted',
+          done: ['Pending Verification', 'Registered'].includes(status)
+        }
+      ];
+      const completed = steps.filter((item) => item.done).length;
+      return {
+        steps,
+        completed,
+        total: steps.length,
+        percent: Math.round((completed / Math.max(steps.length, 1)) * 100),
+        current_step: step,
+        current_flow: automationState?.current_flow || null
+      };
+    }
   };
 }
 

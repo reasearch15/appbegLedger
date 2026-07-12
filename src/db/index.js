@@ -1781,12 +1781,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const user = await getUserProfile(userId);
     if (!user) return null;
     let step = null;
+    let resolvedFlow = flowKey;
     if (flowKey === 'registration_info') {
-      step = 'appbeg_username';
+      // Prefer canonical bot_registration for Bot API contacts.
+      if (user.telegram_sync_source === 'bot_api' || user.active_messaging_source === 'bot_api') {
+        resolvedFlow = 'bot_registration';
+        step = 'payment_app';
+      } else {
+        step = 'appbeg_username';
+      }
+      await updateRegistrationStatus(userId, 'Collecting Info', actorName);
+    } else if (flowKey === 'bot_registration') {
+      step = 'payment_app';
       await updateRegistrationStatus(userId, 'Collecting Info', actorName);
     }
     const state = await updateAutomationState(userId, {
-      currentFlow: flowKey,
+      currentFlow: resolvedFlow,
       currentStep: step,
       infoReviewedAt: null,
       infoReviewedBy: null
@@ -1795,9 +1805,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       telegramUserId: userId,
       eventType: 'automation_flow_started',
       title: 'Automation Flow Started',
-      body: flowKey,
+      body: resolvedFlow,
       actorName,
-      metadata: { flowKey, step }
+      metadata: { flowKey: resolvedFlow, step, requestedFlow: flowKey }
     });
     return state;
   }
@@ -3379,6 +3389,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
+  async function getRegistrationDefaultPaymentQr() {
+    const methods = await listActivePaymentMethodsForRegistration();
+    for (const method of methods) {
+      const qr = await getActiveDefaultPaymentQr(method.id);
+      if (qr?.file_path) {
+        return {
+          paymentMethodId: method.id,
+          paymentMethodName: method.name,
+          paymentMethodKey: method.key,
+          qr
+        };
+      }
+    }
+    return null;
+  }
+
   async function countPaymentQrUsage(id) {
     const row = await db.prepare(`
       SELECT COUNT(*) AS count
@@ -3648,7 +3674,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function resetRegistrationFlowToIdle(userId, actorName = 'System') {
     const user = await getUserProfile(userId);
     if (!user) return null;
-    if (user.registration_status === 'Collecting Info') {
+    if (['Collecting Info', 'Waiting For Payment'].includes(user.registration_status)) {
       await updateRegistrationStatus(userId, 'New', actorName);
     }
     return await updateAutomationState(userId, {
@@ -3873,6 +3899,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     markBotNeedsStaffReview,
     findLatestIncomingMessageId,
     getActiveDefaultPaymentQr,
+    getRegistrationDefaultPaymentQr,
     listPaymentMethods,
     listActivePaymentMethodsForRegistration,
     getPaymentMethod,

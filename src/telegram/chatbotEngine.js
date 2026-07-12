@@ -19,21 +19,56 @@ import {
   paymentQrCaption,
   registrationPaymentAppPrompt
 } from '../payments/methodUtils.js';
+import {
+  BOT_REGISTRATION_FLOW,
+  buildPaymentMethodButtons,
+  cancelConfirmButtons,
+  canonicalizeRegistrationStep,
+  clearedBotRegistrationInfo,
+  guestMenuButtons,
+  inProgressMenuButtons,
+  menuKindButtons,
+  menuKindWelcomeText,
+  parseBotCommand,
+  referralChoiceButtons,
+  registeredMenuButtons,
+  registrationNavButtons,
+  resolveEffectiveRegistrationState,
+  restartConfirmButtons,
+  reviewScreenButtons,
+  waitingPaymentMenuButtons
+} from './botRegistrationState.js';
+import {
+  continueRoyalVipRegistration,
+  startRoyalVipRegistration,
+  reviewDecision as royalVipReviewDecision
+} from './royalVipBotRegistration.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
-  'payment_app',
+  'payment_name',
   'payment_display_name',
   'first_deposit_amount',
+  'await_payment',
   'await_payment_done',
   'waiting_for_payment_confirmation',
   'username',
+  'enter_appbeg_username',
   'password',
-  'referral_code',
-  'payment_app_other',
-  'payment_tag',
+  'enter_appbeg_password',
   'review',
-  'complete'
+  'creating_account',
+  'submitted',
+  'complete',
+  // legacy aliases kept for resume of in-flight older sessions
+  'payment_app',
+  'choose_payment_app',
+  'payment_tag',
+  'enter_payment_tag',
+  'enter_payment_display_name',
+  'referral_code',
+  'enter_referral_code',
+  'payment_app_other'
 ];
 
 export const PAYMENT_APP_OPTIONS = [
@@ -44,50 +79,11 @@ export const PAYMENT_APP_OPTIONS = [
   { label: 'Other', action: 'bot:payment_app:Other', value: 'Other' }
 ];
 
-export const WELCOME_BUTTONS = [
-  [{ label: 'Register', action: 'bot:register', text: 'Register', data: 'bot:register' }],
-  [
-    { label: 'How It Works', action: 'bot:how_it_works', text: 'How It Works', data: 'bot:how_it_works' },
-    { label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }
-  ]
-];
-
-export const IN_PROGRESS_BUTTONS = [
-  [{ label: 'Continue Registration', action: 'bot:continue_registration', text: 'Continue Registration', data: 'bot:continue_registration' }],
-  [
-    { label: 'Restart Registration', action: 'bot:restart_registration', text: 'Restart Registration', data: 'bot:restart_registration' },
-    { label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }
-  ]
-];
-
-export const PAYMENT_WAITING_BUTTONS = [
-  [{ label: 'Payment Instructions', action: 'bot:payment_instructions', text: 'Payment Instructions', data: 'bot:payment_instructions' }],
-  [
-    { label: 'I Have Paid', action: 'bot:i_have_paid', text: 'I Have Paid', data: 'bot:i_have_paid' },
-    { label: 'Change Payment Details', action: 'bot:change_payment_details', text: 'Change Payment Details', data: 'bot:change_payment_details' }
-  ],
-  [{ label: 'Contact Support', action: 'staff:takeover', text: 'Contact Support', data: 'staff:takeover' }]
-];
-
-export const REGISTERED_BUTTONS = [
-  [
-    { label: 'Deposit', action: 'bot:deposit', text: 'Deposit', data: 'bot:deposit' },
-    { label: 'Cash Out', action: 'bot:cashout', text: 'Cash Out', data: 'bot:cashout' }
-  ],
-  [
-    { label: 'My Account', action: 'bot:my_account', text: 'My Account', data: 'bot:my_account' },
-    { label: 'My Games', action: 'bot:my_games', text: 'My Games', data: 'bot:my_games' }
-  ],
-  [{ label: 'Support', action: 'staff:takeover', text: 'Support', data: 'staff:takeover' }]
-];
-
-export const REVIEW_BUTTONS = [
-  [
-    { label: 'Confirm', action: 'confirm', text: 'Confirm', data: 'confirm' },
-    { label: 'Edit', action: 'edit', text: 'Edit', data: 'edit' }
-  ],
-  [{ label: 'Cancel', action: 'cancel', text: 'Cancel', data: 'cancel' }]
-];
+export const WELCOME_BUTTONS = guestMenuButtons();
+export const IN_PROGRESS_BUTTONS = inProgressMenuButtons();
+export const PAYMENT_WAITING_BUTTONS = waitingPaymentMenuButtons();
+export const REGISTERED_BUTTONS = registeredMenuButtons();
+export const REVIEW_BUTTONS = reviewScreenButtons();
 
 const INSULT_PATTERNS = [
   /\b(stupid|idiot|dumb|hate you|shut up|fuck|shit|asshole|bitch|bastard|moron|retard)\b/i,
@@ -150,6 +146,8 @@ export function isChatbotButtonAction(action) {
   const value = normalizeCallbackAction(action);
   if (!value) return false;
   return value.startsWith('bot:')
+    || value.startsWith('menu:')
+    || value.startsWith('register:')
     || value.startsWith('staff')
     || value === 'register'
     || value === 'confirm'
@@ -163,19 +161,48 @@ export function isChatbotButtonAction(action) {
 export function normalizeCallbackAction(action) {
   const raw = String(action || '').trim();
   if (!raw) return '';
+  if (raw.length > 64) return '';
   const aliases = {
     register: 'bot:register',
+    'menu:register': 'bot:register',
     'flow:registration_info': 'bot:register',
     staff: 'staff:takeover',
-    'talk_to_staff': 'staff:takeover',
+    'menu:support': 'staff:takeover',
+    talk_to_staff: 'staff:takeover',
     'bot:talk_to_staff': 'staff:takeover',
     confirm: 'bot:confirm',
+    'register:confirm': 'bot:confirm',
     edit: 'bot:edit',
-    cancel: 'bot:stop'
+    cancel: 'bot:stop',
+    'menu:how_it_works': 'bot:how_it_works',
+    'menu:continue_registration': 'bot:continue_registration',
+    'menu:restart_request': 'bot:restart_request',
+    'menu:restart_registration': 'bot:restart_request',
+    'bot:restart_registration': 'bot:restart_request',
+    'register:restart_request': 'bot:restart_request',
+    'register:restart_confirm': 'bot:restart_confirm',
+    'register:restart_abort': 'bot:continue_registration',
+    'register:cancel_request': 'bot:cancel_request',
+    'register:cancel_confirm': 'bot:stop',
+    'register:cancel_abort': 'bot:continue_registration',
+    'menu:main': 'bot:main_menu',
+    'menu:registration_status': 'bot:status',
+    'menu:deposit': 'bot:deposit',
+    'menu:cashout': 'bot:cashout',
+    'menu:my_account': 'bot:my_account',
+    'register:edit_payment': 'bot:change_payment_details',
+    'register:edit_username': 'bot:edit_username',
+    'register:edit_password': 'bot:edit_password',
+    'register:edit_referral': 'bot:edit_referral',
+    'register:skip_referral': 'bot:skip_referral',
+    'register:enter_referral': 'bot:enter_referral'
   };
   if (aliases[raw]) return aliases[raw];
   if (raw.startsWith('payment_app:') && !raw.startsWith('bot:')) {
     return `bot:${raw}`;
+  }
+  if (raw.startsWith('register:payment_app:')) {
+    return `bot:payment_app:${raw.slice('register:payment_app:'.length)}`;
   }
   return raw;
 }
@@ -208,17 +235,55 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   action = normalizeCallbackAction(action) || null;
   const automationState = await store.ensureAutomationState(contact.id);
   const info = { ...(automationState.registration_info || {}) };
-  const flow = automationState.current_flow;
+  let flow = automationState.current_flow;
+  // Bot API contacts must use bot_registration only — migrate legacy registration_info.
+  if (flow === 'registration_info' && (contact.telegram_sync_source === 'bot_api' || contact.active_messaging_source === 'bot_api')) {
+    flow = BOT_REGISTRATION_FLOW;
+  }
   const step = automationState.current_step || 'welcome';
   const normalizedStep = normalizeStep(step, flow);
   const registrationInProgress = isRegistrationInProgress(flow, normalizedStep);
+  let paymentWindow = null;
+  try {
+    paymentWindow = await store.getActiveRegistrationPaymentWindow?.(contact.id);
+  } catch {
+    paymentWindow = null;
+  }
+  const effective = await resolveEffectiveRegistrationState({
+    contact,
+    automationState: { ...automationState, current_flow: flow },
+    paymentWindow
+  });
+
+  const command = !action ? parseBotCommand(text) : null;
+  if (command) {
+    if (command.command === 'start') {
+      return await mainMenuDecision(contact, info, automationState, effective, { forceFull: true });
+    }
+    if (command.command === 'register') {
+      if (effective.is_registered) {
+        return decideRegisteredSupport({ text: '', action: null, contact, effective });
+      }
+      if (registrationInProgress) {
+        action = 'bot:continue_registration';
+      } else {
+        action = 'bot:register';
+      }
+    } else if (command.command === 'status') {
+      action = 'bot:status';
+    } else if (command.command === 'support') {
+      action = 'staff:takeover';
+    } else if (command.command === 'cancel') {
+      action = registrationInProgress ? 'bot:cancel_request' : 'bot:stop';
+    }
+  }
 
   // Stop commands interrupt before any registration step handling.
   if (!action && isStopCommand(text)) {
-    action = 'bot:stop';
+    action = registrationInProgress ? 'bot:cancel_request' : 'bot:stop';
   } else if (!action && isStaffCommand(text)) {
     action = 'staff:takeover';
-  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(normalizedStep, flow, contact)) {
+  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(normalizedStep, flow, contact, effective)) {
     action = 'bot:register';
   } else if (!action && isConfirmCommand(text) && normalizedStep === 'review' && isRegistrationFlow(flow)) {
     action = 'bot:confirm';
@@ -255,6 +320,27 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return talkToStaffDecision();
   }
 
+  if (action === 'bot:main_menu' || action === 'bot:status') {
+    if (action === 'bot:status') {
+      return {
+        kind: 'registration_status',
+        replies: [{
+          text: [
+            `Status: ${effective.effective_status}`,
+            effective.current_step && effective.current_step !== 'welcome'
+              ? `Current step: ${effective.current_step}`
+              : null,
+            effective.appbeg_username ? `AppBeg username: ${effective.appbeg_username}` : null
+          ].filter(Boolean).join('\n'),
+          buttons: menuKindButtons(effective.menu_kind)
+        }],
+        statePatch: null,
+        escalate: false
+      };
+    }
+    return await mainMenuDecision(contact, info, automationState, effective, { forceFull: true });
+  }
+
   if (action === 'bot:how_it_works') {
     return {
       kind: 'how_it_works',
@@ -262,15 +348,47 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         text: [
           'Here is how registration works:',
           '1. Choose your payment method.',
-          '2. Send your first deposit.',
-          '3. We match the payment.',
-          '4. You choose your AppBeg username and password.',
-          '5. Your account is created after verification.'
+          '2. Enter your payment account details.',
+          '3. Complete your first deposit when prompted.',
+          '4. Choose your AppBeg username and password.',
+          '5. Review and confirm — we create your account after verification.'
         ].join('\n'),
-        buttons: WELCOME_BUTTONS
+        buttons: menuKindButtons(effective.menu_kind)
       }],
       statePatch: null,
       escalate: false
+    };
+  }
+
+  if (action === 'bot:cancel_request') {
+    if (!registrationInProgress) {
+      return await stopRegistrationDecision({ store, contact, flow, step: normalizedStep, info });
+    }
+    return {
+      kind: 'registration_cancel_confirm',
+      replies: [{
+        text: 'Are you sure?',
+        buttons: cancelConfirmButtons()
+      }],
+      statePatch: null,
+      escalate: false,
+      logEvent: { event: 'registration_cancel_requested' }
+    };
+  }
+
+  if (action === 'bot:restart_request') {
+    if (effective.is_registered) {
+      return decideRegisteredSupport({ text: '', action: null, contact, effective });
+    }
+    return {
+      kind: 'registration_restart_confirm',
+      replies: [{
+        text: 'Restart registration from the beginning? Incomplete details will be cleared.',
+        buttons: restartConfirmButtons()
+      }],
+      statePatch: null,
+      escalate: false,
+      logEvent: { event: 'registration_restart_requested' }
     };
   }
 
@@ -284,13 +402,17 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         step: normalizedStep,
         info,
         flow,
-        automationState
+        automationState,
+        effective
       });
     }
     return await startRegistrationDecision(contact, info, store, { resumed: true });
   }
 
-  if (action === 'bot:restart_registration') {
+  if (action === 'bot:restart_confirm') {
+    if (effective.is_registered) {
+      return decideRegisteredSupport({ text: '', action: null, contact, effective });
+    }
     if (store.expireActiveRegistrationPaymentWindows) {
       await store.expireActiveRegistrationPaymentWindows(contact.id, { suppressNotification: true }).catch(() => null);
     }
@@ -301,19 +423,54 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return await stopRegistrationDecision({ store, contact, flow, step: normalizedStep, info });
   }
 
-  if (!isUnregisteredStatus(contact.registration_status) && contact.registration_status === 'Registered') {
-    return decideRegisteredSupport({ text, action });
+  if (effective.is_registered || effective.effective_status === 'Registered') {
+    return decideRegisteredSupport({ text, action, contact, effective });
+  }
+
+  if (effective.is_suspended || effective.effective_status === 'Suspended') {
+    return {
+      kind: 'suspended_menu',
+      replies: [{
+        text: menuKindWelcomeText(contact, effective),
+        buttons: menuKindButtons('suspended')
+      }],
+      statePatch: null,
+      escalate: false
+    };
   }
 
   if (action === 'flow:registration_info' || action === 'bot:register') {
-    return await startRegistrationDecision(contact, info, store);
+    if (registrationInProgress && normalizedStep !== 'welcome') {
+      return await continueRegistrationDecision({
+        store,
+        contact,
+        text: '',
+        action: null,
+        step: normalizedStep,
+        info,
+        flow,
+        automationState,
+        effective
+      });
+    }
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
   }
 
-  if (String(action || '').startsWith('bot:payment_app:')) {
-    return selectPaymentAppDecision({
+  if (String(action || '').startsWith('bot:payment_app:') || String(action || '').startsWith('register:payment_app:')) {
+    return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
+  }
+
+  if (action === 'bot:edit_username' || action === 'bot:edit_password' || action === 'bot:edit_referral' || action === 'bot:enter_referral' || action === 'bot:skip_referral') {
+    return await continueRegistrationDecision({
+      store,
       contact,
+      text: '',
+      action,
+      step: normalizedStep,
       info,
-      selected: String(action).slice('bot:payment_app:'.length)
+      flow,
+      automationState,
+      effective
     });
   }
 
@@ -327,28 +484,22 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       step: normalizedStep,
       info,
       flow,
-      automationState
+      automationState,
+      effective
     });
   }
 
-  if (isUnregisteredStatus(contact.registration_status)) {
-    if (isGreetingMessage(text) || !text) {
-      return welcomeDecision(contact, info, automationState);
+  if (isUnregisteredStatus(contact.registration_status) || effective.menu_kind === 'guest') {
+    if (isGreetingMessage(text) || !text || command?.command === 'start') {
+      return await mainMenuDecision(contact, info, automationState, effective);
     }
     if (isStartRegistrationCommand(text)) {
-      return await startRegistrationDecision(contact, info, store);
+      return await startRegistrationDecision(contact, clearedRegistrationInfo(contact), store);
     }
-    return welcomeDecision(contact, info, automationState);
+    return await mainMenuDecision(contact, info, automationState, effective);
   }
 
-  return {
-    kind: 'fallback_support',
-    replies: [{
-      text: 'I’m here and ready — tell me what you need.\n\nReply Staff if you’d rather chat with a human.'
-    }],
-    statePatch: null,
-    escalate: false
-  };
+  return await mainMenuDecision(contact, info, automationState, effective);
 }
 
 function talkToStaffDecision() {
@@ -368,24 +519,20 @@ function talkToStaffDecision() {
 }
 
 function clearedRegistrationInfo(contact) {
-  return {
-    telegram_display_name: contact.display_name,
-    telegram_username: contact.username || null,
-    telegram_user_id: contact.telegram_id
-  };
+  return clearedBotRegistrationInfo(contact);
 }
 
 function registrationStoppedMessage() {
   return [
-    'Registration has been stopped.',
-    'You can type Register anytime to start again, or Staff to talk with our team.'
+    'Registration has been cancelled.',
+    'Press Register anytime to start again.'
   ].join('\n');
 }
 
 function registrationStopIdleMessage() {
   return [
     'No active registration is running.',
-    'Type Register to start, or Staff to talk with our team.'
+    'Press Register to start, or Contact Support to talk with our team.'
   ].join('\n');
 }
 
@@ -396,7 +543,7 @@ async function stopRegistrationDecision({ store, contact, flow, step, info }) {
   if (!active) {
     return {
       kind: 'registration_stop_idle',
-      replies: [{ text: registrationStopIdleMessage() }],
+      replies: [{ text: registrationStopIdleMessage(), buttons: WELCOME_BUTTONS }],
       statePatch: null,
       escalate: false,
       logEvent: { event: 'registration_stop_idle' }
@@ -414,51 +561,66 @@ async function stopRegistrationDecision({ store, contact, flow, step, info }) {
 
   return {
     kind: 'registration_stopped',
-    replies: [{ text: registrationStoppedMessage() }],
+    replies: [{ text: registrationStoppedMessage(), buttons: WELCOME_BUTTONS }],
     statePatch: {
       currentFlow: null,
       currentStep: null,
       registrationInfo: clearedRegistrationInfo(contact)
     },
     replaceRegistrationInfo: true,
-    setStatus: contact.registration_status === 'Collecting Info' ? 'New' : undefined,
+    setStatus: ['Collecting Info', 'Waiting For Payment'].includes(contact.registration_status) ? 'New' : undefined,
     expirePaymentWindowId: window?.id || null,
     escalate: false,
     logEvents
   };
 }
 
-function welcomeDecision(contact, info, automationState = null, { forceFull = false } = {}) {
-  const throttled = !forceFull && isWelcomeThrottled(automationState);
-  const text = throttled
+async function mainMenuDecision(contact, info, automationState = null, effective = null, { forceFull = false } = {}) {
+  const state = effective || await resolveEffectiveRegistrationState({ contact, automationState });
+  const throttled = !forceFull && state.menu_kind === 'guest' && isWelcomeThrottled(automationState);
+  const text = throttled && state.menu_kind === 'guest'
     ? welcomeNudgeMessage()
-    : welcomeMessage();
+    : menuKindWelcomeText(contact, state);
+
+  const keepFlow = state.registration_active
+    && automationState?.current_flow
+    && state.menu_kind !== 'guest';
 
   return {
-    kind: throttled ? 'welcome_nudge' : 'welcome',
+    kind: throttled ? 'welcome_nudge' : (state.menu_kind === 'guest' ? 'welcome' : `menu_${state.menu_kind}`),
     replies: [{
       text,
-      buttons: WELCOME_BUTTONS
+      buttons: menuKindButtons(state.menu_kind)
     }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'welcome',
-      registrationInfo: {
-        ...info,
-        telegram_display_name: contact.display_name,
-        telegram_username: contact.username || null,
-        telegram_user_id: contact.telegram_id
-      }
-    },
-    markWelcomeSent: true,
+    statePatch: keepFlow
+      ? null
+      : {
+        currentFlow: state.menu_kind === 'guest' ? BOT_REGISTRATION_FLOW : automationState?.current_flow || null,
+        currentStep: state.menu_kind === 'guest' ? 'welcome' : automationState?.current_step || null,
+        registrationInfo: {
+          ...info,
+          telegram_display_name: contact.display_name,
+          telegram_username: contact.username || null,
+          telegram_user_id: contact.telegram_id
+        }
+      },
+    markWelcomeSent: state.menu_kind === 'guest',
     escalate: false,
     logEvent: {
-      event: throttled ? 'welcome_nudged' : 'welcome_shown',
-      throttled,
-      flow: 'bot_registration',
-      step: 'welcome'
+      event: throttled ? 'welcome_nudged' : 'main_menu_shown',
+      menuKind: state.menu_kind,
+      effectiveStatus: state.effective_status,
+      throttled
     }
   };
+}
+
+function welcomeDecision(contact, info, automationState = null, { forceFull = false } = {}) {
+  return mainMenuDecision(contact, info, automationState, {
+    menu_kind: 'guest',
+    effective_status: 'New',
+    registration_active: false
+  }, { forceFull });
 }
 
 function isWelcomeThrottled(automationState) {
@@ -471,16 +633,17 @@ function isWelcomeThrottled(automationState) {
   return elapsed < cooldown;
 }
 
-function decideRegisteredSupport({ text, action }) {
+function decideRegisteredSupport({ text, action, contact = null, effective = null }) {
   if (action === 'staff:takeover' || /\b(human|agent|staff)\b/i.test(text)) {
     return talkToStaffDecision();
   }
 
-  if (['bot:deposit', 'bot:cashout', 'bot:my_account', 'bot:my_games'].includes(action)) {
+  if (['bot:deposit', 'bot:cashout', 'bot:my_account', 'bot:my_games', 'bot:my_games'].includes(action)) {
     const label = {
       'bot:deposit': 'deposit',
       'bot:cashout': 'cash out',
       'bot:my_account': 'account',
+      'bot:my_game': 'games',
       'bot:my_games': 'games'
     }[action];
     return {
@@ -494,10 +657,11 @@ function decideRegisteredSupport({ text, action }) {
     };
   }
 
+  const name = contact?.display_name || 'there';
   return {
     kind: 'registered_support',
     replies: [{
-      text: 'You are all set on registration. Tell me what you need help with.',
+      text: 'Welcome back!',
       buttons: REGISTERED_BUTTONS
     }],
     statePatch: null,
@@ -506,604 +670,59 @@ function decideRegisteredSupport({ text, action }) {
 }
 
 async function startRegistrationDecision(contact, info, store, { resumed = false } = {}) {
-  const methods = await store.listActivePaymentMethodsForRegistration();
-  const prompt = methods.length
-    ? registrationPaymentAppPrompt(methods)
-    : 'Registration payments are not available right now. Please contact staff.';
-  return {
-    kind: 'registration_ask_payment_app',
-    replies: [{ text: prompt }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'payment_app',
-      registrationInfo: {
-        ...info,
-        telegram_display_name: contact.display_name,
-        telegram_username: contact.username || null,
-        telegram_user_id: contact.telegram_id,
-        registration_method: 'chatbot'
-      }
-    },
-    setStatus: 'Collecting Info',
-    escalate: false,
-    logEvent: {
-      event: resumed ? 'flow_resumed' : 'flow_started',
-      step: 'payment_app',
-      paymentMethodCount: methods.length
-    }
-  };
+  return startRoyalVipRegistration(contact, info, store, { resumed });
 }
 
-function flowInterruptedReminder(promptText, info, step, extra = {}) {
-  return {
-    kind: 'registration_flow_reminder',
-    replies: [{
-      text: [
-        "We're currently registering your account.",
-        '',
-        'Please complete the current step first.',
-        '',
-        promptText
-      ].join('\n')
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: step,
-      registrationInfo: info
-    },
-    escalate: false,
-    logEvent: {
-      event: 'flow_ignored_greeting',
-      step,
-      ...extra
-    }
-  };
-}
-
-function selectPaymentAppDecision({ info, selected }) {
-  if (selected === 'Other') {
-    return {
-      kind: 'registration_ask_payment_app_other',
-      replies: [{
-        text: 'Got it — which payment app should we list as Other?'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'payment_app_other',
-        registrationInfo: info
-      },
-      escalate: false,
-      logEvent: { event: 'payment_app_selected', paymentApp: 'Other' }
-    };
-  }
-
-  const nextInfo = {
-    ...info,
-    preferred_game: selected,
-    payment_app: selected
-  };
-  return {
-    kind: 'registration_ask_payment_tag',
-    replies: [{
-      text: `Perfect — ${selected}. What’s your payment name/tag for deposits?`
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'payment_tag',
-      registrationInfo: nextInfo
-    },
-    escalate: false,
-    logEvent: { event: 'payment_app_selected', paymentApp: selected }
-  };
-}
-
-function registrationOffTopicGuard(text, promptText, info, step) {
-  if (!isCasualOffTopicMessage(text)) return null;
-  return flowInterruptedReminder(promptText, info, step);
-}
-
-async function continueRegistrationDecision({ store, contact, text, action, step, info, flow, automationState = null }) {
-  const normalizedStep = normalizeStep(step, flow);
-  const activePaymentMethods = await store.listActivePaymentMethodsForRegistration();
-  const paymentPrompt = registrationPaymentAppPrompt(activePaymentMethods);
-
-  if (action === 'bot:confirm' || (normalizedStep === 'review' && AFFIRM_PATTERNS.test(text))) {
-    if (!info.payment_confirmed) {
-      return waitingForPaymentConfirmationDecision(info);
-    }
-    return {
-      kind: 'registration_create_appbeg_player',
-      replies: [],
-      createAppBegPlayer: true,
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'complete',
-        registrationInfo: {
-          ...info,
-          registration_method: 'chatbot',
-          registration_confirmed: true
-        }
-      },
-      setStatus: 'Pending Verification',
-      escalate: false,
-      logEvent: { event: 'create_player_requested' }
-    };
-  }
-
-  if (action === 'bot:edit' || (normalizedStep === 'review' && NEGATE_PATTERNS.test(text))) {
-    return {
-      kind: 'registration_ask_username',
-      replies: [{ text: 'No problem — let’s tweak it. What username would you like?' }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'username',
-        registrationInfo: info
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'username', reason: 'edit' }
-    };
-  }
-
-  if (normalizedStep === 'welcome') {
-    if (isStartRegistrationCommand(text)) {
-      return await startRegistrationDecision(contact, info, store);
-    }
-    return welcomeDecision(contact, info, automationState);
-  }
-
-  if (normalizedStep === 'payment_app') {
-    const offTopic = registrationOffTopicGuard(text, paymentPrompt, info, 'payment_app');
-    if (offTopic) return offTopic;
-
-    if (!activePaymentMethods.length) {
-      return {
-        kind: 'registration_no_payment_methods',
-        replies: [{
-          text: 'Registration payments are not available right now. Please contact staff.'
-        }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false
-      };
-    }
-    if (!text) {
-      return {
-        kind: 'registration_ask_payment_app',
-        replies: [{ text: paymentPrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'flow_step', step: 'payment_app' }
-      };
-    }
-    const method = parsePaymentMethodSelection(text, activePaymentMethods);
-    if (!method) {
-      return {
-        kind: 'registration_ask_payment_app',
-        replies: [{ text: paymentPrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false
-      };
-    }
-    const defaultQr = await store.getActiveDefaultPaymentQr(method.id);
-    if (!defaultQr) {
-      return {
-        kind: 'registration_payment_method_unavailable',
-        replies: [{ text: paymentMethodUnavailableMessage(method.name) }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'payment_method_unavailable', paymentMethod: method.key }
-      };
-    }
-    return {
-      kind: 'registration_ask_payment_display_name',
-      replies: [{ text: paymentDisplayNamePrompt(method.name) }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'payment_display_name',
-        registrationInfo: {
-          ...info,
-          payment_method_id: method.id,
-          payment_method_name: method.name,
-          payment_method_key: method.key,
-          payment_app: method.name
-        }
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'payment_display_name', paymentMethod: method.key }
-    };
-  }
-
-  if (normalizedStep === 'payment_display_name') {
-    const methodName = info.payment_method_name || 'payment app';
-    const namePrompt = paymentDisplayNamePrompt(methodName);
-    const offTopic = registrationOffTopicGuard(text, namePrompt, info, 'payment_display_name');
-    if (offTopic) return offTopic;
-
-    if (!text || text.length < 2) {
-      return {
-        kind: 'registration_ask_payment_display_name',
-        replies: [{ text: namePrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_display_name', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'flow_step', step: 'payment_display_name' }
-      };
-    }
-    const nextInfo = { ...info, payment_display_name: text.trim() };
-    return {
-      kind: 'registration_ask_first_deposit_amount',
-      replies: [{
-        text: 'How much are you going to deposit for your first payment?'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'first_deposit_amount',
-        registrationInfo: nextInfo
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'first_deposit_amount', paymentDisplayName: text.trim() }
-    };
-  }
-
-  if (normalizedStep === 'first_deposit_amount') {
-    const depositPrompt = 'How much are you going to deposit for your first payment?';
-    const offTopic = registrationOffTopicGuard(text, depositPrompt, info, 'first_deposit_amount');
-    if (offTopic) return offTopic;
-
-    const amount = parseFirstDepositAmount(text);
-    if (amount == null) {
-      return {
-        kind: 'registration_first_deposit_invalid',
-        replies: [{
-          text: 'Please enter a valid deposit amount, for example 10 or 25.50.'
-        }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'first_deposit_amount', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'first_deposit_amount_invalid', input: text || '' }
-      };
-    }
-    const nextInfo = {
-      ...info,
-      first_deposit_amount: amount
-    };
-    return {
-      kind: 'registration_send_payment_qr',
-      replies: [],
-      sendPaymentQr: {
-        paymentMethodId: nextInfo.payment_method_id,
-        paymentMethodName: nextInfo.payment_method_name,
-        paymentDisplayName: nextInfo.payment_display_name,
-        firstDepositAmount: amount
-      },
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'first_deposit_amount',
-        registrationInfo: nextInfo
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'send_qr', firstDepositAmount: amount }
-    };
-  }
-
-  if (normalizedStep === 'await_payment_done') {
-    const awaitPrompt = `When you have sent your ${info.payment_method_name || 'payment'}, reply Done.`;
-    const offTopic = registrationOffTopicGuard(text, awaitPrompt, info, 'await_payment_done');
-    if (offTopic) return offTopic;
-
-    if (action === 'bot:payment_instructions') {
-      return {
-        kind: 'registration_payment_instructions',
-        replies: [{ text: awaitPrompt, buttons: PAYMENT_WAITING_BUTTONS }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'payment_instructions_reshown' }
-      };
-    }
-
-    if (action === 'bot:change_payment_details') {
-      return {
-        kind: 'registration_change_payment_details',
-        replies: [{ text: paymentPrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'payment_details_change_requested' }
-      };
-    }
-
-    if (!isDoneCommand(text) && action !== 'bot:i_have_paid') {
-      return {
-        kind: 'registration_await_payment_done',
-        replies: [{ text: awaitPrompt, buttons: PAYMENT_WAITING_BUTTONS }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'await_payment_done', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'flow_step', step: 'await_payment_done' }
-      };
-    }
-    return handleRegistrationPaymentDone(info);
-  }
-
-  if (normalizedStep === 'waiting_for_payment_confirmation') {
-    if (info.payment_confirmed) {
-      return {
-        kind: 'registration_ask_username',
-        replies: [{
-          text: [
-            'Thanks! We confirmed your payment.',
-            'What AppBeg username would you like?',
-            '',
-            APPBEG_USERNAME_HELP
-          ].join('\n')
-        }],
-        statePatch: {
-          currentFlow: 'bot_registration',
-          currentStep: 'username',
-          registrationInfo: info
-        },
-        escalate: false,
-        logEvent: { event: 'registration_continued_after_payment_match' }
-      };
-    }
-    return waitingForPaymentConfirmationDecision(info);
-  }
-
-  if (normalizedStep === 'username') {
-    if (!info.payment_confirmed) {
-      return waitingForPaymentConfirmationDecision(info);
-    }
-
-    const usernamePrompt = [
-      'What AppBeg username would you like?',
-      '',
-      APPBEG_USERNAME_HELP
-    ].join('\n');
-    const offTopic = registrationOffTopicGuard(text, usernamePrompt, info, 'username');
-    if (offTopic) return offTopic;
-
-    const usernameResult = validateAppBegUsername(text);
-    if (!usernameResult.ok) {
-      return {
-        kind: 'registration_ask_username',
-        replies: [{ text: `${usernameResult.error}\n\n${usernameResult.help}` }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'username', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'username_validation_failed', input: text || '' }
-      };
-    }
-    const nextInfo = {
-      ...info,
-      preferred_appbeg_username: usernameResult.username
-    };
-    return {
-      kind: 'registration_ask_password',
-      replies: [{
-        text: `Choose a password for your AppBeg account.\n\n${APPBEG_PASSWORD_HELP}`
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'password',
-        registrationInfo: nextInfo
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'password', username: usernameResult.username }
-    };
-  }
-
-  if (normalizedStep === 'password') {
-    if (!info.payment_confirmed) {
-      return waitingForPaymentConfirmationDecision(info);
-    }
-
-    const passwordPrompt = `Choose a password for your AppBeg account.\n\n${APPBEG_PASSWORD_HELP}`;
-    const offTopic = registrationOffTopicGuard(text, passwordPrompt, info, 'password');
-    if (offTopic) return offTopic;
-
-    const passwordResult = validateAppBegPassword(text);
-    if (!passwordResult.ok) {
-      return {
-        kind: 'registration_ask_password',
-        replies: [{ text: `${passwordResult.error}\n\n${passwordResult.help}` }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'password', registrationInfo: info },
-        escalate: false,
-        logEvent: { event: 'flow_step', step: 'password', reason: 'validation_failed' }
-      };
-    }
-    const nextInfo = { ...info, appbeg_password: passwordResult.password };
-    return {
-      kind: 'registration_ask_referral',
-      replies: [{
-        text: 'Do you have a referral code? Reply with the code, or type Skip if you do not have one.'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'referral_code',
-        registrationInfo: nextInfo
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'referral_code' }
-    };
-  }
-
-  if (normalizedStep === 'referral_code') {
-    if (!info.payment_confirmed) {
-      return waitingForPaymentConfirmationDecision(info);
-    }
-
-    const referralPrompt = 'Do you have a referral code? Reply with the code, or type Skip if you do not have one.';
-    const offTopic = registrationOffTopicGuard(text, referralPrompt, info, 'referral_code');
-    if (offTopic) return offTopic;
-
-    const nextInfo = {
-      ...info,
-      referral_code: isReferralSkipInput(text) ? null : String(text || '').trim()
-    };
-    return reviewDecision(nextInfo);
-  }
-
-  if (normalizedStep === 'payment_app_other') {
-    const otherPrompt = 'Which payment app should we list as Other?';
-    const offTopic = registrationOffTopicGuard(text, otherPrompt, info, 'payment_app_other');
-    if (offTopic) return offTopic;
-
-    if (!text) {
-      return {
-        kind: 'registration_ask_payment_app_other',
-        replies: [{ text: otherPrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_app_other', registrationInfo: info },
-        escalate: false
-      };
-    }
-    const nextInfo = { ...info, preferred_game: text, payment_app: text };
-    return {
-      kind: 'registration_ask_payment_tag',
-      replies: [{ text: `Got it — ${text}. What’s your payment name/tag for deposits?` }],
-      statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_tag', registrationInfo: nextInfo },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'payment_tag', paymentApp: text }
-    };
-  }
-
-  if (normalizedStep === 'payment_tag') {
-    const tagPrompt = 'I’ll need that payment tag to keep deposits tidy. What tag should we use?';
-    const offTopic = registrationOffTopicGuard(text, tagPrompt, info, 'payment_tag');
-    if (offTopic) return offTopic;
-
-    if (!text) {
-      return {
-        kind: 'registration_ask_payment_tag',
-        replies: [{ text: tagPrompt }],
-        statePatch: { currentFlow: 'bot_registration', currentStep: 'payment_tag', registrationInfo: info },
-        escalate: false
-      };
-    }
-    const nextInfo = {
-      ...info,
-      payment_tag: text,
-      payment_tag_normalized: normalizePaymentTag(text)
-    };
-    return {
-      kind: 'registration_ask_password',
-      replies: [{
-        text: 'Choose a password for your AppBeg account (at least 6 characters).'
-      }],
-      statePatch: {
-        currentFlow: 'bot_registration',
-        currentStep: 'password',
-        registrationInfo: nextInfo
-      },
-      escalate: false,
-      logEvent: { event: 'flow_step', step: 'password' }
-    };
-  }
-
-  if (normalizedStep === 'review' || normalizedStep === 'complete') {
-    const review = reviewDecision(info);
-    if (isCasualOffTopicMessage(text)) {
-      return flowInterruptedReminder(review.replies[0].text, info, 'review');
-    }
-    return review;
-  }
-
-  return {
-    kind: 'registration_flow_stuck',
-    replies: [{
-      text: "We're still working on your registration. Please reply Cancel to start over or Staff for help."
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: normalizedStep,
-      registrationInfo: info
-    },
-    escalate: false
-  };
-}
-
-function waitingForPaymentConfirmationDecision(info) {
-  return {
-    kind: 'registration_waiting_payment_confirmation',
-    replies: [{
-      text: "Thanks! We're checking your payment now.\nPlease wait while we verify it."
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'waiting_for_payment_confirmation',
-      registrationInfo: info
-    },
-    escalate: false,
-    logEvent: { event: 'done_received_waiting_for_confirmation' }
-  };
-}
-
-function handleRegistrationPaymentDone(info) {
-  return waitingForPaymentConfirmationDecision(info);
+async function continueRegistrationDecision({
+  store,
+  contact,
+  text,
+  action,
+  step,
+  info,
+  flow,
+  automationState = null,
+  effective = null
+}) {
+  void flow;
+  return continueRoyalVipRegistration({
+    store,
+    contact,
+    text,
+    action,
+    step,
+    info,
+    automationState,
+    effective
+  });
 }
 
 function reviewDecision(info) {
-  const paymentLines = info.payment_display_name
-    ? [
-      `• Payment app: ${info.payment_method_name || info.payment_app || '—'}`,
-      `• Payment name: ${info.payment_display_name}`,
-      `• First deposit: $${formatDepositAmount(info.first_deposit_amount)}`
-    ]
-    : [
-      `• Payment app: ${info.payment_app || info.preferred_game || '—'}`,
-      `• Payment tag: ${info.payment_tag || '—'}`
-    ];
-  const summary = [
-    'Please confirm these details:',
-    `• Username: ${info.preferred_appbeg_username || '—'}`,
-    `• Password: ${info.appbeg_password ? '••••••••' : '—'}`,
-    `• Referral code: ${info.referral_code || 'None'}`,
-    ...paymentLines,
-    '',
-    'Reply with one of:',
-    'Confirm',
-    'Edit',
-    'Cancel'
-  ].join('\n');
-
-  return {
-    kind: 'registration_review',
-    replies: [{
-      text: summary
-    }],
-    statePatch: {
-      currentFlow: 'bot_registration',
-      currentStep: 'review',
-      registrationInfo: info
-    },
-    escalate: false,
-    logEvent: { event: 'flow_step', step: 'review' }
-  };
+  return royalVipReviewDecision(info);
 }
 
 function normalizeStep(step, flow) {
+  const canonical = canonicalizeRegistrationStep(step);
   if (flow === 'registration_info') {
-    if (step === 'appbeg_username') return 'username';
-    if (step === 'confirm') return 'review';
+    if (canonical === 'username' || step === 'appbeg_username') return 'username';
+    if (canonical === 'review' || step === 'confirm') return 'review';
   }
-  if (step === 'chime_payment_name') return 'payment_display_name';
-  if (BOT_REGISTRATION_STEPS.includes(step)) return step;
+  if (BOT_REGISTRATION_STEPS.includes(canonical) || BOT_REGISTRATION_STEPS.includes(step)) {
+    return canonical;
+  }
   return 'welcome';
 }
 
 function welcomeMessage() {
-  return `👋 Hey! Welcome to Royal VIP.
-
-I'm here to help you get started.
-
-If you'd like to create an account, just reply:
-
-Register
-
-If you'd rather speak with one of our staff members, simply reply:
-
-Staff
-
-You can also ask me questions at any time. 😊`;
+  return menuKindWelcomeText({}, { menu_kind: 'guest' });
 }
 
 function welcomeNudgeMessage() {
-  return `You're not registered yet.
-
-Reply Register to create an account, or Staff to speak with our team.`;
+  return [
+    '👋 Welcome to Royal VIP!',
+    '',
+    'It looks like you are not registered with us yet.'
+  ].join('\n');
 }
 
 function paymentAppPrompt(username = null, methods = []) {
@@ -1111,11 +730,12 @@ function paymentAppPrompt(username = null, methods = []) {
   return `${intro}${registrationPaymentAppPrompt(methods)}`;
 }
 
-function shouldStartRegistration(step, flow, contact) {
+function shouldStartRegistration(step, flow, contact, effective = null) {
+  if (effective?.is_registered) return false;
+  if (effective?.is_suspended) return false;
   const normalizedStep = normalizeStep(step, flow);
-  if (normalizedStep !== 'welcome') return false;
-  if (flow && flow !== 'idle' && !isRegistrationFlow(flow)) return false;
-  return isUnregisteredStatus(contact.registration_status);
+  if (isRegistrationInProgress(flow, normalizedStep) && normalizedStep !== 'welcome') return false;
+  return isUnregisteredStatus(contact.registration_status) || effective?.menu_kind === 'guest';
 }
 
 export function isStopCommand(text = '') {

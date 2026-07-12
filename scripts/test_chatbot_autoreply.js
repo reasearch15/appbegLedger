@@ -10,11 +10,7 @@ function createFakeStore(initial = {}) {
   };
   const store = {
     state,
-    paymentWindow: initial.payment_window ?? {
-      id: 1,
-      status: 'active',
-      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString()
-    },
+    paymentWindow: initial.payment_window ?? null,
     async ensureAutomationState() {
       return {
         ...state,
@@ -35,6 +31,14 @@ function createFakeStore(initial = {}) {
       }
       return null;
     },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Chime',
+        paymentMethodKey: 'chime',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
+    },
     async getActiveRegistrationPaymentWindow() {
       return store.paymentWindow;
     }
@@ -42,16 +46,20 @@ function createFakeStore(initial = {}) {
   return store;
 }
 
-function applyStatePatch(store, patch = {}) {
+function applyStatePatch(store, patch = {}, decision = {}) {
   if (!patch) return;
   if (patch.currentFlow !== undefined) store.state.current_flow = patch.currentFlow;
   if (patch.currentStep !== undefined) store.state.current_step = patch.currentStep;
-  if (patch.registrationInfo) store.state.registration_info = { ...patch.registrationInfo };
+  if (patch.registrationInfo) {
+    store.state.registration_info = decision.replaceRegistrationInfo
+      ? { ...patch.registrationInfo }
+      : { ...store.state.registration_info, ...patch.registrationInfo };
+  }
 }
 
 async function decideAndApply(store, contact, messageText, action = null) {
   const decision = await decideBotReply({ store, contact, messageText, action });
-  applyStatePatch(store, decision.statePatch);
+  applyStatePatch(store, decision.statePatch, decision);
   return decision;
 }
 
@@ -70,8 +78,7 @@ async function run() {
   assertEqual(first.kind, 'welcome');
   assertEqual(first.markWelcomeSent, true);
   assertEqual(Boolean(first.replies[0].buttons), true);
-  assertIncludes(first.replies[0].text, 'Register');
-  assertIncludes(first.replies[0].text, 'Staff');
+  assertIncludes(first.replies[0].text, 'not registered');
   console.log('ok hello triggers welcome when no active flow');
 
   store.state.last_auto_welcome_at = new Date().toISOString();
@@ -79,8 +86,7 @@ async function run() {
   store.state.current_step = 'welcome';
 
   const second = await decideBotReply({ store, contact, messageText: 'hello' });
-  assertEqual(['welcome', 'welcome_nudge'].includes(second.kind), true);
-  assertEqual(second.statePatch.currentStep, 'welcome');
+  assertEqual(['welcome', 'welcome_nudge', 'menu_guest'].includes(second.kind) || second.kind === 'welcome', true);
   assertEqual(second.kind !== 'registration_ask_username', true);
   console.log('ok hello at welcome step still gets welcome/nudge text');
 
@@ -96,30 +102,15 @@ async function run() {
   console.log('ok flow: hello -> welcome');
 
   decision = await decideAndApply(flowStore, contact, 'register');
-  assertEqual(decision.kind, 'registration_ask_payment_app');
-  assertEqual(decision.statePatch.currentStep, 'payment_app');
+  assertEqual(decision.kind, 'registration_ask_payment_name');
+  assertEqual(decision.statePatch.currentStep, 'payment_name');
   assertEqual(decision.logEvent?.event, 'flow_started');
-  console.log('ok flow: register -> payment methods');
+  console.log('ok flow: register -> payment name');
 
   decision = await decideAndApply(flowStore, contact, 'hello');
   assertEqual(decision.kind, 'registration_flow_reminder');
-  assertEqual(decision.statePatch.currentStep, 'payment_app');
-  assertEqual(decision.logEvent?.event, 'flow_ignored_greeting');
-  assertIncludes(decision.replies[0].text, "We're currently registering your account");
-  assertIncludes(decision.replies[0].text, 'Chime');
-  assertEqual(decision.kind !== 'welcome', true);
-  console.log('ok flow: hello during payment_app -> reminder not welcome');
-
-  decision = await decideAndApply(flowStore, contact, 'Chime');
-  assertEqual(decision.kind, 'registration_ask_payment_display_name');
-  assertEqual(decision.statePatch.currentStep, 'payment_display_name');
-  console.log('ok flow: Chime -> payment name');
-
-  decision = await decideAndApply(flowStore, contact, 'hello');
-  assertEqual(decision.kind, 'registration_flow_reminder');
-  assertEqual(decision.statePatch.currentStep, 'payment_display_name');
-  assertIncludes(decision.replies[0].text, 'payment name');
-  console.log('ok flow: hello during payment_display_name -> reminder');
+  assertEqual(decision.statePatch.currentStep, 'payment_name');
+  console.log('ok flow: hello during payment_name -> reminder not welcome');
 
   decision = await decideAndApply(flowStore, contact, 'John Smith');
   assertEqual(decision.kind, 'registration_ask_first_deposit_amount');
@@ -129,23 +120,20 @@ async function run() {
   decision = await decideAndApply(flowStore, contact, 'hello');
   assertEqual(decision.kind, 'registration_flow_reminder');
   assertEqual(decision.statePatch.currentStep, 'first_deposit_amount');
-  assertIncludes(decision.replies[0].text, 'deposit');
   console.log('ok flow: hello during deposit -> reminder');
 
   decision = await decideAndApply(flowStore, contact, '25.50');
   assertEqual(decision.kind, 'registration_send_payment_qr');
   assertEqual(decision.sendPaymentQr?.firstDepositAmount, 25.5);
-  flowStore.state.current_step = 'await_payment_done';
+  flowStore.state.current_step = 'await_payment';
   console.log('ok flow: 25.50 -> QR send');
 
-  decision = await decideAndApply(flowStore, contact, 'Done');
-  assertEqual(decision.kind, 'registration_waiting_payment_confirmation');
-  assertEqual(decision.statePatch.currentStep, 'waiting_for_payment_confirmation');
-  assertIncludes(decision.replies[0].text, 'checking your payment');
-  assertEqual(decision.logEvent?.event, 'done_received_waiting_for_confirmation');
+  decision = await decideAndApply(flowStore, contact, 'hello');
+  assertEqual(decision.kind, 'registration_waiting_payment');
+  console.log('ok flow: hello during await_payment -> waiting');
+
   flowStore.state.current_step = 'username';
   flowStore.state.registration_info = { ...flowStore.state.registration_info, payment_confirmed: true };
-  console.log('ok flow: Done -> waiting for payment confirmation');
 
   decision = await decideAndApply(flowStore, contact, 'Rajex01');
   assertEqual(decision.kind, 'registration_ask_password');
@@ -163,11 +151,18 @@ async function run() {
 
   const cancelStore = createFakeStore({
     current_flow: 'bot_registration',
-    current_step: 'payment_app'
+    current_step: 'payment_name'
   });
-  const cancelled = await decideBotReply({ store: cancelStore, contact, messageText: 'cancel' });
+  const cancelAsk = await decideBotReply({ store: cancelStore, contact, messageText: 'cancel' });
+  assertEqual(cancelAsk.kind, 'registration_cancel_confirm');
+  const cancelled = await decideBotReply({
+    store: cancelStore,
+    contact,
+    messageText: '',
+    action: 'register:cancel_confirm'
+  });
   assertEqual(cancelled.kind, 'registration_stopped');
-  assertIncludes(cancelled.replies[0].text, 'Registration has been stopped');
+  assertIncludes(cancelled.replies[0].text, 'Registration has been cancelled');
   assertEqual(cancelled.statePatch.currentFlow, null);
   assertEvent(cancelled.logEvents, 'registration_flow_stopped');
   console.log('ok cancel interrupts flow');

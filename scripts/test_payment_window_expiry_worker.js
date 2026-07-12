@@ -77,8 +77,8 @@ async function run() {
 
   assertEqual(queuedMessages.length, 1, 'one expiry message queued');
   assertEqual(queuedMessages[0].text, REGISTRATION_PAYMENT_EXPIRY_MESSAGE);
-  assertIncludes(queuedMessages[0].text, 'payment confirmation window has expired');
-  assertIncludes(queuedMessages[0].text, 'cancelled for your security');
+  assertIncludes(queuedMessages[0].text, 'Registration failed');
+  assertIncludes(queuedMessages[0].text, '5-minute payment window');
 
   const outbound = await store.db.prepare(`
     SELECT body
@@ -87,7 +87,7 @@ async function run() {
     ORDER BY id DESC
     LIMIT 1
   `).get(contactId);
-  assertIncludes(outbound.body, '**Register**');
+  assertIncludes(outbound.body, 'Register');
 
   const secondPass = await processPaymentWindowExpiryTick({
     store,
@@ -116,6 +116,14 @@ async function run() {
     async listActivePaymentMethodsForRegistration() {
       return [{ id: 1, name: 'Chime', key: 'chime', display_order: 1 }];
     },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Chime',
+        paymentMethodKey: 'chime',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
+    },
     async getActiveDefaultPaymentQr(methodId) {
       if (methodId === 1) {
         return { id: 10, file_path: 'data/media/payment-qr/test.png', payment_method_id: 1 };
@@ -132,10 +140,10 @@ async function run() {
     contact: updatedContact,
     messageText: 'Register'
   });
-  assertEqual(restarted.kind, 'registration_ask_payment_app');
-  assertEqual(restarted.statePatch.currentStep, 'payment_app');
+  assertEqual(restarted.kind, 'registration_ask_payment_name');
+  assertEqual(restarted.statePatch.currentStep, 'payment_name');
   assertEqual(restarted.statePatch.registrationInfo?.payment_display_name, undefined);
-  console.log('ok Register after expiry starts fresh payment method selection');
+  console.log('ok Register after expiry starts fresh payment name selection');
 
   const completedTelegramId = Date.now() + 1;
   const completedInsert = await store.db.prepare(`

@@ -50,7 +50,8 @@ export async function queueBotReply({ store, user, text, buttons = [], bot = nul
   return result;
 }
 
-export async function queueBotPhotoReply({ store, user, text, mediaPath, bot = null }) {
+export async function queueBotPhotoReply({ store, user, text, mediaPath, buttons = [], bot = null }) {
+  const normalizedButtons = normalizeButtonRows(buttons);
   const sendReply = await createReplySender({
     store,
     user,
@@ -61,6 +62,7 @@ export async function queueBotPhotoReply({ store, user, text, mediaPath, bot = n
     user,
     text,
     mediaPath,
+    buttons: normalizedButtons,
     messageType: 'image'
   });
   if (result?.queued) {
@@ -74,9 +76,10 @@ export async function queueBotPhotoReply({ store, user, text, mediaPath, bot = n
 export function shouldUseRegistrationBot(job, automationState = {}) {
   if (job.job_type === 'callback_action') return true;
   const flow = automationState.current_flow || automationState.currentFlow;
-  if (flow === 'bot_registration') return true;
+  if (flow === 'bot_registration' || flow === 'registration_info') return true;
   const text = String(job.input_text || '').trim();
-  if (/^(register|staff|done|confirm)$/i.test(text)) return true;
+  if (/^\/(start|register|status|support|cancel)(@\w+)?(\s|$)/i.test(text)) return true;
+  if (/^(register|staff|done|confirm|cancel|stop)$/i.test(text)) return true;
   return false;
 }
 
@@ -112,20 +115,18 @@ async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot 
     user: contact,
     text: caption,
     mediaPath: qr.file_path,
-    bot: bot || globalThis.telegramBot || null
-  });
-
-  await queueBotReply({
-    store,
-    user: contact,
-    text: `When you have sent your ${sendPaymentQr.paymentMethodName || 'payment'}, press I Have Paid.`,
-    buttons: PAYMENT_WAITING_BUTTONS,
+    buttons: [
+      [{ label: '❌ Cancel Registration', action: 'register:cancel_request', text: 'Cancel Registration', data: 'register:cancel_request' }]
+    ],
     bot: bot || globalThis.telegramBot || null
   });
 
   await store.updateAutomationState(contact.id, {
-    currentStep: 'await_payment_done'
+    currentStep: 'await_payment'
   });
+  if (store.updateRegistrationStatus) {
+    await store.updateRegistrationStatus(contact.id, 'Waiting For Payment', 'Chatbot').catch(() => null);
+  }
 
   console.log(`[chatbot] registration_qr_sent contact=${contact.id} window=${paymentWindow.id} method=${sendPaymentQr.paymentMethodId} qr=${qr.id}`);
   console.log(`[chatbot] registration_payment_window_started contact=${contact.id} window=${paymentWindow.id} expires_at=${paymentWindow.expires_at}`);
@@ -574,22 +575,34 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
 
     if (decision.createAppBegPlayer) {
       try {
-        await createAppBegPlayerForContact(store, {
+        const created = await createAppBegPlayerForContact(store, {
           contactId: contact.id,
           actorName: 'Chatbot',
           io
         });
         await store.updateAutomationState(contact.id, {
           currentFlow: null,
-          currentStep: null
+          currentStep: null,
+          registrationInfo: {
+            ...(decision.statePatch?.registrationInfo || {}),
+            create_account_in_progress: false,
+            appbeg_creation_complete: true,
+            appbeg_password: undefined
+          }
         });
-        console.log(`[chatbot] create_player_success contact=${contact.id}`);
+        console.log(`[chatbot] create_player_success contact=${contact.id} username=${created?.username || 'n/a'}`);
       } catch (error) {
         console.log(`[chatbot] create_player_failed contact=${contact.id} error=${error.message}`);
+        await store.updateAutomationState(contact.id, {
+          currentStep: 'review',
+          registrationInfo: {
+            create_account_in_progress: false
+          }
+        }).catch(() => null);
         await queueBotReply({
           store,
           user: contact,
-          text: `We couldn't create your AppBeg account right now: ${error.message}\n\nPlease reply Staff and our team will help you finish registration.`,
+          text: 'We could not create your Royal VIP account right now. Your progress has been saved. Please try Create My Account again, or contact support.',
           bot: bot || globalThis.telegramBot || null
         });
       }

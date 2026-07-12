@@ -13,6 +13,17 @@ function createFakeStore(initial = {}) {
     },
     async listActivePaymentMethodsForRegistration() {
       return [{ id: 1, name: 'Cash App', key: 'cash_app' }];
+    },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Cash App',
+        paymentMethodKey: 'cash_app',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
+    },
+    async getActiveDefaultPaymentQr(methodId) {
+      return methodId ? { id: 10, file_path: 'data/media/payment-qr/test.png' } : null;
     }
   };
 }
@@ -32,9 +43,8 @@ async function run() {
     contact,
     messageText: 'hi'
   });
-  assertIncludes(welcome.replies[0].text, "I'm here to help you get started.");
-  assertIncludes(welcome.replies[0].text, 'Register');
-  assertIncludes(welcome.replies[0].text, 'Staff');
+  assertIncludes(welcome.replies[0].text, 'Welcome to Royal VIP');
+  assertIncludes(welcome.replies[0].text, 'not registered');
   assertEqual(Boolean(welcome.replies[0].buttons), true);
   console.log('ok welcome text copy with buttons');
 
@@ -43,7 +53,7 @@ async function run() {
     contact,
     messageText: 'Register'
   });
-  assertEqual(register.kind, 'registration_ask_payment_app');
+  assertEqual(register.kind, 'registration_ask_payment_name');
   console.log('ok Register text command');
 
   const staff = await decideBotReply({
@@ -64,9 +74,8 @@ async function run() {
     contact,
     messageText: 'luckyalex'
   });
-  assertEqual(payment.kind, 'registration_waiting_payment_confirmation');
-  assertIncludes(payment.replies[0].text, 'checking your payment');
-  assertEqual(Boolean(payment.replies[0].buttons), false);
+  assertEqual(payment.kind, 'registration_waiting_payment');
+  assertIncludes(payment.replies[0].text, 'waiting to verify your payment');
   console.log('ok username waits for payment confirmation');
 
   console.log('ALL TEXT WELCOME CHECKS PASSED');

@@ -1,8 +1,7 @@
 import { createAppBegPlayerViaApi } from '../appbeg/createPlayerClient.js';
 import { createReplySender } from '../telegram/messageDelivery.js';
 import { validateAppBegPassword, validateAppBegUsername } from '../registration/appbegValidation.js';
-
-const SUCCESS_MESSAGE = '🎉 Your AppBeg account has been created. Your game usernames are now being prepared by our team.';
+import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
 
 function registrationInfoForCreate(info = {}) {
   const usernameResult = validateAppBegUsername(info.preferred_appbeg_username || info.appbeg_username);
@@ -27,13 +26,13 @@ function registrationInfoForCreate(info = {}) {
   };
 }
 
-async function sendTelegramText(store, contact, text) {
+async function sendTelegramText(store, contact, text, buttons = []) {
   const sendReply = await createReplySender({
     store,
     user: contact,
     bot: globalThis.telegramBot || null
   });
-  await sendReply({ user: contact, text });
+  await sendReply({ user: contact, text, buttons });
 }
 
 export async function createAppBegPlayerForContact(store, {
@@ -117,7 +116,15 @@ export async function createAppBegPlayerForContact(store, {
     });
 
     try {
-      await sendTelegramText(store, contact, SUCCESS_MESSAGE);
+      const successText = [
+        'Welcome to Royal VIP!',
+        '',
+        'Your account has been created successfully.',
+        '',
+        'Username:',
+        result.username || username
+      ].join('\n');
+      await sendTelegramText(store, contact, successText, registeredMenuButtons());
     } catch (messageError) {
       console.warn('[appbeg-create-player] success message failed:', messageError.message);
     }

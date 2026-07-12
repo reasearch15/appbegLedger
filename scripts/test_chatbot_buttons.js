@@ -14,6 +14,20 @@ function createFakeStore(initial = {}) {
     },
     async listActivePaymentMethodsForRegistration() {
       return [{ id: 1, name: 'Cash App', key: 'cash_app' }];
+    },
+    async getActiveDefaultPaymentQr(methodId) {
+      if (methodId === 1) {
+        return { id: 10, file_path: 'data/media/payment-qr/test.png', payment_method_id: 1 };
+      }
+      return null;
+    },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Cash App',
+        paymentMethodKey: 'cash_app',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
     }
   };
 }
@@ -32,13 +46,13 @@ async function run() {
   const welcome = await decideBotReply({ store: store1, contact, messageText: 'hi' });
   assertEqual(welcome.kind, 'welcome');
   assertEqual(Boolean(welcome.replies[0].buttons), true);
-  assertIncludes(welcome.replies[0].text, 'just reply:');
+  assertIncludes(welcome.replies[0].text, 'not registered');
   console.log('ok welcome text with inline buttons');
 
   const store2 = createFakeStore({ current_flow: 'bot_registration', current_step: 'welcome' });
   const started = await decideBotReply({ store: store2, contact, action: 'bot:register' });
-  assertEqual(started.kind, 'registration_ask_payment_app');
-  assertEqual(started.statePatch.currentStep, 'payment_app');
+  assertEqual(started.kind, 'registration_ask_payment_name');
+  assertEqual(started.statePatch.currentStep, 'payment_name');
   assertEqual(started.logEvent.event, 'flow_started');
   console.log('ok register action');
 
@@ -47,32 +61,32 @@ async function run() {
   assertEqual(staff.escalateReason, 'manual_support');
   console.log('ok talk to staff');
 
-  const store4 = createFakeStore({ current_flow: 'bot_registration', current_step: 'username' });
-  const apps = await decideBotReply({ store: store4, contact, messageText: 'luckyalex' });
-  assertEqual(apps.kind, 'registration_waiting_payment_confirmation');
-  assertIncludes(apps.replies[0].text, 'checking your payment');
-  assertEqual(Boolean(apps.replies[0].buttons), false);
-  console.log('ok payment app text prompt');
+  const store4 = createFakeStore({
+    current_flow: 'bot_registration',
+    current_step: 'await_payment',
+    registration_info: { payment_display_name: 'John', first_deposit_amount: 10 }
+  });
+  const waiting = await decideBotReply({ store: store4, contact, messageText: 'hello' });
+  assertEqual(waiting.kind, 'registration_waiting_payment');
+  console.log('ok waiting payment ignores chatter');
 
   const store5 = createFakeStore({
     current_flow: 'bot_registration',
-    current_step: 'payment_app',
-    registration_info: { preferred_appbeg_username: 'luckyalex' }
+    current_step: 'payment_name'
   });
-  const cash = await decideBotReply({ store: store5, contact, action: 'bot:payment_app:Cash App' });
-  assertEqual(cash.kind, 'registration_ask_payment_tag');
-  assertEqual(cash.statePatch.registrationInfo.payment_app, 'Cash App');
-  console.log('ok payment app selected');
+  const named = await decideBotReply({ store: store5, contact, messageText: 'John Smith' });
+  assertEqual(named.kind, 'registration_ask_first_deposit_amount');
+  assertEqual(named.statePatch.registrationInfo.payment_display_name, 'John Smith');
+  console.log('ok payment name selected');
 
   assertEqual(normalizeCallbackAction('register'), 'bot:register');
   assertEqual(normalizeCallbackAction('staff'), 'staff:takeover');
   console.log('ok callback aliases still work');
 
-  // Legacy button helpers remain available if Bot API channel is used later.
   const rows = normalizeButtonRows(paymentAppButtons());
   assertEqual(rows.length > 0, true);
   const review = normalizeButtonRows(REVIEW_BUTTONS);
-  assertEqual(review[0].map((b) => b.data).join(','), 'confirm,edit');
+  assertEqual(review[0].map((b) => b.data).join(','), 'register:confirm');
   console.log('ok button helpers still normalize');
 
   const users = [201, 202, 203, 204, 205].map((id) => ({
@@ -84,7 +98,7 @@ async function run() {
     const r = await decideBotReply({ store, contact: c, messageText: 'Register' });
     return { welcomeKind: w.kind, registerStep: r.statePatch.currentStep, contactId: c.id };
   }));
-  assertEqual(results.every((item) => item.welcomeKind === 'welcome' && item.registerStep === 'payment_app'), true);
+  assertEqual(results.every((item) => item.welcomeKind === 'welcome' && item.registerStep === 'payment_name'), true);
   assertEqual(new Set(results.map((item) => item.contactId)).size, 5);
   console.log('ok multi-user isolation');
 

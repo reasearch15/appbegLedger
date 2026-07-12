@@ -10,20 +10,20 @@ const SCREENS = {
           [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'screen:Support' }]
         ]
       : [
-          [{ label: 'Register', action: 'flow:registration_info' }],
+          [{ label: 'Register', action: 'bot:register' }],
           [{ label: 'Help', action: 'screen:Help' }, { label: 'Contact Support', action: 'keyword:support' }]
         ]
   },
   Register: {
     title: 'Register',
     text: 'Tap Register below to start your Royal VIP registration.',
-    buttons: [[{ label: 'Register', action: 'flow:registration_info' }]]
+    buttons: [[{ label: 'Register', action: 'bot:register' }]]
   },
   Help: {
     title: 'Help',
     text: 'Choose a topic, or contact support for direct assistance.',
     buttons: [
-      [{ label: 'Registration Help', action: 'flow:registration_info' }],
+      [{ label: 'Registration Help', action: 'bot:register' }],
       [{ label: 'Contact Support', action: 'screen:Support' }]
     ]
   },

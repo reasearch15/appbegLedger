@@ -5,8 +5,12 @@ import {
 } from '../registration/appbegValidation.js';
 
 const USERNAME_PROMPT = [
-  'Thanks! We confirmed your payment.',
-  'What AppBeg username would you like?',
+  'Payment received and verified!',
+  '',
+  'Now choose your Royal VIP username.',
+  '',
+  'Example:',
+  'JohnVIP01',
   '',
   APPBEG_USERNAME_HELP
 ].join('\n');
@@ -59,6 +63,9 @@ export async function continueBotRegistrationAfterPayment(store, {
     currentStep: 'username',
     registrationInfo: info
   });
+  if (store.updateRegistrationStatus) {
+    await store.updateRegistrationStatus(contactId, 'Collecting Info', actorName).catch(() => null);
+  }
 
   await store.logEvent({
     telegramUserId: contactId,
@@ -95,7 +102,7 @@ export async function continueBotRegistrationAfterPayment(store, {
 
 export function paymentConfirmedRegistrationStep(automationState = {}) {
   const info = automationState?.registration_info || {};
-  if (!info.payment_confirmed) return 'waiting_for_payment_confirmation';
+  if (!info.payment_confirmed) return 'await_payment';
   return automationState?.current_step || 'username';
 }
 

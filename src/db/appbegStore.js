@@ -324,6 +324,22 @@ export async function createAppBegStore(env = process.env) {
     return result.rows[0] ? toPublicPlayer(result.rows[0]) : null;
   }
 
+  async function getPlayerByUsername(username) {
+    const normalized = String(username || '').trim();
+    if (!normalized) return null;
+    const { whereSql, params } = buildWhere(plan, {});
+    const sql = `
+      SELECT
+      ${plan.selectSql}
+      ${baseFromSql()}
+      ${whereSql}
+        AND LOWER(${colExpr('p', 'username')}::text) = LOWER($${params.length + 1})
+      LIMIT 1
+    `;
+    const result = await pool.query(sql, [...params, normalized]);
+    return result.rows[0] ? toPublicPlayer(result.rows[0]) : null;
+  }
+
   return {
     configured: true,
     plan,
@@ -331,6 +347,7 @@ export async function createAppBegStore(env = process.env) {
     listPlayers,
     getFilterOptions,
     getPlayerByUid,
+    getPlayerByUsername,
     exportPlayersCsv,
     async close() {
       await pool.end();

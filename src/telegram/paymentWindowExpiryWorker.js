@@ -1,12 +1,16 @@
 import { queueBotReply } from './chatbotProcessor.js';
 
 export const REGISTRATION_PAYMENT_EXPIRY_MESSAGE = [
-  '⏰ Your payment confirmation window has expired.',
+  'Registration failed.',
   '',
-  'Your registration has been cancelled for your security.',
+  'We did not receive your payment within the 5-minute payment window.',
   '',
-  'Please type **Register** to start the registration process again.'
+  'Please press Register to start again.'
 ].join('\n');
+
+export const REGISTRATION_PAYMENT_EXPIRY_BUTTONS = [
+  [{ label: '👑 Register', action: 'menu:register', text: 'Register', data: 'menu:register' }]
+];
 
 export async function processPaymentWindowExpiryTick({
   store,
@@ -49,6 +53,7 @@ export async function processPaymentWindowExpiryTick({
       store,
       user: contact,
       text: REGISTRATION_PAYMENT_EXPIRY_MESSAGE,
+      buttons: REGISTRATION_PAYMENT_EXPIRY_BUTTONS,
       bot: globalThis.telegramBot || null
     });
     notifiedCount += 1;

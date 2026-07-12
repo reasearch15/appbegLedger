@@ -77,6 +77,14 @@ function redactRegistrationSecrets(value) {
     if (copy.registration_info.appbeg_password) {
       copy.registration_info.appbeg_password = '[redacted]';
     }
+    if (copy.registration_info.payment_tag) {
+      const tag = String(copy.registration_info.payment_tag);
+      copy.registration_info.payment_tag_masked = tag.length <= 4
+        ? '••••'
+        : `${tag.slice(0, 2)}••••${tag.slice(-2)}`;
+      delete copy.registration_info.payment_tag;
+      delete copy.registration_info.payment_tag_normalized;
+    }
   }
   return copy;
 }
@@ -901,10 +909,51 @@ app.post('/api/contacts/:id/bot-control', async (req, res) => {
 app.post('/api/contacts/:id/automation/start-flow', async (req, res) => {
   const contact = await store.getUserProfile(Number(req.params.id));
   if (!contact) return res.status(404).json({ error: 'Contact not found.' });
-  const flowKey = req.body.flowKey || 'registration_info';
+  const requestedFlow = req.body.flowKey || 'bot_registration';
+  const isBotApiContact = contact.telegram_sync_source === 'bot_api'
+    || contact.active_messaging_source === 'bot_api';
+  // Bot API contacts always use canonical bot_registration (not legacy registration_info).
+  const flowKey = (isBotApiContact && (requestedFlow === 'registration_info' || !req.body.flowKey))
+    ? 'bot_registration'
+    : requestedFlow;
   let automationState;
   let messageSent = false;
-  if (flowKey === 'registration_info' && process.env.TELEGRAM_BOT_TOKEN && globalThis.telegramBot && req.body.sendMessage !== false) {
+
+  if (flowKey === 'bot_registration' && process.env.TELEGRAM_BOT_TOKEN && globalThis.telegramBot && req.body.sendMessage !== false) {
+    const { decideBotReply } = await import('./telegram/chatbotEngine.js');
+    const { createReplySender, normalizeButtonRows } = await import('./telegram/messageDelivery.js');
+    const sendReply = await createReplySender({ store, user: contact, rootDir, bot: globalThis.telegramBot });
+    const decision = await decideBotReply({
+      store,
+      contact,
+      messageText: '',
+      action: 'bot:register'
+    });
+    if (decision.setStatus) {
+      await store.updateRegistrationStatus(contact.id, decision.setStatus, req.body.staffName || 'Staff');
+    }
+    if (decision.statePatch) {
+      await store.updateAutomationState(contact.id, decision.statePatch);
+      if (decision.statePatch.registrationInfo) {
+        if (decision.replaceRegistrationInfo) {
+          await store.updateAutomationState(contact.id, {
+            registrationInfo: decision.statePatch.registrationInfo
+          });
+        } else {
+          await store.updateRegistrationInfo(contact.id, decision.statePatch.registrationInfo, req.body.staffName || 'Staff');
+        }
+      }
+    }
+    for (const reply of decision.replies || []) {
+      await sendReply({
+        user: contact,
+        text: reply.text,
+        buttons: normalizeButtonRows(reply.buttons || [])
+      });
+      messageSent = true;
+    }
+    automationState = await store.getAutomationState(contact.id);
+  } else if (flowKey === 'registration_info' && process.env.TELEGRAM_BOT_TOKEN && globalThis.telegramBot && req.body.sendMessage !== false) {
     const { createReplySender } = await import('./telegram/messageDelivery.js');
     const sendReply = createReplySender({ store, user: contact, rootDir, bot: globalThis.telegramBot });
     await startRegistrationFlow({ sendReply, store, user: contact, actorName: req.body.staffName || 'Staff' });
@@ -931,6 +980,65 @@ app.post('/api/contacts/:id/automation/reset', async (req, res) => {
   io.emit('contacts:changed');
   io.emit('contact:changed', { contactId: Number(req.params.id), userId: Number(req.params.id) });
   res.json({ automationState });
+});
+
+app.post('/api/contacts/:id/automation/bot-registration', async (req, res) => {
+  try {
+    const contact = await store.getUserProfile(Number(req.params.id));
+    if (!contact) return res.status(404).json({ error: 'Contact not found.' });
+    const staffName = req.body.staffName || 'Staff';
+    const actionKey = String(req.body.action || '').toLowerCase();
+    if (!['resume', 'main_menu'].includes(actionKey)) {
+      return res.status(400).json({ error: 'Invalid action. Use resume or main_menu.' });
+    }
+    if (!process.env.TELEGRAM_BOT_TOKEN || !globalThis.telegramBot) {
+      return res.status(503).json({ error: 'Telegram bot is not available.' });
+    }
+
+    const { decideBotReply } = await import('./telegram/chatbotEngine.js');
+    const { createReplySender, normalizeButtonRows } = await import('./telegram/messageDelivery.js');
+    const sendReply = await createReplySender({ store, user: contact, rootDir, bot: globalThis.telegramBot });
+    const decision = await decideBotReply({
+      store,
+      contact,
+      messageText: '',
+      action: actionKey === 'resume' ? 'bot:continue_registration' : 'bot:main_menu'
+    });
+
+    if (decision.setStatus) {
+      await store.updateRegistrationStatus(contact.id, decision.setStatus, staffName);
+    }
+    if (decision.statePatch) {
+      await store.updateAutomationState(contact.id, decision.statePatch);
+      if (decision.statePatch.registrationInfo) {
+        if (decision.replaceRegistrationInfo) {
+          await store.updateAutomationState(contact.id, {
+            registrationInfo: decision.statePatch.registrationInfo
+          });
+        } else {
+          await store.updateRegistrationInfo(contact.id, decision.statePatch.registrationInfo, staffName);
+        }
+      }
+    }
+
+    let messageSent = false;
+    for (const reply of decision.replies || []) {
+      await sendReply({
+        user: contact,
+        text: reply.text,
+        buttons: normalizeButtonRows(reply.buttons || [])
+      });
+      messageSent = true;
+    }
+
+    const automationState = await store.getAutomationState(contact.id);
+    io.emit('contacts:changed');
+    io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+    if (messageSent) io.emit('message:new', { contactId: contact.id, userId: contact.id, telegramId: contact.telegram_id });
+    res.json({ automationState, messageSent, action: actionKey });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.patch('/api/contacts/:id/registration-info', async (req, res) => {

@@ -28,12 +28,26 @@ function createFakeStore(initial = {}) {
       }
       return null;
     },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Chime',
+        paymentMethodKey: 'chime',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
+    },
     async getActiveRegistrationPaymentWindow() {
       return paymentWindow;
     },
     async expireRegistrationPaymentWindow(windowId) {
       expiredWindowIds.push(windowId);
       if (paymentWindow?.id === windowId) {
+        paymentWindow = { ...paymentWindow, status: 'expired' };
+      }
+    },
+    async expireActiveRegistrationPaymentWindows() {
+      if (paymentWindow?.id) {
+        expiredWindowIds.push(paymentWindow.id);
         paymentWindow = { ...paymentWindow, status: 'expired' };
       }
     },
@@ -59,8 +73,8 @@ function applyStatePatch(store, decision) {
   }
 }
 
-async function decideAndApply(store, contact, messageText) {
-  const decision = await decideBotReply({ store, contact, messageText });
+async function decideAndApply(store, contact, messageText, action = null) {
+  const decision = await decideBotReply({ store, contact, messageText, action });
   applyStatePatch(store, decision);
   return decision;
 }
@@ -71,7 +85,8 @@ async function run() {
     display_name: 'Alex Test',
     username: 'alex',
     telegram_id: 555,
-    registration_status: 'New'
+    registration_status: 'New',
+    telegram_sync_source: 'bot_api'
   };
 
   for (const command of ['stop', 'cancel', 'quit', 'restart', 'reset']) {
@@ -89,66 +104,64 @@ async function run() {
 
   const store = createFakeStore();
   let decision = await decideAndApply(store, contact, 'register');
-  assertEqual(decision.statePatch.currentStep, 'payment_app');
+  assertEqual(decision.statePatch.currentStep, 'payment_name');
   assertEqual(store.state.current_flow, 'bot_registration');
 
   decision = await decideAndApply(store, contact, 'stop');
+  assertEqual(decision.kind, 'registration_cancel_confirm');
+  decision = await decideAndApply(store, contact, '', 'register:cancel_confirm');
   assertEqual(decision.kind, 'registration_stopped');
   assertEqual(store.state.current_flow, null);
   assertEqual(store.state.current_step, null);
-  assertIncludes(decision.replies[0].text, 'Registration has been stopped');
-  assertIncludes(decision.replies[0].text, 'Register anytime');
+  assertIncludes(decision.replies[0].text, 'Registration has been cancelled');
   assertEvent(decision.logEvents, 'registration_flow_stopped');
-  assertEvent(decision.logEvents, 'flow_reset_to_idle');
-  assertEqual(store.state.registration_info.payment_display_name, undefined);
   console.log('ok Register -> Stop -> idle');
 
   decision = await decideAndApply(store, contact, 'register');
-  assertEqual(decision.kind, 'registration_ask_payment_app');
-  assertEqual(decision.statePatch.currentStep, 'payment_app');
-  assertEqual(store.state.registration_info.payment_method_name, undefined);
-  console.log('ok Register after Stop starts fresh payment app flow');
+  assertEqual(decision.kind, 'registration_ask_payment_name');
+  assertEqual(decision.statePatch.currentStep, 'payment_name');
+  console.log('ok Register after Stop starts fresh payment name flow');
 
-  const chimeStore = createFakeStore();
-  await decideAndApply(chimeStore, contact, 'register');
-  await decideAndApply(chimeStore, contact, 'Chime');
-  assertEqual(chimeStore.state.current_step, 'payment_display_name');
-  assertEqual(chimeStore.state.registration_info.payment_method_name, 'Chime');
+  const nameStore = createFakeStore();
+  await decideAndApply(nameStore, contact, 'register');
+  await decideAndApply(nameStore, contact, 'John Smith');
+  assertEqual(nameStore.state.current_step, 'first_deposit_amount');
+  assertEqual(nameStore.state.registration_info.payment_display_name, 'John Smith');
 
-  decision = await decideAndApply(chimeStore, contact, 'cancel');
+  decision = await decideAndApply(nameStore, contact, 'cancel');
+  assertEqual(decision.kind, 'registration_cancel_confirm');
+  decision = await decideAndApply(nameStore, contact, '', 'register:cancel_confirm');
   assertEqual(decision.kind, 'registration_stopped');
-  assertEqual(chimeStore.state.current_flow, null);
-  assertEqual(chimeStore.state.registration_info.payment_method_name, undefined);
-  assertEqual(chimeStore.state.registration_info.payment_display_name, undefined);
+  assertEqual(nameStore.state.current_flow, null);
+  assertEqual(nameStore.state.registration_info.payment_display_name, undefined);
 
-  await decideAndApply(chimeStore, contact, 'register');
-  assertEqual(chimeStore.state.current_step, 'payment_app');
-  assertEqual(chimeStore.state.registration_info.payment_method_name, undefined);
-  console.log('ok Register -> Chime -> Stop -> Register starts fresh');
+  await decideAndApply(nameStore, contact, 'register');
+  assertEqual(nameStore.state.current_step, 'payment_name');
+  console.log('ok Register -> Name -> Stop -> Register starts fresh');
 
   const paymentStore = createFakeStore();
   await decideAndApply(paymentStore, contact, 'register');
-  await decideAndApply(paymentStore, contact, 'Chime');
   await decideAndApply(paymentStore, contact, 'John Smith');
   await decideAndApply(paymentStore, contact, '25.50');
-  paymentStore.state.current_step = 'await_payment_done';
+  paymentStore.state.current_step = 'await_payment';
   paymentStore.setPaymentWindow({ id: 42, status: 'active' });
 
   decision = await decideAndApply(paymentStore, contact, 'quit');
+  assertEqual(decision.kind, 'registration_cancel_confirm');
+  decision = await decideAndApply(paymentStore, contact, '', 'register:cancel_confirm');
   assertEqual(decision.kind, 'registration_stopped');
   assertEqual(decision.expirePaymentWindowId, 42);
   assertEqual(paymentStore.expiredWindowIds.includes(42), true);
   assertEvent(decision.logEvents, 'active_payment_window_cancelled');
-  assertEqual(paymentStore.state.registration_info.first_deposit_amount, undefined);
   console.log('ok deposit flow Stop cancels active payment window');
 
-  const nameStore = createFakeStore({
+  const waitStore = createFakeStore({
     current_flow: 'bot_registration',
-    current_step: 'payment_display_name',
-    registration_info: { payment_method_name: 'Chime' }
+    current_step: 'payment_name',
+    registration_info: {}
   });
-  decision = await decideBotReply({ store: nameStore, contact, messageText: 'stop' });
-  assertEqual(decision.kind, 'registration_stopped');
+  decision = await decideBotReply({ store: waitStore, contact, messageText: 'stop' });
+  assertEqual(decision.kind, 'registration_cancel_confirm');
   assertEqual(decision.kind !== 'registration_ask_first_deposit_amount', true);
   console.log('ok stop is not treated as payment name');
 

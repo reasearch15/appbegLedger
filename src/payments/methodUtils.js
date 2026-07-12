@@ -70,11 +70,16 @@ export function parsePaymentMethodSelection(text, methods = []) {
 export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName }) {
   const amount = formatDepositAmount(firstDepositAmount);
   return [
-    `Please send ${amount} using this ${paymentMethodName} QR.`,
-    'Use the payment name:',
-    paymentDisplayName,
-    'After sending, reply Done.',
-    'This payment window is valid for 5 minutes.'
+    `Please send ${amount} using the QR code below.`,
+    '',
+    `Payment Name:`,
+    paymentDisplayName || '—',
+    '',
+    `Amount:`,
+    amount,
+    '',
+    'You have 5 minutes to complete your payment.',
+    'We will automatically verify your payment and continue your registration.'
   ].join('\n');
 }
 

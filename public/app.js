@@ -1778,10 +1778,45 @@ function detailsPanel() {
 }
 
 function computeLocalProgress(contact, info) {
+  const automation = state.automationState || {};
+  const useBotProgress = automation.current_flow === 'bot_registration'
+    || info.registration_method === 'chatbot'
+    || Boolean(info.payment_method_name || info.payment_display_name)
+    || info.first_deposit_amount != null;
+  if (useBotProgress) {
+    const status = contact.registration_status || 'New';
+    const step = automation.current_step || null;
+    const steps = [
+      { key: 'payment_name', label: 'Payment name', done: Boolean(info.payment_display_name || info.payment_name) },
+      { key: 'deposit', label: 'First deposit', done: info.first_deposit_amount != null || info.requested_deposit_amount != null },
+      { key: 'payment_confirmed', label: 'Payment verified', done: Boolean(info.payment_confirmed) },
+      { key: 'username', label: 'Royal VIP username', done: Boolean(info.preferred_appbeg_username || contact.appbeg_account_id) },
+      {
+        key: 'password',
+        label: 'Password set',
+        done: Boolean(info.appbeg_password)
+          || Boolean(info.appbeg_password_redacted_at)
+          || ['review', 'complete', 'creating_account'].includes(step)
+          || ['Pending Verification', 'Registered'].includes(status)
+      },
+      {
+        key: 'submitted',
+        label: 'Account created',
+        done: ['Pending Verification', 'Registered'].includes(status)
+      }
+    ];
+    const completed = steps.filter((item) => item.done).length;
+    return {
+      steps,
+      percent: Math.round((completed / Math.max(steps.length, 1)) * 100),
+      current_step: step,
+      current_flow: automation.current_flow || null
+    };
+  }
   const steps = [
     { key: 'telegram', label: 'Telegram Connected', done: Boolean(contact.telegram_id) },
     { key: 'appbeg', label: 'AppBeg Username', done: Boolean(info.preferred_appbeg_username) },
-    { key: 'payment', label: 'Payment Tag', done: Boolean(info.payment_tag) },
+    { key: 'payment', label: 'Payment Tag', done: Boolean(info.payment_tag || info.payment_display_name) },
     { key: 'submitted', label: 'Submitted for Review', done: ['Pending Verification', 'Registered'].includes(contact.registration_status) }
   ];
   const completed = steps.filter((step) => step.done).length;
@@ -1806,16 +1841,28 @@ function registrationPanel() {
   const contact = state.contact;
   const info = state.automationState?.registration_info || {};
   const method = contact.registration_method || info.registration_method || 'Not set';
+  const source = contact.telegram_sync_source || contact.active_messaging_source || 'bot_api';
+  const paymentAccount = info.payment_tag_masked
+    || (info.payment_tag ? `${String(info.payment_tag).slice(0, 2)}••••${String(info.payment_tag).slice(-2)}` : '-');
   return `
+    ${infoRow('Source', source === 'bot_api' ? 'Bot API' : source)}
     ${infoRow('Registered', contact.registration_status === 'Registered' ? 'Yes' : 'No')}
+    ${infoRow('Status', contact.registration_status || 'New')}
+    ${infoRow('Current Step', state.automationState?.current_step || '-')}
     ${infoRow('AppBeg Username', info.preferred_appbeg_username || contact.appbeg_account_id || '-')}
-    ${infoRow('Payment Name/Tag', info.payment_tag || '-')}
+    ${infoRow('Payment App', info.payment_method_name || info.payment_app || '-')}
+    ${infoRow('Payment Account', paymentAccount)}
+    ${infoRow('Payment Name', info.payment_display_name || '-')}
+    ${infoRow('Referral Code', info.referral_code || 'None')}
     ${infoRow('Registration Method', method)}
     ${infoRow('Registered At', fmtDateTime(contact.registered_at))}
     ${infoRow('Reviewed By', state.automationState?.info_reviewed_by || '-')}
     ${progressChecklist(computeLocalProgress(contact, info))}
-    <div class="registration-actions">
-      <button type="button" class="button secondary" data-overview-action="start-register">Register</button>
+    <div class="registration-actions control-grid">
+      <button type="button" class="button secondary" data-automation-action="resume-registration">Resume Registration</button>
+      <button type="button" class="button secondary" data-automation-action="send-main-menu">Send Main Menu</button>
+      <button type="button" class="button secondary" data-automation-action="reset">Reset Registration</button>
+      <button type="button" class="button secondary" data-overview-action="start-register">Start Registration</button>
       <button type="button" class="button secondary" id="openRegistrationModalBtn">Quick form</button>
     </div>
   `;
@@ -1843,6 +1890,8 @@ function automationPanel() {
     </div>
     <div class="control-grid">
       <button class="button secondary" data-automation-action="start">Start Flow</button>
+      <button class="button secondary" data-automation-action="resume-registration">Resume Registration</button>
+      <button class="button secondary" data-automation-action="send-main-menu">Send Main Menu</button>
       <button class="button secondary" data-automation-action="cancel">Cancel</button>
       <button class="button secondary" data-automation-action="reset">Reset</button>
     </div>
@@ -3038,7 +3087,19 @@ async function controlAutomation(action) {
   if (action === 'start') {
     await api(`/api/contacts/${state.selectedContactId}/automation/start-flow`, {
       method: 'POST',
-      body: JSON.stringify({ ...body, flowKey: 'registration_info', sendMessage: true })
+      body: JSON.stringify({ ...body, flowKey: 'bot_registration', sendMessage: true })
+    });
+  }
+  if (action === 'resume-registration') {
+    await api(`/api/contacts/${state.selectedContactId}/automation/bot-registration`, {
+      method: 'POST',
+      body: JSON.stringify({ ...body, action: 'resume' })
+    });
+  }
+  if (action === 'send-main-menu') {
+    await api(`/api/contacts/${state.selectedContactId}/automation/bot-registration`, {
+      method: 'POST',
+      body: JSON.stringify({ ...body, action: 'main_menu' })
     });
   }
   if (action === 'cancel') {

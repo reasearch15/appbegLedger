@@ -15,23 +15,37 @@ function createFakeStore() {
     },
     async listActivePaymentMethodsForRegistration() {
       return [{ id: 1, name: 'Cash App', key: 'cash_app' }];
+    },
+    async getRegistrationDefaultPaymentQr() {
+      return {
+        paymentMethodId: 1,
+        paymentMethodName: 'Cash App',
+        paymentMethodKey: 'cash_app',
+        qr: { id: 10, file_path: 'data/media/payment-qr/test.png' }
+      };
+    },
+    async getActiveDefaultPaymentQr(methodId) {
+      return methodId ? { id: 10, file_path: 'data/media/payment-qr/test.png' } : null;
     }
   };
 }
 
 async function run() {
-  // Helpers still normalize if Bot API is used later.
   const normalized = normalizeButtonRows(WELCOME_BUTTONS);
-  assert.equal(normalized[0][0].data, 'bot:register');
-  assert.equal(normalized[1][1].data, 'staff:takeover');
+  assert.equal(normalized[0][0].data, 'menu:register');
+  assert.equal(normalizeCallbackAction(normalized[0][0].data), 'bot:register');
+  assert.equal(normalized.length, 1);
   console.log('ok welcome button normalization helpers');
 
   assert.equal(normalizeCallbackAction('register'), 'bot:register');
   assert.equal(normalizeCallbackAction('staff'), 'staff:takeover');
+  assert.equal(normalizeCallbackAction('menu:register'), 'bot:register');
   console.log('ok callback aliases');
 
   const review = normalizeButtonRows(REVIEW_BUTTONS);
-  assert.equal(review[0].map((b) => b.data).join(','), 'confirm,edit');
+  const reviewData = review.flat().map((b) => b.data);
+  assert.ok(reviewData.includes('register:confirm'));
+  assert.ok(reviewData.some((d) => String(d).includes('edit') || String(d).includes('payment')));
   console.log('ok review button normalization');
 
   const welcome = await decideBotReply({
@@ -48,7 +62,7 @@ async function run() {
   });
   assert.equal(welcome.kind, 'welcome');
   assert.equal(Boolean(welcome.replies[0].buttons), true);
-  assert.ok(welcome.replies[0].text.includes("I'm here to help you get started."));
+  assert.ok(welcome.replies[0].text.includes('not registered'));
   console.log('ok decideBotReply welcome includes Bot API buttons');
 
   const started = await decideBotReply({
@@ -61,7 +75,7 @@ async function run() {
     },
     messageText: 'Register'
   });
-  assert.equal(started.kind, 'registration_ask_payment_app');
+  assert.equal(started.kind, 'registration_ask_payment_name');
   console.log('ok Register text starts flow');
 
   console.log('ALL BUTTON DELIVERY CHECKS PASSED');

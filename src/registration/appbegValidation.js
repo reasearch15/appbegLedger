@@ -12,9 +12,7 @@ export const APPBEG_USERNAME_HELP = [
 
 export const APPBEG_PASSWORD_HELP = [
   'Password rules:',
-  '• At least 8 characters',
-  '• Include uppercase and lowercase letters',
-  '• Include at least one number'
+  '• At least 6 characters'
 ].join('\n');
 
 export function validateAppBegUsername(username) {
@@ -30,11 +28,8 @@ export function validateAppBegUsername(username) {
 
 export function validateAppBegPassword(password) {
   const value = String(password || '');
-  if (!value || value.length < 8) {
-    return { ok: false, error: 'Password must be at least 8 characters.', help: APPBEG_PASSWORD_HELP };
-  }
-  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/[0-9]/.test(value)) {
-    return { ok: false, error: 'Password must include uppercase, lowercase, and a number.', help: APPBEG_PASSWORD_HELP };
+  if (!value || value.length < 6) {
+    return { ok: false, error: 'Password must be at least 6 characters.', help: APPBEG_PASSWORD_HELP };
   }
   return { ok: true, password: value };
 }
