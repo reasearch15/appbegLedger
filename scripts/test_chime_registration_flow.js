@@ -64,7 +64,7 @@ async function run() {
   console.log('ok deposit amount validation');
 
   const store = createFakeStore();
-  let decision = await decideBotReply({ store, contact, messageText: 'register' });
+  let decision = await decideBotReply({ store, contact, messageText: '/register' });
   assertEqual(decision.kind, 'registration_ask_payment_name');
   assertEqual(decision.statePatch.currentStep, 'payment_name');
   apply(store, decision);

@@ -73,13 +73,19 @@ export async function queueBotPhotoReply({ store, user, text, mediaPath, buttons
   return result;
 }
 
-export function shouldUseRegistrationBot(job, automationState = {}) {
+export function shouldUseRegistrationBot(job, automationState = {}, contact = null) {
   if (job.job_type === 'callback_action') return true;
+  if (job.force_entry_menu) return true;
   const flow = automationState.current_flow || automationState.currentFlow;
   if (flow === 'bot_registration' || flow === 'registration_info') return true;
   const text = String(job.input_text || '').trim();
   if (/^\/(start|register|status|support|cancel)(@\w+)?(\s|$)/i.test(text)) return true;
-  if (/^(register|staff|done|confirm|cancel|stop)$/i.test(text)) return true;
+  if (/^(staff|done|confirm|cancel|stop)$/i.test(text)) return true;
+  // Empty / media updates use the shared entry menu.
+  if (!text) return true;
+  // Unregistered / in-progress statuses always use registration bot (welcome or step).
+  const status = contact?.registration_status || 'New';
+  if (!['Registered'].includes(status)) return true;
   return false;
 }
 
@@ -409,7 +415,8 @@ export async function enqueueChatbotJob(store, {
   incomingTelegramMessageId = null,
   jobType = 'inbound_message',
   inputText = '',
-  action = null
+  action = null,
+  force_entry_menu = false
 }) {
   const contact = await store.getUserProfile(contactId);
   if (!contact) {
@@ -454,7 +461,11 @@ export async function enqueueChatbotJob(store, {
     return job;
   }
 
-  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}${incomingTelegramMessageId != null ? ` telegram_message_id=${incomingTelegramMessageId}` : ''}`);
+  if (job && force_entry_menu) {
+    job.force_entry_menu = true;
+  }
+
+  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}${incomingTelegramMessageId != null ? ` telegram_message_id=${incomingTelegramMessageId}` : ''}${force_entry_menu ? ' entry_menu=1' : ''}`);
   await store.nudgeBotQueue(job.id);
   return job;
 }
@@ -471,7 +482,7 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
     const beforeState = await store.ensureAutomationState(contact.id);
     console.log(`[chatbot] processing id=${job.id} contact=${contact.id} flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} status=${contact.registration_status}`);
 
-    const registrationJob = shouldUseRegistrationBot(job, beforeState);
+    const registrationJob = shouldUseRegistrationBot(job, beforeState, contact);
     if (!registrationJob) {
       return await processSupportAiJob({ store, contact, job, io, bot });
     }
@@ -511,11 +522,27 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
       return { ok: true, skipped: true, reason: 'bot_disabled' };
     }
 
+    let forceEntryMenu = Boolean(job.force_entry_menu);
+    if (!forceEntryMenu && job.job_type === 'inbound_message' && !job.action) {
+      const flow = beforeState.current_flow || beforeState.currentFlow;
+      const step = beforeState.current_step || beforeState.currentStep || 'welcome';
+      const inProgress = (flow === 'bot_registration' || flow === 'registration_info')
+        && step
+        && step !== 'welcome';
+      if (!inProgress && store.countIncomingMessages) {
+        const inboundCount = await store.countIncomingMessages(contact.id);
+        forceEntryMenu = inboundCount <= 1;
+      } else if (!inProgress && !String(job.input_text || '').trim()) {
+        forceEntryMenu = true;
+      }
+    }
+
     const decision = await decideBotReply({
       store,
       contact,
       messageText: job.input_text || '',
-      action: job.action || null
+      action: job.action || null,
+      forceEntryMenu
     });
 
     console.log(`[chatbot] bot reply generated id=${job.id} contact=${contact.id} kind=${decision.kind}`);

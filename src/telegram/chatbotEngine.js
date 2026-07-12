@@ -43,6 +43,11 @@ import {
   startRoyalVipRegistration,
   reviewDecision as royalVipReviewDecision
 } from './royalVipBotRegistration.js';
+import {
+  buildStateAwareEntryMenu,
+  isPlainRegisterText,
+  shouldShowEntryMenu
+} from './botPrivateEntry.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
@@ -230,7 +235,7 @@ export function paymentAppButtons() {
   ];
 }
 
-export async function decideBotReply({ store, contact, messageText = '', action = null }) {
+export async function decideBotReply({ store, contact, messageText = '', action = null, forceEntryMenu = false }) {
   const text = String(messageText || '').trim();
   action = normalizeCallbackAction(action) || null;
   const automationState = await store.ensureAutomationState(contact.id);
@@ -258,7 +263,13 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const command = !action ? parseBotCommand(text) : null;
   if (command) {
     if (command.command === 'start') {
-      return await mainMenuDecision(contact, info, automationState, effective, { forceFull: true });
+      return await buildStateAwareEntryMenu({
+        store,
+        contact,
+        automationState,
+        paymentWindow,
+        forceFull: true
+      });
     }
     if (command.command === 'register') {
       if (effective.is_registered) {
@@ -278,13 +289,28 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     }
   }
 
+  // Shared entry menu for first interaction / empty media / forced entry (same as /start).
+  // Never auto-start registration from plain text like "hello" or "register".
+  if (shouldShowEntryMenu({
+    text,
+    action,
+    forceEntryMenu: forceEntryMenu || isPlainRegisterText(text),
+    registrationInProgress
+  })) {
+    return await buildStateAwareEntryMenu({
+      store,
+      contact,
+      automationState,
+      paymentWindow,
+      forceFull: true
+    });
+  }
+
   // Stop commands interrupt before any registration step handling.
   if (!action && isStopCommand(text)) {
     action = registrationInProgress ? 'bot:cancel_request' : 'bot:stop';
   } else if (!action && isStaffCommand(text)) {
     action = 'staff:takeover';
-  } else if (!action && isStartRegistrationCommand(text) && shouldStartRegistration(normalizedStep, flow, contact, effective)) {
-    action = 'bot:register';
   } else if (!action && isConfirmCommand(text) && normalizedStep === 'review' && isRegistrationFlow(flow)) {
     action = 'bot:confirm';
   } else if (!action && isEditCommand(text) && isRegistrationFlow(flow)) {
@@ -575,7 +601,15 @@ async function stopRegistrationDecision({ store, contact, flow, step, info }) {
   };
 }
 
-async function mainMenuDecision(contact, info, automationState = null, effective = null, { forceFull = false } = {}) {
+async function mainMenuDecision(contact, info, automationState = null, effective = null, { forceFull = false, store = null } = {}) {
+  if (store) {
+    return buildStateAwareEntryMenu({
+      store,
+      contact,
+      automationState,
+      forceFull
+    });
+  }
   const state = effective || await resolveEffectiveRegistrationState({ contact, automationState });
   const throttled = !forceFull && state.menu_kind === 'guest' && isWelcomeThrottled(automationState);
   const text = throttled && state.menu_kind === 'guest'
@@ -747,7 +781,8 @@ function isRestartCommand(text) {
 }
 
 function isStartRegistrationCommand(text) {
-  return /^(register|ok|yes|start|signup|\/register)$/i.test(String(text || '').trim());
+  // Explicit slash command only. Plain "register" shows the entry menu instead.
+  return /^\/register(@\w+)?(\s|$)/i.test(String(text || '').trim());
 }
 
 function isDoneCommand(text) {

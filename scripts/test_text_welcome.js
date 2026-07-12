@@ -51,10 +51,10 @@ async function run() {
   const register = await decideBotReply({
     store: createFakeStore({ current_flow: 'bot_registration', current_step: 'welcome' }),
     contact,
-    messageText: 'Register'
+    messageText: '/register'
   });
   assertEqual(register.kind, 'registration_ask_payment_name');
-  console.log('ok Register text command');
+  console.log('ok /register text command');
 
   const staff = await decideBotReply({
     store: createFakeStore(),

@@ -103,7 +103,7 @@ async function run() {
   console.log('ok stop while idle gives no-active-flow response');
 
   const store = createFakeStore();
-  let decision = await decideAndApply(store, contact, 'register');
+  let decision = await decideAndApply(store, contact, '/register');
   assertEqual(decision.statePatch.currentStep, 'payment_name');
   assertEqual(store.state.current_flow, 'bot_registration');
 
@@ -117,13 +117,13 @@ async function run() {
   assertEvent(decision.logEvents, 'registration_flow_stopped');
   console.log('ok Register -> Stop -> idle');
 
-  decision = await decideAndApply(store, contact, 'register');
+  decision = await decideAndApply(store, contact, '/register');
   assertEqual(decision.kind, 'registration_ask_payment_name');
   assertEqual(decision.statePatch.currentStep, 'payment_name');
   console.log('ok Register after Stop starts fresh payment name flow');
 
   const nameStore = createFakeStore();
-  await decideAndApply(nameStore, contact, 'register');
+  await decideAndApply(nameStore, contact, '/register');
   await decideAndApply(nameStore, contact, 'John Smith');
   assertEqual(nameStore.state.current_step, 'first_deposit_amount');
   assertEqual(nameStore.state.registration_info.payment_display_name, 'John Smith');
@@ -135,12 +135,12 @@ async function run() {
   assertEqual(nameStore.state.current_flow, null);
   assertEqual(nameStore.state.registration_info.payment_display_name, undefined);
 
-  await decideAndApply(nameStore, contact, 'register');
+  await decideAndApply(nameStore, contact, '/register');
   assertEqual(nameStore.state.current_step, 'payment_name');
   console.log('ok Register -> Name -> Stop -> Register starts fresh');
 
   const paymentStore = createFakeStore();
-  await decideAndApply(paymentStore, contact, 'register');
+  await decideAndApply(paymentStore, contact, '/register');
   await decideAndApply(paymentStore, contact, 'John Smith');
   await decideAndApply(paymentStore, contact, '25.50');
   paymentStore.state.current_step = 'await_payment';

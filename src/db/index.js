@@ -181,6 +181,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await db.prepare("SELECT * FROM conversations WHERE telegram_user_id = ? AND channel = 'telegram_private'").get(userId);
   }
 
+  async function countIncomingMessages(userId) {
+    const row = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM messages
+      WHERE telegram_user_id = ?
+        AND direction = 'incoming'
+    `).get(userId);
+    return Number(row?.count || 0);
+  }
+
   async function storeIncomingTelegramMessage(ctx) {
     const message = ctx.message;
     const from = message.from;
@@ -3777,6 +3787,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     db,
     upsertTelegramUser,
     ensureConversation,
+    countIncomingMessages,
     storeIncomingTelegramMessage,
     storeOutgoingMessage,
     claimOutgoingMessageRequest,

@@ -73,10 +73,10 @@ async function run() {
       registration_status: 'New',
       telegram_id: 9
     },
-    messageText: 'Register'
+    messageText: '/register'
   });
   assert.equal(started.kind, 'registration_ask_payment_name');
-  console.log('ok Register text starts flow');
+  console.log('ok /register text starts flow');
 
   console.log('ALL BUTTON DELIVERY CHECKS PASSED');
 }

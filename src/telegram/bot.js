@@ -1,10 +1,8 @@
 import { Telegraf } from 'telegraf';
 import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
-import { handleMenuAction, initialScreenForUser, renderMenu } from './menuEngine.js';
-import { processAutomationActionForContact, processAutomationForContact } from './processAutomation.js';
 import { enqueueChatbotJob } from './chatbotProcessor.js';
-import { isChatbotButtonAction } from './chatbotEngine.js';
 import { tryEnqueueRegistrationBotJob } from './autoRegistrationBot.js';
+import { ensureBotApiPrivateContact } from './botPrivateEntry.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -20,8 +18,7 @@ export function startTelegramListener({ token, store, io }) {
     if (ctx.chat?.type !== 'private' || !ctx.from) return;
 
     try {
-      const user = await store.upsertTelegramUser(ctx.from);
-      await store.ensureConversation(user.id);
+      const user = await ensureBotApiPrivateContact(store, ctx.from);
       await ctx.answerCbQuery();
 
       const action = ctx.callbackQuery.data;
@@ -40,7 +37,8 @@ export function startTelegramListener({ token, store, io }) {
           incomingTelegramMessageId: callbackMessageId,
           jobType: 'callback_action',
           inputText: '',
-          action
+          action,
+          force_entry_menu: false
         }
       });
       if (enqueueResult.enqueued) {
@@ -55,26 +53,6 @@ export function startTelegramListener({ token, store, io }) {
       }
 
       console.log(`[chatbot] callback_auto_send_suppressed contact=${user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
-      return;
-
-      const automationResult = await processAutomationActionForContact({
-        action,
-        store,
-        user,
-        bot,
-        io
-      });
-      if (!automationResult?.handled) {
-        await handleMenuAction({
-          action,
-          bot,
-          store,
-          user
-        });
-      }
-      io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
-      io.emit('contacts:changed');
-      io.emit('users:changed');
     } catch (error) {
       console.error('Failed to handle Telegram menu action:', error);
     }
@@ -85,7 +63,7 @@ export function startTelegramListener({ token, store, io }) {
 
     try {
       const result = await store.storeIncomingTelegramMessage(ctx);
-      console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id}`);
+      console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id} first=${Boolean(result.firstMessage)}`);
       await store.ensureBotSession(result.user.id);
       await store.ensureAutomationState(result.user.id);
       if (result.inserted) {
@@ -105,6 +83,7 @@ export function startTelegramListener({ token, store, io }) {
       const messageSentAt = ctx.message?.date
         ? new Date(ctx.message.date * 1000).toISOString()
         : null;
+      const inputText = ctx.message.text || ctx.message.caption || '';
       const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
         CHATBOT_ENABLED,
         contact: fresh,
@@ -115,7 +94,8 @@ export function startTelegramListener({ token, store, io }) {
           messageId: await store.findLatestIncomingMessageId(result.user.id, ctx.message.message_id),
           incomingTelegramMessageId: ctx.message.message_id,
           jobType: 'inbound_message',
-          inputText: ctx.message.text || ctx.message.caption || ''
+          inputText,
+          force_entry_menu: Boolean(result.firstMessage) || !String(inputText).trim()
         }
       });
       if (enqueueResult.enqueued) {
@@ -134,41 +114,6 @@ export function startTelegramListener({ token, store, io }) {
       }
 
       console.log(`[chatbot] direct_auto_send_suppressed contact=${result.user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
-      return;
-
-      const automationResult = await processAutomationForContact({
-        store,
-        user: result.user,
-        message: ctx.message,
-        inserted: result.inserted,
-        bot,
-        io
-      });
-
-      if (automationResult?.handled) {
-        return;
-      }
-
-      if (ctx.message.text === '/start' || result.firstMessage) {
-        const session = await store.setBotScreen(result.user.id, initialScreenForUser(result.user), {
-          actorName: 'Bot',
-          pushCurrent: false
-        });
-        await renderMenu({
-          bot,
-          store,
-          user: result.user,
-          screenName: session.current_screen,
-          registered: result.user.registration_status === 'Registered'
-        });
-        io.emit('message:new', {
-          userId: result.user.id,
-          contactId: result.user.id,
-          telegramId: result.user.telegram_id
-        });
-        io.emit('contacts:changed');
-        io.emit('users:changed');
-      }
     } catch (error) {
       console.error('Failed to store Telegram message:', error);
     }

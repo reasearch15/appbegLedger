@@ -95,7 +95,7 @@ async function run() {
   }));
   const results = await Promise.all(users.map(async ({ contact: c, store }) => {
     const w = await decideBotReply({ store, contact: c, messageText: 'hello' });
-    const r = await decideBotReply({ store, contact: c, messageText: 'Register' });
+    const r = await decideBotReply({ store, contact: c, messageText: '/register' });
     return { welcomeKind: w.kind, registerStep: r.statePatch.currentStep, contactId: c.id };
   }));
   assertEqual(results.every((item) => item.welcomeKind === 'welcome' && item.registerStep === 'payment_name'), true);

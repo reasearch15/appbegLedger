@@ -101,7 +101,7 @@ async function run() {
   assertEqual(decision.kind, 'welcome');
   console.log('ok flow: hello -> welcome');
 
-  decision = await decideAndApply(flowStore, contact, 'register');
+  decision = await decideAndApply(flowStore, contact, '/register');
   assertEqual(decision.kind, 'registration_ask_payment_name');
   assertEqual(decision.statePatch.currentStep, 'payment_name');
   assertEqual(decision.logEvent?.event, 'flow_started');

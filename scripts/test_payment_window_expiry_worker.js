@@ -138,7 +138,7 @@ async function run() {
   const restarted = await decideBotReply({
     store: fakeStore,
     contact: updatedContact,
-    messageText: 'Register'
+    messageText: '/register'
   });
   assertEqual(restarted.kind, 'registration_ask_payment_name');
   assertEqual(restarted.statePatch.currentStep, 'payment_name');
