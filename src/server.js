@@ -17,6 +17,7 @@ import { isChatbotButtonAction } from './telegram/chatbotEngine.js';
 import { tryEnqueueRegistrationBotJob } from './telegram/autoRegistrationBot.js';
 import { startChatbotWorker } from './telegram/chatbotWorker.js';
 import { startPaymentWindowExpiryWorker } from './telegram/paymentWindowExpiryWorker.js';
+import { startPaymentFreezeWorker } from './payments/paymentFreezeWorker.js';
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
 import { startPaymentTelegramSync, stopPaymentTelegramSync } from './telegram/paymentSyncProcess.js';
 import { listenerRoles } from './config/listeners.js';
@@ -1352,6 +1353,7 @@ globalThis.paymentTelegramSync = await startPaymentTelegramSync({
 
 globalThis.chatbotWorker = startChatbotWorker({ store, io });
 globalThis.paymentWindowExpiryWorker = startPaymentWindowExpiryWorker({ store, io });
+globalThis.paymentFreezeWorker = startPaymentFreezeWorker({ store, io });
 
 async function shutdownWorkers(signal = 'shutdown') {
   console.log(`Stopping background workers (${signal})...`);
@@ -1360,6 +1362,7 @@ async function shutdownWorkers(signal = 'shutdown') {
     stopPaymentTelegramSync(),
     globalThis.chatbotWorker?.stop?.(),
     globalThis.paymentWindowExpiryWorker?.stop?.(),
+    globalThis.paymentFreezeWorker?.stop?.(),
     Promise.resolve(globalThis.telegramBot?.stop?.(signal)),
     appbegStore?.close?.()
   ]);

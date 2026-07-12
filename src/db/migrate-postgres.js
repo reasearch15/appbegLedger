@@ -330,6 +330,21 @@ export async function migratePostgres(driver) {
   `);
 
   await driver.exec(`
+    ALTER TABLE payment_events
+      ADD COLUMN IF NOT EXISTS freeze_at TEXT;
+    ALTER TABLE payment_events
+      ADD COLUMN IF NOT EXISTS unmatched_reason TEXT;
+    ALTER TABLE payment_events
+      ADD COLUMN IF NOT EXISTS frozen_at TEXT;
+    ALTER TABLE payment_events
+      ADD COLUMN IF NOT EXISTS matched_at TEXT;
+    CREATE INDEX IF NOT EXISTS idx_payment_events_freeze_at
+      ON payment_events(freeze_at);
+    CREATE INDEX IF NOT EXISTS idx_payment_events_routing_freeze
+      ON payment_events(routing_status, freeze_at);
+  `);
+
+  await driver.exec(`
     CREATE TABLE IF NOT EXISTS ledger_users (
       id BIGSERIAL PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,

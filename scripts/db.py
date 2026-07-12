@@ -64,9 +64,9 @@ def payment_event_upsert_sql() -> str:
         INSERT INTO payment_events (
           telegram_message_id, telegram_group_id, telegram_group_title, sender_id, sender_name,
           sender_username, message_text, raw_payload_json, processing_status, is_edited,
-          is_deleted, message_date, edited_at, updated_at
+          is_deleted, message_date, edited_at, freeze_at, routing_status, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, 'searching', ?)
         ON CONFLICT (telegram_group_id, telegram_message_id) DO UPDATE SET
           telegram_group_title = excluded.telegram_group_title,
           sender_id = excluded.sender_id,
@@ -76,15 +76,16 @@ def payment_event_upsert_sql() -> str:
           raw_payload_json = excluded.raw_payload_json,
           is_edited = CASE WHEN excluded.is_edited IS TRUE THEN TRUE ELSE payment_events.is_edited END,
           edited_at = COALESCE(excluded.edited_at, payment_events.edited_at),
+          freeze_at = COALESCE(payment_events.freeze_at, excluded.freeze_at),
           updated_at = excluded.updated_at
         """
     return """
         INSERT INTO payment_events (
           telegram_message_id, telegram_group_id, telegram_group_title, sender_id, sender_name,
           sender_username, message_text, raw_payload_json, processing_status, is_edited,
-          is_deleted, message_date, edited_at, updated_at
+          is_deleted, message_date, edited_at, freeze_at, routing_status, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, 'searching', ?)
         ON CONFLICT(telegram_group_id, telegram_message_id) DO UPDATE SET
           telegram_group_title = excluded.telegram_group_title,
           sender_id = excluded.sender_id,
@@ -94,6 +95,7 @@ def payment_event_upsert_sql() -> str:
           raw_payload_json = excluded.raw_payload_json,
           is_edited = CASE WHEN excluded.is_edited = 1 THEN 1 ELSE payment_events.is_edited END,
           edited_at = COALESCE(excluded.edited_at, payment_events.edited_at),
+          freeze_at = COALESCE(payment_events.freeze_at, excluded.freeze_at),
           updated_at = excluded.updated_at
         """
 

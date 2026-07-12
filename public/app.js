@@ -1919,8 +1919,12 @@ function intentPill(label, active) {
 }
 
 function infoRow(label, value) {
-  const isHtml = typeof value === 'string' && (value.includes('status-badge') || value.includes('progress-'));
-  return `<div class="info-row"><span>${label}</span><strong>${isHtml ? value : escapeHtml(value)}</strong></div>`;
+  const raw = String(value ?? '');
+  const isHtml = raw.includes('status-badge')
+    || raw.includes('progress-')
+    || raw.includes('data-detail-freeze-countdown')
+    || raw.includes('data-freeze-countdown');
+  return `<div class="info-row"><span>${label}</span><strong>${isHtml ? raw : escapeHtml(raw)}</strong></div>`;
 }
 
 function chatbotStatusLabel(contact) {
@@ -2024,13 +2028,37 @@ function paymentDetailPanel() {
   const remaining = status === MATCHING_STATUS.SEARCHING
     ? remainingSecondsUntil(payment.freeze_at)
     : null;
+  const countdownText = formatFreezeCountdown(remaining);
   return `
     <aside class="payment-detail">
       <section class="card">
         <div class="card-title">Payment Message</div>
         ${infoRow('Status', statusLabel)}
         ${status === MATCHING_STATUS.SEARCHING
-    ? infoRow('Freeze in', formatFreezeCountdown(remaining))
+    ? `
+          <div class="payment-detail-timer" data-detail-freeze-at="${escapeHtml(payment.freeze_at || '')}">
+            ${infoRow('Freeze in', countdownText != null
+    ? `<span data-detail-freeze-countdown>${countdownText}</span>`
+    : 'Awaiting deadline…')}
+            ${infoRow('Received', fmtDateTime(payment.message_date))}
+            ${infoRow('Freeze deadline', payment.freeze_at ? fmtDateTime(payment.freeze_at) : '—')}
+          </div>
+        `
+    : ''}
+        ${status === MATCHING_STATUS.FROZEN
+    ? `
+          ${infoRow('Frozen at', payment.frozen_at ? fmtDateTime(payment.frozen_at) : (payment.routed_at ? fmtDateTime(payment.routed_at) : '—'))}
+          ${infoRow('Reason', paymentStatusDetailCopy(payment))}
+        `
+    : ''}
+        ${status === MATCHING_STATUS.MATCHED || status === MATCHING_STATUS.COMPLETED
+    ? `
+          ${infoRow('Matched flow', (payment.flow_type || payment.window_flow_type || 'registration') === 'deposit' ? 'Deposit' : 'Registration')}
+          ${infoRow('Matched at', payment.matched_at ? fmtDateTime(payment.matched_at) : (payment.routed_at ? fmtDateTime(payment.routed_at) : '—'))}
+        `
+    : ''}
+        ${status === MATCHING_STATUS.MANUAL_REVIEW
+    ? infoRow('Reason', paymentStatusDetailCopy(payment))
     : ''}
         ${infoRow('Details', paymentStatusDetailCopy(payment))}
         ${payment.flow_type || payment.window_flow_type
@@ -2048,7 +2076,7 @@ function paymentDetailPanel() {
         ${infoRow('Owner', payment.routing_owner || '-')}
         ${infoRow('Handled By', payment.handled_by || '-')}
         ${infoRow('Matched Contact', payment.contact_id || '-')}
-        ${infoRow('Payment Window', payment.registration_payment_window_id || '-')}
+        ${infoRow('Payment Window', payment.registration_payment_window_id || payment.matched_window_id || '-')}
         ${infoRow('Unmatched Reason', payment.unmatched_reason || '-')}
         ${infoRow('Sender', payment.sender_name || payment.sender_username || 'Unknown')}
         ${infoRow('Timestamp', fmtDateTime(payment.message_date))}
@@ -2542,39 +2570,49 @@ function syncPaymentFreezeTicker() {
 function tickPaymentFreezeCountdowns() {
   const now = Date.now();
   let anyExpired = false;
-  document.querySelectorAll('[data-freeze-at]').forEach((cell) => {
-    const freezeAt = cell.getAttribute('data-freeze-at');
-    const countdown = cell.querySelector('[data-freeze-countdown]');
+
+  document.querySelectorAll('[data-freeze-countdown]').forEach((el) => {
+    const cell = el.closest('[data-freeze-at]');
+    const freezeAt = cell?.getAttribute('data-freeze-at') || el.closest('[data-detail-freeze-at]')?.getAttribute('data-detail-freeze-at');
+    if (!freezeAt) return;
     const remaining = remainingSecondsUntil(freezeAt, now);
-    if (countdown) countdown.textContent = formatFreezeCountdown(remaining);
-    if (remaining === 0) {
-      anyExpired = true;
-      const paymentId = Number(cell.getAttribute('data-payment-status-id'));
-      const payment = state.payments.find((entry) => Number(entry.id) === paymentId);
-      if (payment && payment.matching_status === MATCHING_STATUS.SEARCHING) {
-        payment.matching_status = MATCHING_STATUS.FROZEN;
-        payment.remaining_seconds = 0;
-      }
-      cell.setAttribute('data-matching-status', MATCHING_STATUS.FROZEN);
-      cell.removeAttribute('data-freeze-at');
-      cell.innerHTML = `<span class="badge matching-frozen">${matchingStatusEmoji(MATCHING_STATUS.FROZEN)} ${matchingStatusLabel(MATCHING_STATUS.FROZEN)}</span>`;
-    }
+    const clock = formatFreezeCountdown(remaining);
+    if (clock != null) el.textContent = clock;
+    if (remaining === 0) anyExpired = true;
   });
-  if (anyExpired) {
-    state.payments = sortPaymentsByStatus(state.payments, now);
-    const table = document.querySelector('.payment-table');
-    if (table) table.innerHTML = paymentRows();
-    if (state.payment && deriveMatchingStatus(state.payment, now) === MATCHING_STATUS.FROZEN) {
-      // Keep detail panel in sync without full app re-render.
-      const detail = document.querySelector('.payment-detail-wrap');
-      if (detail) detail.innerHTML = `
-          <div class="details-sheet-bar mobile-only">
-            <button type="button" class="icon-back" data-mobile-back="payments" aria-label="Back to payments">←</button>
-            <strong>Payment detail</strong>
-          </div>
-          ${paymentDetailPanel()}
-        `;
-    }
+
+  document.querySelectorAll('[data-detail-freeze-countdown]').forEach((el) => {
+    const wrap = el.closest('[data-detail-freeze-at]');
+    const freezeAt = wrap?.getAttribute('data-detail-freeze-at');
+    if (!freezeAt) return;
+    const remaining = remainingSecondsUntil(freezeAt, now);
+    const clock = formatFreezeCountdown(remaining);
+    if (clock != null) el.textContent = clock;
+    if (remaining === 0) anyExpired = true;
+  });
+
+  // Visual-only: show Frozen badge when countdown hits zero; backend confirms via websocket refresh.
+  document.querySelectorAll('.payment-status-cell[data-freeze-at][data-matching-status="searching"]').forEach((cell) => {
+    const freezeAt = cell.getAttribute('data-freeze-at');
+    const remaining = remainingSecondsUntil(freezeAt, now);
+    if (remaining !== 0) return;
+    anyExpired = true;
+    cell.setAttribute('data-matching-status', MATCHING_STATUS.FROZEN);
+    cell.removeAttribute('data-freeze-at');
+    cell.innerHTML = `<span class="badge matching-frozen">${matchingStatusEmoji(MATCHING_STATUS.FROZEN)} ${matchingStatusLabel(MATCHING_STATUS.FROZEN)}</span>`;
+  });
+
+  if (anyExpired && !state._paymentFreezeRefreshQueued) {
+    state._paymentFreezeRefreshQueued = true;
+    void refreshPayments({ keepSelection: true })
+      .then(() => refreshSelectedPayment())
+      .then(() => {
+        state._paymentFreezeRefreshQueued = false;
+        render();
+      })
+      .catch(() => {
+        state._paymentFreezeRefreshQueued = false;
+      });
   }
 }
 
@@ -3625,6 +3663,13 @@ socket.on('players:changed', () => {});
 socket.on('player:updated', () => {});
 
 socket.on('payments:changed', () => {
+  if (state.section !== 'payments') return;
+  void refreshPayments({ keepSelection: true })
+    .then(() => refreshSelectedPayment())
+    .then(() => render());
+});
+
+socket.on('payment:frozen', () => {
   if (state.section !== 'payments') return;
   void refreshPayments({ keepSelection: true })
     .then(() => refreshSelectedPayment())

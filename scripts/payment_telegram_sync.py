@@ -182,6 +182,17 @@ def set_checkpoint(db, message_id):
     )
 
 
+def freeze_at_from_message_date(sent_at: str, minutes: int = 5) -> str:
+    try:
+        base = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
+    except Exception:
+        base = datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    from datetime import timedelta
+    return (base + timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
 def store_payment_message(db, message, sender, group, edited=False):
     sent_at = utc_iso(message.date)
     edited_at = utc_iso(message.edit_date) if getattr(message, "edit_date", None) else None
@@ -191,6 +202,7 @@ def store_payment_message(db, message, sender, group, edited=False):
         (group_id, message.id),
     ).fetchone()
     payload = message_payload(message, sender, group)
+    freeze_at = freeze_at_from_message_date(sent_at, int(os.getenv("PAYMENT_SEARCH_MINUTES", "5")))
     db.execute(
         payment_event_upsert_sql(),
         (
@@ -206,6 +218,7 @@ def store_payment_message(db, message, sender, group, edited=False):
             as_db_bool(False),
             sent_at,
             edited_at,
+            freeze_at,
             now_iso(),
         ),
     )

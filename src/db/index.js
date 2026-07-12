@@ -17,7 +17,7 @@ import {
   normalizeCustomerMessage,
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
-import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY } from '../payments/constants.js';
+import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY, computePaymentFreezeAt, ROUTING_STATUS, ROUTING_REASON, UNMATCHED_REASON, ROUTING_OWNER } from '../payments/constants.js';
 import {
   CONVERSATION_STATUSES,
   DEFAULT_AUTOMATION_RULES,
@@ -2348,6 +2348,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       const pa = MATCHING_STATUS_SORT_PRIORITY[a.matching_status] ?? 99;
       const pb = MATCHING_STATUS_SORT_PRIORITY[b.matching_status] ?? 99;
       if (pa !== pb) return pa - pb;
+      // Waiting: soonest freeze_at first
+      if (a.matching_status === 'searching' && b.matching_status === 'searching') {
+        const fa = a.freeze_at ? new Date(a.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+        const fb = b.freeze_at ? new Date(b.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+        if (fa !== fb) return fa - fb;
+      }
       const ta = new Date(a.message_date || 0).getTime();
       const tb = new Date(b.message_date || 0).getTime();
       if (tb !== ta) return tb - ta;
@@ -2376,7 +2382,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function getPaymentStats() {
     const today = new Date().toISOString().slice(0, 10);
     const messageDay = sql.datePrefixExpr('message_date');
-    const row = await db.prepare(`
+    try {
+      const row = await db.prepare(`
       SELECT
         SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
         SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched', 'registration_payment_matched', 'appbeg_owned')
@@ -2402,24 +2409,68 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         COUNT(*) AS ${sql.quoteAlias('totalMessages')}
       FROM payment_events
     `).get({ today });
-    return normalizeAggregateStats(row, [
-      'messagesToday',
-      'matched',
-      'registeredPlayerDeposits',
-      'registrationMatched',
-      'waiting',
-      'frozen',
-      'manualReview',
-      'completed',
-      'frozenManualReview',
-      'expiredWindowMatch',
-      'parseFailed',
-      'ignored',
-      'exceptions',
-      'appbegOwned',
-      'failed',
-      'totalMessages'
-    ]);
+      return normalizeAggregateStats(row, [
+        'messagesToday',
+        'matched',
+        'registeredPlayerDeposits',
+        'registrationMatched',
+        'waiting',
+        'frozen',
+        'manualReview',
+        'completed',
+        'frozenManualReview',
+        'expiredWindowMatch',
+        'parseFailed',
+        'ignored',
+        'exceptions',
+        'appbegOwned',
+        'failed',
+        'totalMessages'
+      ]);
+    } catch (error) {
+      // Older DBs without unmatched_reason: fall back to routing_status-only stats.
+      console.warn('[payments-api] getPaymentStats fallback:', error.message);
+      const row = await db.prepare(`
+      SELECT
+        SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
+        SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched', 'registration_payment_matched', 'appbeg_owned')
+          AND LOWER(COALESCE(processing_status, '')) != 'completed'
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('matched')},
+        SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
+        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
+        SUM(CASE WHEN routing_status IN ('searching', 'unrouted') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
+        SUM(CASE WHEN routing_status IN ('frozen', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozen')},
+        SUM(CASE WHEN routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
+        SUM(CASE WHEN LOWER(COALESCE(processing_status, '')) = 'completed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('completed')},
+        SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
+        SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
+        SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailed')},
+        SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')},
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
+        SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('appbegOwned')},
+        SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('failed')},
+        COUNT(*) AS ${sql.quoteAlias('totalMessages')}
+      FROM payment_events
+    `).get({ today });
+      return normalizeAggregateStats(row, [
+        'messagesToday',
+        'matched',
+        'registeredPlayerDeposits',
+        'registrationMatched',
+        'waiting',
+        'frozen',
+        'manualReview',
+        'completed',
+        'frozenManualReview',
+        'expiredWindowMatch',
+        'parseFailed',
+        'ignored',
+        'exceptions',
+        'appbegOwned',
+        'failed',
+        'totalMessages'
+      ]);
+    }
   }
 
   async function listUnroutedPaymentEvents(limit = 50) {
@@ -2497,7 +2548,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       routed_at: patch.routed_at === undefined ? current.routed_at : patch.routed_at,
       handled_by: patch.handled_by === undefined ? current.handled_by : patch.handled_by,
       freeze_at: patch.freeze_at === undefined ? current.freeze_at : patch.freeze_at,
-      unmatched_reason: patch.unmatched_reason === undefined ? current.unmatched_reason : patch.unmatched_reason
+      unmatched_reason: patch.unmatched_reason === undefined ? current.unmatched_reason : patch.unmatched_reason,
+      frozen_at: patch.frozen_at === undefined ? current.frozen_at : patch.frozen_at,
+      matched_at: patch.matched_at === undefined ? current.matched_at : patch.matched_at
     };
     let processingStatus = current.processing_status;
     if (patch.processing_status) processingStatus = patch.processing_status;
@@ -2507,6 +2560,19 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     else if (next.routing_status === 'manual_review' || next.routing_status === 'untouched_unmatched' || next.routing_status === 'frozen') processingStatus = 'Parsed';
     else if (next.routing_status === 'ignored') processingStatus = 'Failed';
     else if (['expired_deposit', 'parse_failed', 'route_failed'].includes(next.routing_status)) processingStatus = 'Failed';
+
+    if (
+      (next.routing_status === 'registration_payment_matched'
+        || next.routing_status === 'appbeg_owned'
+        || next.routing_status === 'deposit_window_matched'
+        || next.routing_status === 'registered_player_deposit')
+      && !next.matched_at
+    ) {
+      next.matched_at = next.routed_at || nowIso();
+    }
+    if (next.routing_status === 'frozen' && !next.frozen_at) {
+      next.frozen_at = nowIso();
+    }
 
     await db.prepare(`
       UPDATE payment_events
@@ -2523,6 +2589,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         handled_by = ?,
         freeze_at = ?,
         unmatched_reason = ?,
+        frozen_at = ?,
+        matched_at = ?,
         processing_status = ?,
         updated_at = ?
       WHERE id = ?
@@ -2539,11 +2607,87 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       next.handled_by,
       next.freeze_at,
       next.unmatched_reason ?? null,
+      next.frozen_at ?? null,
+      next.matched_at ?? null,
       processingStatus,
       nowIso(),
       paymentEventId
     );
     return await getPaymentEvent(paymentEventId);
+  }
+
+  async function backfillMissingPaymentFreezeAt() {
+    const rows = await db.prepare(`
+      SELECT id, message_date, created_at
+      FROM payment_events
+      WHERE routing_status IN ('searching', 'unrouted')
+        AND (freeze_at IS NULL OR freeze_at = '')
+    `).all();
+    let backfilled = 0;
+    for (const row of rows) {
+      const freezeAt = computePaymentFreezeAt(row.message_date || row.created_at || nowIso());
+      const result = await db.prepare(`
+        UPDATE payment_events
+        SET freeze_at = ?, updated_at = ?
+        WHERE id = ?
+          AND (freeze_at IS NULL OR freeze_at = '')
+          AND routing_status IN ('searching', 'unrouted')
+      `).run(freezeAt, nowIso(), row.id);
+      if (result.changes) backfilled += 1;
+    }
+    return { backfilled };
+  }
+
+  /**
+   * Idempotently freeze overdue searching/unrouted payments.
+   * Backfills missing freeze_at from message_date first (never extends old payments).
+   */
+  async function freezeOverdueSearchingPayments({ now = new Date() } = {}) {
+    const { backfilled } = await backfillMissingPaymentFreezeAt();
+    const nowIsoStr = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+    const overdue = await db.prepare(`
+      SELECT id, freeze_at, unmatched_reason, routing_status, registration_payment_window_id
+      FROM payment_events
+      WHERE routing_status IN ('searching', 'unrouted')
+        AND freeze_at IS NOT NULL
+        AND freeze_at != ''
+        AND freeze_at <= ?
+        AND registration_payment_window_id IS NULL
+    `).all(nowIsoStr);
+
+    const frozen = [];
+    for (const row of overdue) {
+      const updated = await updatePaymentRouting(row.id, {
+        routing_status: ROUTING_STATUS.FROZEN,
+        routing_owner: ROUTING_OWNER.APPBEG,
+        routing_reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+        unmatched_reason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+        routed_at: nowIsoStr,
+        frozen_at: nowIsoStr,
+        handled_by: null
+      });
+      await logPaymentRouting(row.id, 'payment_frozen', 'Search window expired with no active matching window.', {
+        unmatchedReason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+        freezeAt: row.freeze_at,
+        frozenAt: nowIsoStr,
+        status: 'frozen'
+      });
+      frozen.push(updated);
+    }
+    return { frozen, count: frozen.length, backfilled };
+  }
+
+  async function ensurePaymentSearchDeadline(paymentEventId, { receivedAt = null } = {}) {
+    const payment = await getPaymentEvent(paymentEventId);
+    if (!payment) return null;
+    if (payment.freeze_at) return payment;
+    if (!['searching', 'unrouted', 'New', 'new'].includes(payment.routing_status)
+      && payment.routing_status !== ROUTING_STATUS.UNROUTED
+      && payment.routing_status !== ROUTING_STATUS.SEARCHING) {
+      return payment;
+    }
+    const freezeAt = computePaymentFreezeAt(receivedAt || payment.message_date || payment.created_at || nowIso());
+    return await updatePaymentRouting(paymentEventId, { freeze_at: freezeAt });
   }
 
   async function logPaymentRouting(paymentEventId, step, message, metadata = {}, level = 'info') {
@@ -4102,6 +4246,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     markPaymentIgnored,
     manuallyLinkPaymentEvent,
     logPaymentRouting,
+    backfillMissingPaymentFreezeAt,
+    freezeOverdueSearchingPayments,
+    ensurePaymentSearchDeadline,
     listPaymentRoutingLogs,
     createDepositEvent,
     getDepositEvent,
@@ -4268,6 +4415,8 @@ function hydratePaymentEvent(event) {
       : event.registration_payment_window_id,
     unmatched_reason: event.unmatched_reason || null,
     freeze_at: event.freeze_at || null,
+    frozen_at: event.frozen_at || null,
+    matched_at: event.matched_at || null,
     raw_payload
   };
   return enrichPaymentQueueFields(base);
@@ -4451,47 +4600,39 @@ async function migrate(db) {
     ['registration_payment_window_id', 'INTEGER'],
     ['routing_reason', 'TEXT'],
     ['freeze_at', 'TEXT'],
-    ['unmatched_reason', 'TEXT']
+    ['unmatched_reason', 'TEXT'],
+    ['frozen_at', 'TEXT'],
+    ['matched_at', 'TEXT']
   ]) {
     await addColumnIfMissing(db, 'payment_events', column[0], column[1]);
   }
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS deposit_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      contact_id INTEGER NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
-      payment_tag_normalized TEXT NOT NULL,
-      payment_tag_display TEXT,
-      status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'completed', 'cancelled', 'expired')),
-      started_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      started_by TEXT,
-      completed_at TEXT,
-      cancelled_at TEXT,
-      notes TEXT,
-      linked_payment_event_id INTEGER REFERENCES payment_events(id) ON DELETE SET NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS payment_routing_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      payment_event_id INTEGER NOT NULL REFERENCES payment_events(id) ON DELETE CASCADE,
-      step TEXT NOT NULL,
-      level TEXT NOT NULL DEFAULT 'info',
-      message TEXT NOT NULL,
-      metadata_json TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_events_routing_status ON payment_events(routing_status, message_date DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_events_freeze_at ON payment_events(freeze_at)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_events_routing_freeze ON payment_events(routing_status, freeze_at)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_deposit_events_tag_status ON deposit_events(payment_tag_normalized, status, expires_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_routing_logs_payment ON payment_routing_logs(payment_event_id, created_at DESC)');
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_idempotency_key ON payment_events(idempotency_key) WHERE idempotency_key IS NOT NULL');
+
+  // One-time safe backfill for searching payments missing freeze_at (message_date + 5m, never extended).
+  try {
+    const missing = await db.prepare(`
+      SELECT id, message_date, created_at
+      FROM payment_events
+      WHERE routing_status IN ('searching', 'unrouted')
+        AND (freeze_at IS NULL OR freeze_at = '')
+    `).all();
+    for (const row of missing) {
+      const freezeAt = computePaymentFreezeAt(row.message_date || row.created_at || new Date().toISOString());
+      await db.prepare(`
+        UPDATE payment_events
+        SET freeze_at = ?
+        WHERE id = ? AND (freeze_at IS NULL OR freeze_at = '')
+      `).run(freezeAt, row.id);
+    }
+  } catch (error) {
+    console.warn('[db] payment freeze_at backfill skipped:', error.message);
+  }
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS account_sync_logs (

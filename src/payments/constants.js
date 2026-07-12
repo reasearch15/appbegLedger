@@ -140,7 +140,7 @@ export function remainingSecondsUntil(freezeAt, now = new Date()) {
   const end = new Date(freezeAt).getTime();
   if (!Number.isFinite(end)) return null;
   const base = now instanceof Date ? now.getTime() : new Date(now).getTime();
-  return Math.max(0, Math.ceil((end - base) / 1000));
+  return Math.max(0, Math.floor((end - base) / 1000));
 }
 
 /**
@@ -204,12 +204,26 @@ export function enrichPaymentQueueFields(payment = {}, now = new Date()) {
   const remaining_seconds = matching_status === MATCHING_STATUS.SEARCHING
     ? remainingSecondsUntil(payment.freeze_at, now)
     : null;
+  const matched_window_id = payment.matched_window_id
+    ?? payment.registration_payment_window_id
+    ?? null;
+  const matched_at = payment.matched_at
+    || (
+      matching_status === MATCHING_STATUS.MATCHED || matching_status === MATCHING_STATUS.COMPLETED
+        ? (payment.routed_at || null)
+        : null
+    );
   return {
     ...payment,
     matching_status,
     remaining_seconds,
     freeze_at: payment.freeze_at || null,
-    flow_type: paymentFlowType(payment)
+    frozen_at: payment.frozen_at || null,
+    unmatched_reason: payment.unmatched_reason || null,
+    matched_window_id: matched_window_id != null ? Number(matched_window_id) : null,
+    matched_at,
+    flow_type: paymentFlowType(payment),
+    server_now: now instanceof Date ? now.toISOString() : new Date(now).toISOString()
   };
 }
 

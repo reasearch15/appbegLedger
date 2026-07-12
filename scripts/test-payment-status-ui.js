@@ -21,7 +21,7 @@ function run() {
     processing_status: 'Parsed'
   }, now);
   assert.equal(waiting.matching_status, MATCHING_STATUS.SEARCHING);
-  assert.equal(waiting.remaining_seconds, 278);
+  assert.equal(waiting.remaining_seconds, 278); // 04:38
   assert.equal(matchingStatusLabel(waiting.matching_status), 'Waiting');
 
   // Countdown hits zero → Frozen (client/source-of-truth hybrid)

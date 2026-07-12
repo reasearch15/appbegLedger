@@ -44,6 +44,7 @@ async function freezePayment(store, payment, {
     contact_id: contactId,
     registration_payment_window_id: windowId,
     routed_at: new Date().toISOString(),
+    frozen_at: isAmbiguous ? null : new Date().toISOString(),
     handled_by: null,
     unmatched_reason: unmatchedReason || null
   });
@@ -103,9 +104,22 @@ function hasSearchExpired(payment, now = new Date()) {
 }
 
 export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null, now = new Date() } = {}) {
-  const payment = await store.getPaymentEvent(paymentId);
+  let payment = await store.getPaymentEvent(paymentId);
   if (!payment) {
     return { ok: false, error: 'Payment event not found.' };
+  }
+
+  // Persist search deadline ASAP so UI countdown never shows "—" for waiting payments.
+  if (
+    typeof store.ensurePaymentSearchDeadline === 'function'
+    && (!payment.freeze_at)
+    && (payment.routing_status === ROUTING_STATUS.UNROUTED
+      || payment.routing_status === ROUTING_STATUS.SEARCHING
+      || !payment.routed_at)
+  ) {
+    payment = await store.ensurePaymentSearchDeadline(payment.id, {
+      receivedAt: payment.message_date || payment.created_at || now
+    }) || payment;
   }
 
   if (!force && isTerminalRouted(payment)) {
@@ -211,6 +225,7 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       contact_id: activeWindow.contact_id,
       registration_payment_window_id: activeWindow.id,
       routed_at: new Date().toISOString(),
+      matched_at: new Date().toISOString(),
       handled_by: HANDLED_BY_APPBEG_BOT
     });
     await store.logPaymentRouting(payment.id, 'payment_window_matched', `Payment matched an active ${flowType} payment window.`, {

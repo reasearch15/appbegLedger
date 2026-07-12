@@ -32,11 +32,11 @@ export function remainingSecondsUntil(freezeAt, now = Date.now()) {
   const end = new Date(freezeAt).getTime();
   if (!Number.isFinite(end)) return null;
   const base = typeof now === 'number' ? now : new Date(now).getTime();
-  return Math.max(0, Math.ceil((end - base) / 1000));
+  return Math.max(0, Math.floor((end - base) / 1000));
 }
 
 export function formatFreezeCountdown(seconds) {
-  if (seconds == null || !Number.isFinite(seconds)) return '—';
+  if (seconds == null || !Number.isFinite(seconds)) return null;
   const safe = Math.max(0, Math.floor(seconds));
   const mins = Math.floor(safe / 60);
   const secs = safe % 60;
@@ -44,25 +44,11 @@ export function formatFreezeCountdown(seconds) {
 }
 
 export function deriveMatchingStatus(payment = {}, now = Date.now()) {
-  if (payment.matching_status && Object.values(MATCHING_STATUS).includes(payment.matching_status)) {
-    if (payment.matching_status === MATCHING_STATUS.SEARCHING) {
-      const remaining = remainingSecondsUntil(payment.freeze_at, now);
-      if (remaining === 0) return MATCHING_STATUS.FROZEN;
-    }
-    return payment.matching_status;
-  }
-
   const routing = payment.routing_status;
   const unmatched = payment.unmatched_reason || null;
   const processing = String(payment.processing_status || '').toLowerCase();
 
   if (processing === 'completed') return MATCHING_STATUS.COMPLETED;
-
-  if (routing === 'searching' || routing === 'unrouted') {
-    const remaining = remainingSecondsUntil(payment.freeze_at, now);
-    if (remaining === 0) return MATCHING_STATUS.FROZEN;
-    return MATCHING_STATUS.SEARCHING;
-  }
 
   if (routing === 'frozen') return MATCHING_STATUS.FROZEN;
 
@@ -78,6 +64,18 @@ export function deriveMatchingStatus(payment = {}, now = Date.now()) {
     || routing === 'appbeg_owned'
   ) {
     return MATCHING_STATUS.MATCHED;
+  }
+
+  if (routing === 'searching' || routing === 'unrouted') {
+    // Prefer backend status. Only show Frozen visually when freeze_at elapsed;
+    // backend worker remains authoritative for permanent freeze.
+    const remaining = remainingSecondsUntil(payment.freeze_at, now);
+    if (payment.freeze_at && remaining === 0) return MATCHING_STATUS.FROZEN;
+    return MATCHING_STATUS.SEARCHING;
+  }
+
+  if (payment.matching_status && Object.values(MATCHING_STATUS).includes(payment.matching_status)) {
+    return payment.matching_status;
   }
 
   return MATCHING_STATUS.MANUAL_REVIEW;
@@ -122,10 +120,10 @@ export function paymentStatusDetailCopy(payment = {}) {
     return 'Registration payment completed.';
   }
   if (status === MATCHING_STATUS.FROZEN) {
-    return 'No matching active payment window within 5 minutes. Assign manually or investigate.';
+    return 'No active matching registration or deposit window was found.';
   }
   if (status === MATCHING_STATUS.MANUAL_REVIEW) {
-    return 'Multiple possible matches or another exception. Choose the correct match.';
+    return 'Multiple active matching windows';
   }
   if (status === MATCHING_STATUS.SEARCHING) {
     return 'Still inside the automatic matching window.';
@@ -140,6 +138,11 @@ export function sortPaymentsByStatus(payments = [], now = Date.now()) {
     const pa = SORT_PRIORITY[sa] ?? 99;
     const pb = SORT_PRIORITY[sb] ?? 99;
     if (pa !== pb) return pa - pb;
+    if (sa === MATCHING_STATUS.SEARCHING && sb === MATCHING_STATUS.SEARCHING) {
+      const fa = a.freeze_at ? new Date(a.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+      const fb = b.freeze_at ? new Date(b.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+      if (fa !== fb) return fa - fb;
+    }
     const ta = new Date(a.message_date || 0).getTime();
     const tb = new Date(b.message_date || 0).getTime();
     if (tb !== ta) return tb - ta;
@@ -151,18 +154,32 @@ export function renderPaymentStatusCell(payment = {}, now = Date.now()) {
   const status = deriveMatchingStatus(payment, now);
   const label = matchingStatusLabel(status);
   const emoji = matchingStatusEmoji(status);
+
   if (status === MATCHING_STATUS.SEARCHING) {
     const remaining = remainingSecondsUntil(payment.freeze_at, now);
+    const clock = formatFreezeCountdown(remaining);
+    if (!payment.freeze_at || clock == null) {
+      return `
+        <span class="payment-status-cell" data-payment-status-id="${payment.id}" data-matching-status="${status}">
+          <span class="badge matching-${status}">${emoji} ${escapeHtml(label)}</span>
+          <span class="payment-freeze-meta">
+            <span class="payment-freeze-label">Freeze in</span>
+            <span class="payment-freeze-countdown subtle">Awaiting deadline…</span>
+          </span>
+        </span>
+      `;
+    }
     return `
-      <span class="payment-status-cell" data-payment-status-id="${payment.id}" data-freeze-at="${escapeAttr(payment.freeze_at || '')}" data-matching-status="${status}">
+      <span class="payment-status-cell" data-payment-status-id="${payment.id}" data-freeze-at="${escapeAttr(payment.freeze_at)}" data-matching-status="${status}">
         <span class="badge matching-${status}">${emoji} ${escapeHtml(label)}</span>
         <span class="payment-freeze-meta">
           <span class="payment-freeze-label">Freeze in</span>
-          <span class="payment-freeze-countdown" data-freeze-countdown>${formatFreezeCountdown(remaining)}</span>
+          <span class="payment-freeze-countdown" data-freeze-countdown>${clock}</span>
         </span>
       </span>
     `;
   }
+
   return `
     <span class="payment-status-cell" data-payment-status-id="${payment.id}" data-matching-status="${status}">
       <span class="badge matching-${status}">${emoji} ${escapeHtml(label)}</span>
