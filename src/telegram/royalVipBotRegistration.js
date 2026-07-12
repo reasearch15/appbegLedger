@@ -22,12 +22,14 @@ import {
   BOT_REGISTRATION_FLOW,
   clearedBotRegistrationInfo,
   guestMenuButtons,
+  paymentQrRetryButtons,
   registrationNavButtons,
   registeredMenuButtons,
   resolveEffectiveRegistrationState,
   reviewScreenButtons,
   waitingPaymentCancelButtons
 } from './botRegistrationState.js';
+import { REGISTRATION_QR_LOAD_FAILED_MESSAGE } from '../payments/methodUtils.js';
 
 const GREETING_PATTERNS = /^(hi|hello|hey|yo|hola|howdy|sup|what'?s up|good morning|good afternoon|good evening)\b/i;
 
@@ -86,7 +88,9 @@ export async function resolveRegistrationDefaultQr(store) {
   }
   const methods = await store.listActivePaymentMethodsForRegistration?.() || [];
   for (const method of methods) {
-    const qr = await store.getActiveDefaultPaymentQr?.(method.id);
+    const qr = typeof store.getActivePaymentQrForRegistration === 'function'
+      ? await store.getActivePaymentQrForRegistration(method.id)
+      : await store.getActiveDefaultPaymentQr?.(method.id);
     if (qr?.file_path) {
       return {
         paymentMethodId: method.id,
@@ -97,6 +101,15 @@ export async function resolveRegistrationDefaultQr(store) {
     }
   }
   return null;
+}
+
+function buildSendPaymentQrPayload(info, qrSource, amount) {
+  return {
+    paymentMethodId: qrSource.paymentMethodId,
+    paymentMethodName: qrSource.paymentMethodName,
+    paymentDisplayName: info.payment_display_name || info.payment_name,
+    firstDepositAmount: amount
+  };
 }
 
 function flowReminder(promptText, info, step, buttons = registrationNavButtons()) {
@@ -334,6 +347,60 @@ export async function continueRoyalVipRegistration({
     };
   }
 
+  if (action === 'bot:retry_payment_qr') {
+    const amount = info.first_deposit_amount ?? info.requested_deposit_amount;
+    if (amount == null) {
+      return {
+        kind: 'registration_ask_first_deposit_amount',
+        replies: [{
+          text: [
+            `Thank you, ${info.payment_display_name || info.payment_name || 'there'}.`,
+            '',
+            DEPOSIT_AMOUNT_PROMPT
+          ].join('\n'),
+          buttons: registrationNavButtons()
+        }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'first_deposit_amount', registrationInfo: info },
+        escalate: false
+      };
+    }
+    const qrSource = await resolveRegistrationDefaultQr(store);
+    if (!qrSource) {
+      return {
+        kind: 'registration_qr_unavailable',
+        replies: [{
+          text: REGISTRATION_QR_LOAD_FAILED_MESSAGE,
+          buttons: paymentQrRetryButtons()
+        }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'first_deposit_amount', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'registration_qr_missing', amount }
+      };
+    }
+    return {
+      kind: 'registration_send_payment_qr',
+      replies: [],
+      sendPaymentQr: buildSendPaymentQrPayload(info, qrSource, amount),
+      statePatch: {
+        currentFlow: BOT_REGISTRATION_FLOW,
+        currentStep: 'first_deposit_amount',
+        registrationInfo: {
+          ...info,
+          payment_method_id: qrSource.paymentMethodId,
+          payment_method_name: qrSource.paymentMethodName,
+          payment_method_key: qrSource.paymentMethodKey,
+          payment_app: qrSource.paymentMethodName
+        }
+      },
+      escalate: false,
+      logEvent: {
+        event: 'registration_qr_retry',
+        amount,
+        paymentMethodId: qrSource.paymentMethodId
+      }
+    };
+  }
+
   if (normalizedStep === 'welcome') {
     if (/^register$/i.test(String(text || '').trim())) {
       return startRoyalVipRegistration(contact, clearedBotRegistrationInfo(contact), store);
@@ -434,13 +501,23 @@ export async function continueRoyalVipRegistration({
     const qrSource = await resolveRegistrationDefaultQr(store);
     if (!qrSource) {
       return {
-        kind: 'registration_no_payment_methods',
+        kind: 'registration_qr_unavailable',
         replies: [{
-          text: 'Registration payments are not available right now. Please contact staff.',
-          buttons: guestMenuButtons()
+          text: REGISTRATION_QR_LOAD_FAILED_MESSAGE,
+          buttons: paymentQrRetryButtons()
         }],
-        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'first_deposit_amount', registrationInfo: info },
-        escalate: false
+        statePatch: {
+          currentFlow: BOT_REGISTRATION_FLOW,
+          currentStep: 'first_deposit_amount',
+          registrationInfo: {
+            ...info,
+            first_deposit_amount: amount,
+            requested_deposit_amount: amount,
+            payment_confirmed: false
+          }
+        },
+        escalate: false,
+        logEvent: { event: 'registration_qr_missing', amount }
       };
     }
 
@@ -458,20 +535,20 @@ export async function continueRoyalVipRegistration({
     return {
       kind: 'registration_send_payment_qr',
       replies: [],
-      sendPaymentQr: {
-        paymentMethodId: qrSource.paymentMethodId,
-        paymentMethodName: qrSource.paymentMethodName,
-        paymentDisplayName: nextInfo.payment_display_name || nextInfo.payment_name,
-        firstDepositAmount: amount
-      },
+      sendPaymentQr: buildSendPaymentQrPayload(nextInfo, qrSource, amount),
       statePatch: {
         currentFlow: BOT_REGISTRATION_FLOW,
-        currentStep: 'await_payment',
+        // Stay on amount step until QR send succeeds — handler advances to await_payment.
+        currentStep: 'first_deposit_amount',
         registrationInfo: nextInfo
       },
-      setStatus: 'Waiting For Payment',
       escalate: false,
-      logEvent: { event: 'registration_payment_window_requested', amount }
+      logEvent: {
+        event: 'registration_amount_accepted',
+        amount,
+        paymentMethodId: qrSource.paymentMethodId,
+        qrId: qrSource.qr?.id
+      }
     };
   }
 

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 export function slugifyPaymentMethodKey(name) {
@@ -69,14 +70,12 @@ export function parsePaymentMethodSelection(text, methods = []) {
 
 export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName }) {
   const amount = formatDepositAmount(firstDepositAmount);
+  const money = amount.startsWith('$') ? amount : `$${amount}`;
   return [
-    `Please send ${amount} using the QR code below.`,
+    `Please send ${money} using the QR code above.`,
     '',
-    `Payment Name:`,
-    paymentDisplayName || '—',
-    '',
-    `Amount:`,
-    amount,
+    `Payment Name: ${paymentDisplayName || '—'}`,
+    `Amount: ${money}`,
     '',
     'You have 5 minutes to complete your payment.',
     'We will automatically verify your payment and continue your registration.'
@@ -97,4 +96,39 @@ This should be the name shown on your ${paymentMethodName} payment, not a $tag.`
 
 export function paymentMethodUnavailableMessage(paymentMethodName) {
   return `Sorry, ${paymentMethodName} payments are currently unavailable.`;
+}
+
+export const REGISTRATION_QR_LOAD_FAILED_MESSAGE = [
+  'We could not load the payment QR right now. Please try again or contact support.'
+].join('\n');
+
+/**
+ * Resolve a stored QR path into Telegram-ready photo metadata.
+ * Accepts HTTPS URL, absolute/relative filesystem path, or /media/... preview URLs.
+ */
+export function resolvePaymentQrTelegramInput(filePath, { rootDir = process.cwd() } = {}) {
+  const raw = String(filePath || '').trim();
+  if (!raw) return { ok: false, reason: 'empty_path' };
+
+  if (/^https?:\/\//i.test(raw)) {
+    return { ok: true, type: 'url', mediaPath: raw };
+  }
+
+  let absolutePath = raw;
+  if (raw.startsWith('/media/')) {
+    absolutePath = path.join(rootDir, 'data', raw.slice(1));
+  } else if (!path.isAbsolute(raw)) {
+    absolutePath = path.resolve(rootDir, raw);
+  }
+
+  if (!fs.existsSync(absolutePath)) {
+    return { ok: false, reason: 'file_missing', absolutePath };
+  }
+
+  return {
+    ok: true,
+    type: 'file',
+    mediaPath: absolutePath,
+    absolutePath
+  };
 }

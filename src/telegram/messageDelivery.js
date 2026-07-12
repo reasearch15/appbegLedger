@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import path from 'node:path';
+import { resolvePaymentQrTelegramInput } from '../payments/methodUtils.js';
 
 export function createBotReplySender(bot, store) {
   return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
@@ -64,17 +64,47 @@ export function createBotReplySender(bot, store) {
 }
 
 export function createBotPhotoSender(bot, store) {
-  return async function sendPhoto({ user, text, mediaPath, messageType = 'image' }) {
-    const absolutePath = path.resolve(mediaPath);
-    if (!fs.existsSync(absolutePath)) {
-      throw new Error(`Photo file not found: ${absolutePath}`);
+  return async function sendPhoto({ user, text, mediaPath, mediaBuffer = null, mediaFilename = 'qr.png', buttons = [], messageType = 'image' }) {
+    const normalizedButtons = normalizeButtonRows(buttons);
+    const replyMarkup = normalizedButtons.length
+      ? {
+        inline_keyboard: normalizedButtons.map((row) => row.map((button) => ({
+          text: button.text,
+          callback_data: button.data
+        })))
+      }
+      : undefined;
+
+    let photoInput;
+    let resolvedPath = null;
+
+    if (mediaBuffer) {
+      photoInput = {
+        source: Buffer.isBuffer(mediaBuffer) ? mediaBuffer : Buffer.from(mediaBuffer),
+        filename: mediaFilename
+      };
+    } else {
+      const resolved = resolvePaymentQrTelegramInput(mediaPath);
+      if (!resolved.ok) {
+        throw new Error(`Photo file not found: ${resolved.absolutePath || mediaPath || resolved.reason}`);
+      }
+      if (resolved.type === 'url') {
+        photoInput = resolved.mediaPath;
+        resolvedPath = resolved.mediaPath;
+      } else {
+        resolvedPath = resolved.absolutePath;
+        photoInput = { source: fs.createReadStream(resolved.absolutePath) };
+      }
     }
 
-    console.log(`[telegram-outbound] bot_api send_photo contact=${user.id} media=${absolutePath}`);
+    console.log(`[telegram-outbound] bot_api send_photo contact=${user.id} media=${resolvedPath || mediaPath || mediaFilename} buttons=${normalizedButtons.length}`);
     const telegramResponse = await bot.telegram.sendPhoto(
       user.telegram_id,
-      { source: fs.createReadStream(absolutePath) },
-      { caption: text }
+      photoInput,
+      {
+        caption: text || undefined,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+      }
     );
 
     await store.storeOutgoingMessage({
@@ -83,12 +113,13 @@ export function createBotPhotoSender(bot, store) {
       text,
       payload: {
         telegramResponse,
-        mediaPath: absolutePath,
+        mediaPath: resolvedPath || mediaPath || null,
+        buttons: normalizedButtons,
         channel: 'bot_api'
       },
       senderType: 'bot',
       source: 'bot_api',
-      messageType
+      messageType: normalizedButtons.length ? 'buttons' : messageType
     });
 
     return {
@@ -96,7 +127,8 @@ export function createBotPhotoSender(bot, store) {
       queued: false,
       source: 'bot_api',
       messageId: telegramResponse.message_id,
-      mediaPath: absolutePath
+      mediaPath: resolvedPath || mediaPath || null,
+      buttons: normalizedButtons
     };
   };
 }
@@ -117,7 +149,7 @@ export async function createReplySender({ store, user, rootDir, bot }) {
   return async function sendReply(options = {}) {
     const normalizedButtons = normalizeButtonRows(options.buttons);
     const hasButtons = normalizedButtons.length > 0;
-    const hasMedia = Boolean(options.mediaPath);
+    const hasMedia = Boolean(options.mediaPath || options.mediaBuffer);
 
     if (preferredSource !== 'bot_api') {
       throw new Error('This contact is not available through the official Bot API.');
@@ -128,7 +160,10 @@ export async function createReplySender({ store, user, rootDir, bot }) {
     }
 
     if (hasMedia) {
-      return createBotPhotoSender(bot, store)(options);
+      return createBotPhotoSender(bot, store)({
+        ...options,
+        buttons: normalizedButtons
+      });
     }
 
     if (hasButtons) {

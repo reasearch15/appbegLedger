@@ -151,9 +151,12 @@ async function run() {
   assert.equal(amountOk.kind, 'registration_send_payment_qr');
   assert.equal(amountOk.sendPaymentQr.firstDepositAmount, 10);
   assert.equal(amountOk.sendPaymentQr.paymentDisplayName, 'John Smith');
-  assert.equal(amountOk.setStatus, 'Waiting For Payment');
-  assert.equal(amountOk.statePatch.currentStep, 'await_payment');
+  assert.equal(amountOk.setStatus, undefined);
+  assert.equal(amountOk.statePatch.currentStep, 'first_deposit_amount');
+  assert.equal(amountOk.logEvent.event, 'registration_amount_accepted');
   fresh.apply(amountOk);
+  // Simulate successful QR handler advancing state
+  fresh._state().current_step = 'await_payment';
   console.log('ok deposit queues QR payment window');
 
   // Waiting step ignores chatter

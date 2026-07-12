@@ -190,6 +190,7 @@ export function normalizeCallbackAction(action) {
     'register:cancel_request': 'bot:cancel_request',
     'register:cancel_confirm': 'bot:stop',
     'register:cancel_abort': 'bot:continue_registration',
+    'register:retry_payment_qr': 'bot:retry_payment_qr',
     'menu:main': 'bot:main_menu',
     'menu:registration_status': 'bot:status',
     'menu:deposit': 'bot:deposit',

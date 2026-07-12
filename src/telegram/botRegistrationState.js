@@ -262,6 +262,14 @@ export function waitingPaymentCancelButtons() {
   ];
 }
 
+export function paymentQrRetryButtons() {
+  return [
+    [{ label: '🔄 Try Again', action: 'register:retry_payment_qr', text: 'Try Again', data: 'register:retry_payment_qr' }],
+    [{ label: '💬 Contact Support', action: 'menu:support', text: 'Contact Support', data: 'menu:support' }],
+    [{ label: '❌ Cancel Registration', action: 'register:cancel_request', text: 'Cancel Registration', data: 'register:cancel_request' }]
+  ];
+}
+
 export function registeredMenuButtons() {
   return [
     [

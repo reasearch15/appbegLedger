@@ -80,7 +80,7 @@ async function run() {
   assertEqual(decision.kind, 'registration_send_payment_qr');
   assertEqual(decision.sendPaymentQr.firstDepositAmount, 10);
   assertEqual(decision.sendPaymentQr.paymentDisplayName, 'John Smith');
-  assertEqual(decision.setStatus, 'Waiting For Payment');
+  assertEqual(decision.setStatus, undefined);
   console.log('ok valid deposit queues payment qr send');
 
   console.log('ALL PAYMENT METHOD REGISTRATION CHECKS PASSED');

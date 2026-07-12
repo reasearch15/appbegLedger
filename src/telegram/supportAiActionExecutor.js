@@ -2,7 +2,7 @@ import { decideBotReply } from './chatbotEngine.js';
 import { isUnregisteredStatus, registrationCompletionStatus } from '../registration/utils.js';
 import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 import { createReplySender, normalizeButtonRows } from './messageDelivery.js';
-import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
+import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 
 async function sendBotReply({ store, user, text, buttons = [], bot = null, mediaPath = null, messageType = 'text' }) {
   const sendReply = await createReplySender({
@@ -301,41 +301,5 @@ async function applyRegistrationDecision({ store, contact, decision, job, io, bo
 }
 
 async function applyPaymentRegistrationQr({ store, contact, sendPaymentQr, bot }) {
-  const qr = await store.getActiveDefaultPaymentQr(sendPaymentQr.paymentMethodId);
-  if (!qr?.file_path) {
-    await sendBotReply({
-      store,
-      user: contact,
-      text: paymentMethodUnavailableMessage(sendPaymentQr.paymentMethodName || 'This payment method'),
-      bot: bot || globalThis.telegramBot || null
-    });
-    return;
-  }
-
-  const caption = paymentQrCaption({
-    paymentMethodName: sendPaymentQr.paymentMethodName,
-    firstDepositAmount: sendPaymentQr.firstDepositAmount,
-    paymentDisplayName: sendPaymentQr.paymentDisplayName
-  });
-  const paymentWindow = await store.createRegistrationPaymentWindow({
-    contactId: contact.id,
-    telegramUserId: contact.telegram_id,
-    paymentMethodId: sendPaymentQr.paymentMethodId,
-    paymentQrCodeId: qr.id,
-    paymentDisplayName: sendPaymentQr.paymentDisplayName,
-    firstDepositAmount: sendPaymentQr.firstDepositAmount,
-    windowMinutes: 5
-  });
-
-  await sendBotReply({
-    store,
-    user: contact,
-    text: caption,
-    mediaPath: qr.file_path,
-    bot: bot || globalThis.telegramBot || null
-  });
-
-  await store.updateAutomationState(contact.id, {
-    currentStep: 'await_payment_done'
-  });
+  return handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot });
 }

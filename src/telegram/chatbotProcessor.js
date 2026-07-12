@@ -1,12 +1,9 @@
-import { createReplySender, normalizeButtonRows } from './messageDelivery.js';
 import {
   decideBotReply,
   isBotActiveForContact,
   isChatbotButtonAction,
-  normalizeCallbackAction,
-  PAYMENT_WAITING_BUTTONS
+  normalizeCallbackAction
 } from './chatbotEngine.js';
-import { paymentQrCaption, paymentMethodUnavailableMessage } from '../payments/methodUtils.js';
 import { registrationCompletionStatus } from '../registration/utils.js';
 import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 import { generateCustomerSupportReply } from './customerSupportAi.js';
@@ -18,60 +15,11 @@ import {
   emitSupportAiDraftReady,
   emitSupportAiDraftStale
 } from './supportAiDraftEvents.js';
+import { queueBotReply } from './chatbotProcessorDelivery.js';
+import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 
-/**
- * Prefer Bot API for messages that include inline buttons (Telegram user
- * accounts often cannot render callback buttons). Text-only replies still go
- * through the existing outbound queue when that is the preferred channel.
- */
-export async function queueBotReply({ store, user, text, buttons = [], bot = null }) {
-  const normalizedButtons = normalizeButtonRows(buttons);
-  const sendReply = await createReplySender({
-    store,
-    user,
-    bot: bot || globalThis.telegramBot || null,
-    preferButtonsViaBot: true
-  });
-  const result = await sendReply({
-    user,
-    text,
-    buttons: normalizedButtons,
-    messageType: normalizedButtons.length ? 'buttons' : 'text'
-  });
-  const buttonCount = normalizedButtons.flat().length;
-  if (result?.queued) {
-    console.log(`[chatbot] bot reply queued contact=${user.id} outbound=${result.outboundId || 'n/a'} buttons=${buttonCount}`);
-  } else {
-    console.log(`[chatbot] bot reply sent contact=${user.id} channel=${result?.source || 'bot_api'} message_id=${result?.messageId || 'n/a'} buttons=${buttonCount}`);
-  }
-  if (buttonCount) {
-    console.log(`[chatbot] welcome_buttons_${result?.queued ? 'queued' : 'sent'} contact=${user.id} channel=${result?.source || 'unknown'} buttons=${JSON.stringify(normalizedButtons)}`);
-  }
-  return result;
-}
-
-export async function queueBotPhotoReply({ store, user, text, mediaPath, buttons = [], bot = null }) {
-  const normalizedButtons = normalizeButtonRows(buttons);
-  const sendReply = await createReplySender({
-    store,
-    user,
-    bot: bot || globalThis.telegramBot || null,
-    preferButtonsViaBot: true
-  });
-  const result = await sendReply({
-    user,
-    text,
-    mediaPath,
-    buttons: normalizedButtons,
-    messageType: 'image'
-  });
-  if (result?.queued) {
-    console.log(`[chatbot] bot photo queued contact=${user.id} outbound=${result.outboundId || 'n/a'} media=${mediaPath}`);
-  } else {
-    console.log(`[chatbot] bot photo sent contact=${user.id} channel=${result?.source || 'bot_api'} message_id=${result?.messageId || 'n/a'}`);
-  }
-  return result;
-}
+export { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
+export { handlePaymentRegistrationQr } from './registrationQrSend.js';
 
 export function shouldUseRegistrationBot(job, automationState = {}, contact = null) {
   if (job.job_type === 'callback_action') return true;
@@ -87,55 +35,6 @@ export function shouldUseRegistrationBot(job, automationState = {}, contact = nu
   const status = contact?.registration_status || 'New';
   if (!['Registered'].includes(status)) return true;
   return false;
-}
-
-async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot }) {
-  const qr = await store.getActiveDefaultPaymentQr(sendPaymentQr.paymentMethodId);
-  if (!qr?.file_path) {
-    await queueBotReply({
-      store,
-      user: contact,
-      text: paymentMethodUnavailableMessage(sendPaymentQr.paymentMethodName || 'This payment method'),
-      bot: bot || globalThis.telegramBot || null
-    });
-    return;
-  }
-
-  const caption = paymentQrCaption({
-    paymentMethodName: sendPaymentQr.paymentMethodName,
-    firstDepositAmount: sendPaymentQr.firstDepositAmount,
-    paymentDisplayName: sendPaymentQr.paymentDisplayName
-  });
-  const paymentWindow = await store.createRegistrationPaymentWindow({
-    contactId: contact.id,
-    telegramUserId: contact.telegram_id,
-    paymentMethodId: sendPaymentQr.paymentMethodId,
-    paymentQrCodeId: qr.id,
-    paymentDisplayName: sendPaymentQr.paymentDisplayName,
-    firstDepositAmount: sendPaymentQr.firstDepositAmount,
-    windowMinutes: 5
-  });
-
-  await queueBotPhotoReply({
-    store,
-    user: contact,
-    text: caption,
-    mediaPath: qr.file_path,
-    buttons: [
-      [{ label: '❌ Cancel Registration', action: 'register:cancel_request', text: 'Cancel Registration', data: 'register:cancel_request' }]
-    ],
-    bot: bot || globalThis.telegramBot || null
-  });
-
-  await store.updateAutomationState(contact.id, {
-    currentStep: 'await_payment'
-  });
-  if (store.updateRegistrationStatus) {
-    await store.updateRegistrationStatus(contact.id, 'Waiting For Payment', 'Chatbot').catch(() => null);
-  }
-
-  console.log(`[chatbot] registration_qr_sent contact=${contact.id} window=${paymentWindow.id} method=${sendPaymentQr.paymentMethodId} qr=${qr.id}`);
-  console.log(`[chatbot] registration_payment_window_started contact=${contact.id} window=${paymentWindow.id} expires_at=${paymentWindow.expires_at}`);
 }
 
 export function isSupportInboundJob(job = {}) {

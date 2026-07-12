@@ -3399,10 +3399,37 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
+  async function getNewestActivePaymentQr(paymentMethodId) {
+    const row = await db.prepare(`
+      SELECT q.*
+      FROM payment_qr_codes q
+      WHERE q.payment_method_id = ?
+        AND q.is_active = ${sql.boolTrue}
+      ORDER BY q.updated_at DESC, q.id DESC
+      LIMIT 1
+    `).get(paymentMethodId);
+    if (!row) return null;
+    return {
+      ...hydratePaymentQrRow(row),
+      file_path: row.file_path
+    };
+  }
+
+  /**
+   * Registration QR rule:
+   * 1) active + default
+   * 2) else newest active
+   */
+  async function getActivePaymentQrForRegistration(paymentMethodId) {
+    const preferred = await getActiveDefaultPaymentQr(paymentMethodId);
+    if (preferred?.file_path) return preferred;
+    return await getNewestActivePaymentQr(paymentMethodId);
+  }
+
   async function getRegistrationDefaultPaymentQr() {
     const methods = await listActivePaymentMethodsForRegistration();
     for (const method of methods) {
-      const qr = await getActiveDefaultPaymentQr(method.id);
+      const qr = await getActivePaymentQrForRegistration(method.id);
       if (qr?.file_path) {
         return {
           paymentMethodId: method.id,
@@ -3910,6 +3937,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     markBotNeedsStaffReview,
     findLatestIncomingMessageId,
     getActiveDefaultPaymentQr,
+    getNewestActivePaymentQr,
+    getActivePaymentQrForRegistration,
     getRegistrationDefaultPaymentQr,
     listPaymentMethods,
     listActivePaymentMethodsForRegistration,
