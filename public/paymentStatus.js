@@ -7,7 +7,8 @@ export const MATCHING_STATUS = {
   MATCHED: 'matched',
   COMPLETED: 'completed',
   FROZEN: 'frozen',
-  MANUAL_REVIEW: 'manual_review'
+  MANUAL_REVIEW: 'manual_review',
+  IGNORED: 'ignored'
 };
 
 export const PAYMENT_STATUS_FILTERS = [
@@ -15,8 +16,19 @@ export const PAYMENT_STATUS_FILTERS = [
   'searching',
   'matched',
   'completed',
-  'frozen',
-  'manual_review'
+  'frozen'
+];
+
+export const MANUAL_REVIEW_FILTERS = [
+  'All',
+  'ambiguous',
+  'parse_failure',
+  'missing_data',
+  'non_payment',
+  'cashout',
+  'assigned',
+  'unassigned',
+  'ignored'
 ];
 
 const SORT_PRIORITY = {
@@ -24,7 +36,8 @@ const SORT_PRIORITY = {
   manual_review: 2,
   frozen: 3,
   matched: 4,
-  completed: 5
+  completed: 5,
+  ignored: 6
 };
 
 export function coerceIsoTimestamp(value) {
@@ -67,11 +80,24 @@ export function deriveMatchingStatus(payment = {}, now = Date.now()) {
   const processing = String(payment.processing_status || '').toLowerCase();
 
   if (processing === 'completed') return MATCHING_STATUS.COMPLETED;
+  if (routing === 'ignored' || routing === 'duplicate_ignored') return MATCHING_STATUS.IGNORED;
   if (routing === 'frozen') return MATCHING_STATUS.FROZEN;
 
+  if (routing === 'parse_failed' || routing === 'route_failed' || routing === 'expired_deposit') {
+    return MATCHING_STATUS.MANUAL_REVIEW;
+  }
+
   if (routing === 'manual_review' || routing === 'untouched_unmatched') {
-    if (unmatched === 'ambiguous_match') return MATCHING_STATUS.MANUAL_REVIEW;
-    return MATCHING_STATUS.FROZEN;
+    if (
+      unmatched === 'no_active_window'
+      || unmatched === 'window_expired'
+      || unmatched === 'amount_mismatch'
+      || unmatched === 'name_mismatch'
+      || !unmatched
+    ) {
+      return MATCHING_STATUS.FROZEN;
+    }
+    return MATCHING_STATUS.MANUAL_REVIEW;
   }
 
   if (
@@ -104,6 +130,7 @@ export function matchingStatusLabel(status) {
     case MATCHING_STATUS.COMPLETED: return 'Completed';
     case MATCHING_STATUS.FROZEN: return 'Frozen';
     case MATCHING_STATUS.MANUAL_REVIEW: return 'Manual Review';
+    case MATCHING_STATUS.IGNORED: return 'Ignored';
     default: return status || 'Waiting';
   }
 }
@@ -115,6 +142,7 @@ export function matchingStatusEmoji(status) {
     case MATCHING_STATUS.COMPLETED: return '🔵';
     case MATCHING_STATUS.FROZEN: return '🔴';
     case MATCHING_STATUS.MANUAL_REVIEW: return '🟠';
+    case MATCHING_STATUS.IGNORED: return '⚪';
     default: return '🟡';
   }
 }
@@ -122,6 +150,41 @@ export function matchingStatusEmoji(status) {
 export function matchingStatusFilterLabel(filter) {
   if (filter === 'All') return 'All';
   return matchingStatusLabel(filter);
+}
+
+export function manualReviewFilterLabel(filter) {
+  switch (filter) {
+    case 'All': return 'All';
+    case 'ambiguous': return 'Ambiguous Match';
+    case 'parse_failure': return 'Parse Failure';
+    case 'missing_data': return 'Missing Data';
+    case 'non_payment': return 'Non-Payment';
+    case 'cashout': return 'Cashout Message';
+    case 'assigned': return 'Assigned';
+    case 'unassigned': return 'Unassigned';
+    case 'ignored': return 'Ignored';
+    default: return filter;
+  }
+}
+
+const REVIEW_REASON_LABELS = {
+  ambiguous_match: 'Multiple active matching windows',
+  multiple_active_matching_windows: 'Multiple active matching windows',
+  malformed_payment_message: 'Malformed payment message',
+  unsupported_payment_format: 'Unsupported payment format',
+  missing_amount: 'Missing amount',
+  missing_payment_name: 'Missing payment name',
+  non_payment_message: 'Non-payment Telegram message',
+  cashout_message: 'Cashout message detected',
+  duplicate_payment: 'Duplicate payment',
+  parser_exception: 'Parser exception',
+  invalid_payment_app: 'Invalid payment app',
+  staff_review_requested: 'Staff review requested'
+};
+
+export function reviewReasonLabel(reason) {
+  if (!reason) return 'Needs staff review';
+  return REVIEW_REASON_LABELS[reason] || String(reason).replace(/_/g, ' ');
 }
 
 export function paymentStatusDetailCopy(payment = {}) {

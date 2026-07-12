@@ -18,6 +18,7 @@ import {
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
 import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY, computePaymentFreezeAt, ROUTING_STATUS, ROUTING_REASON, UNMATCHED_REASON, ROUTING_OWNER } from '../payments/constants.js';
+import { manualReviewReasonLabel, normalizeManualReviewReason } from '../payments/messageClassifier.js';
 import {
   CONVERSATION_STATUSES,
   DEFAULT_AUTOMATION_RULES,
@@ -2249,7 +2250,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getUserProfile(id);
   }
 
-  function buildPaymentEventsQuery({ status = 'All', routingStatus = 'All', matchingStatus = 'All', query = '', exceptionsOnly = false } = {}) {
+  function buildPaymentEventsQuery({
+    status = 'All',
+    routingStatus = 'All',
+    matchingStatus = 'All',
+    query = '',
+    exceptionsOnly = false,
+    queue = 'payments',
+    reviewFilter = 'All'
+  } = {}) {
     const where = [];
     if (status && status !== 'All') where.push('processing_status = @status');
 
@@ -2257,37 +2266,105 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ? matchingStatus
       : (routingStatus && routingStatus !== 'All' ? routingStatus : 'All');
 
-    if (matchingFilter && matchingFilter !== 'All') {
-      if (matchingFilter === 'searching' || matchingFilter === 'Waiting') {
-        where.push("routing_status IN ('searching', 'unrouted')");
-      } else if (matchingFilter === 'matched' || matchingFilter === 'Matched') {
-        where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned', 'deposit_window_matched', 'registered_player_deposit')");
-        where.push("LOWER(COALESCE(processing_status, '')) != 'completed'");
-      } else if (matchingFilter === 'completed' || matchingFilter === 'Completed') {
-        where.push("LOWER(COALESCE(processing_status, '')) = 'completed'");
-      } else if (matchingFilter === 'frozen' || matchingFilter === 'Frozen') {
+    const paymentsQueueClause = `(
+      routing_status IN ('searching', 'unrouted', 'frozen')
+      OR routing_status IN (
+        'registration_payment_matched', 'appbeg_owned',
+        'deposit_window_matched', 'registered_player_deposit'
+      )
+      OR (
+        routing_status IN ('manual_review', 'untouched_unmatched')
+        AND (
+          unmatched_reason IS NULL
+          OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')
+        )
+      )
+    )`;
+
+    const manualReviewUnresolvedClause = `(
+      (
+        routing_status = 'manual_review'
+        AND unmatched_reason IS NOT NULL
+        AND unmatched_reason NOT IN (
+          'no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch',
+          'non_payment_message', 'cashout_message'
+        )
+      )
+      OR (
+        routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+        AND (
+          unmatched_reason IS NULL
+          OR unmatched_reason NOT IN ('non_payment_message', 'cashout_message')
+        )
+      )
+    )`;
+
+    if (queue === 'manual_review') {
+      if (reviewFilter === 'ignored' || matchingFilter === 'ignored') {
+        where.push("routing_status IN ('ignored', 'duplicate_ignored')");
+      } else if (reviewFilter === 'assigned') {
+        where.push(manualReviewUnresolvedClause);
+        where.push("handled_by IS NOT NULL AND handled_by != '' AND handled_by != 'AppBegBot'");
+      } else if (reviewFilter === 'unassigned') {
+        where.push(manualReviewUnresolvedClause);
+        where.push("(handled_by IS NULL OR handled_by = '' OR handled_by = 'AppBegBot')");
+      } else if (reviewFilter === 'ambiguous' || matchingFilter === 'ambiguous') {
+        where.push("(routing_status = 'manual_review' AND unmatched_reason IN ('ambiguous_match', 'multiple_active_matching_windows'))");
+      } else if (reviewFilter === 'parse_failure') {
         where.push(`(
-          routing_status = 'frozen'
-          OR (
-            routing_status IN ('manual_review', 'untouched_unmatched')
-            AND (
-              unmatched_reason IS NULL
-              OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')
-            )
+          routing_status IN ('parse_failed', 'route_failed')
+          OR unmatched_reason IN (
+            'malformed_payment_message', 'unsupported_payment_format',
+            'parser_exception', 'invalid_payment_app'
           )
         )`);
-      } else if (matchingFilter === 'manual_review' || matchingFilter === 'Manual Review') {
-        where.push(`(
-          (routing_status = 'manual_review' AND unmatched_reason = 'ambiguous_match')
-          OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit', 'ignored', 'duplicate_ignored')
-        )`);
-      } else if (matchingFilter === 'registration_payment_matched') {
-        where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned')");
+      } else if (reviewFilter === 'missing_data') {
+        where.push("unmatched_reason IN ('missing_amount', 'missing_payment_name')");
+      } else if (reviewFilter === 'non_payment') {
+        where.push("unmatched_reason = 'non_payment_message'");
+      } else if (reviewFilter === 'cashout') {
+        where.push("unmatched_reason = 'cashout_message'");
       } else {
-        where.push('routing_status = @routingStatus');
+        // All unresolved manual review (exclude ignored by default)
+        where.push(manualReviewUnresolvedClause);
+      }
+    } else {
+      // Payments operational queue — never include manual_review exceptions / ignored / parse failures
+      if (matchingFilter && matchingFilter !== 'All') {
+        if (matchingFilter === 'searching' || matchingFilter === 'Waiting') {
+          where.push("routing_status IN ('searching', 'unrouted')");
+        } else if (matchingFilter === 'matched' || matchingFilter === 'Matched') {
+          where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned', 'deposit_window_matched', 'registered_player_deposit')");
+          where.push("LOWER(COALESCE(processing_status, '')) != 'completed'");
+        } else if (matchingFilter === 'completed' || matchingFilter === 'Completed') {
+          where.push("LOWER(COALESCE(processing_status, '')) = 'completed'");
+          where.push(paymentsQueueClause);
+        } else if (matchingFilter === 'frozen' || matchingFilter === 'Frozen') {
+          where.push(`(
+            routing_status = 'frozen'
+            OR (
+              routing_status IN ('manual_review', 'untouched_unmatched')
+              AND (
+                unmatched_reason IS NULL
+                OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')
+              )
+            )
+          )`);
+        } else if (matchingFilter === 'manual_review' || matchingFilter === 'Manual Review') {
+          // Legacy clients: redirect to empty payments result (MR lives on dedicated panel)
+          where.push('1 = 0');
+        } else if (matchingFilter === 'registration_payment_matched') {
+          where.push("routing_status IN ('registration_payment_matched', 'appbeg_owned')");
+        } else {
+          where.push('routing_status = @routingStatus');
+          where.push(paymentsQueueClause);
+        }
+      } else {
+        where.push(paymentsQueueClause);
       }
     }
-    if (exceptionsOnly) {
+
+    if (exceptionsOnly && queue !== 'manual_review') {
       where.push(`routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen')`);
     }
     if (String(query || '').trim()) {
@@ -2299,7 +2376,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         lower(COALESCE(parsed_payment_app, '')) LIKE @query OR
         lower(COALESCE(parsed_sender_name, '')) LIKE @query OR
         lower(COALESCE(CAST(routing_reason AS TEXT), '')) LIKE @query OR
-        CAST(telegram_message_id AS TEXT) LIKE @query
+        lower(COALESCE(unmatched_reason, '')) LIKE @query OR
+        lower(COALESCE(handled_by, '')) LIKE @query OR
+        lower(COALESCE(routing_owner, '')) LIKE @query OR
+        CAST(telegram_message_id AS TEXT) LIKE @query OR
+        CAST(parsed_amount AS TEXT) LIKE @query
       )`);
     }
     const querySql = `
@@ -2318,7 +2399,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     routingStatus = 'All',
     matchingStatus = 'All',
     query = '',
-    exceptionsOnly = false
+    exceptionsOnly = false,
+    queue = 'payments',
+    reviewFilter = 'All'
   } = {}) {
     const params = {
       limit: Math.min(Math.max(Number(limit) || 200, 1), 1000),
@@ -2331,7 +2414,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       routingStatus,
       matchingStatus,
       query,
-      exceptionsOnly
+      exceptionsOnly,
+      queue,
+      reviewFilter
     });
     console.log('[payments-api] listPaymentEvents', JSON.stringify({
       where,
@@ -2340,6 +2425,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       status: params.status,
       routingStatus: params.routingStatus,
       matchingStatus,
+      queue,
+      reviewFilter,
       exceptionsOnly: Boolean(exceptionsOnly),
       query: String(query || '').trim() || null
     }));
@@ -2374,7 +2461,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       if (tb !== ta) return tb - ta;
       return Number(b.id) - Number(a.id);
     });
-    console.log(`[payments-api] payment_visible_in_ui count=${payments.length}`);
+    console.log(`[payments-api] payment_visible_in_ui count=${payments.length} queue=${queue}`);
     return payments;
   }
 
@@ -2397,10 +2484,41 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function getPaymentStats() {
     const today = new Date().toISOString().slice(0, 10);
     const messageDay = sql.datePrefixExpr('message_date');
+    const paymentsQueue = `(
+      routing_status IN ('searching', 'unrouted', 'frozen')
+      OR routing_status IN (
+        'registration_payment_matched', 'appbeg_owned',
+        'deposit_window_matched', 'registered_player_deposit'
+      )
+      OR (
+        routing_status IN ('manual_review', 'untouched_unmatched')
+        AND (
+          unmatched_reason IS NULL
+          OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')
+        )
+      )
+    )`;
+    const manualReviewUnresolved = `(
+      (
+        routing_status = 'manual_review'
+        AND unmatched_reason IS NOT NULL
+        AND unmatched_reason NOT IN (
+          'no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch',
+          'non_payment_message', 'cashout_message'
+        )
+      )
+      OR (
+        routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+        AND (
+          unmatched_reason IS NULL
+          OR unmatched_reason NOT IN ('non_payment_message', 'cashout_message')
+        )
+      )
+    )`;
     try {
       const row = await db.prepare(`
       SELECT
-        SUM(CASE WHEN ${messageDay} = @today THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
+        SUM(CASE WHEN ${messageDay} = @today AND ${paymentsQueue} THEN 1 ELSE 0 END) AS ${sql.quoteAlias('messagesToday')},
         SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched', 'registration_payment_matched', 'appbeg_owned')
           AND LOWER(COALESCE(processing_status, '')) != 'completed'
           THEN 1 ELSE 0 END) AS ${sql.quoteAlias('matched')},
@@ -2408,20 +2526,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
         SUM(CASE WHEN routing_status IN ('searching', 'unrouted') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
         SUM(CASE WHEN routing_status = 'frozen'
-          OR (routing_status IN ('untouched_unmatched', 'manual_review') AND (unmatched_reason IS NULL OR unmatched_reason != 'ambiguous_match'))
+          OR (routing_status IN ('untouched_unmatched', 'manual_review') AND (unmatched_reason IS NULL OR unmatched_reason IN ('no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch')))
           THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozen')},
-        SUM(CASE WHEN (routing_status = 'manual_review' AND unmatched_reason = 'ambiguous_match')
-          OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
-          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
-        SUM(CASE WHEN LOWER(COALESCE(processing_status, '')) = 'completed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('completed')},
+        SUM(CASE WHEN ${manualReviewUnresolved} THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
+        SUM(CASE WHEN LOWER(COALESCE(processing_status, '')) = 'completed' AND ${paymentsQueue} THEN 1 ELSE 0 END) AS ${sql.quoteAlias('completed')},
         SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
         SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
         SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailed')},
         SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')},
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
+        SUM(CASE WHEN ${manualReviewUnresolved} THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('appbegOwned')},
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('failed')},
-        COUNT(*) AS ${sql.quoteAlias('totalMessages')}
+        SUM(CASE WHEN ${paymentsQueue} THEN 1 ELSE 0 END) AS ${sql.quoteAlias('totalMessages')}
       FROM payment_events
     `).get({ today });
       return normalizeAggregateStats(row, [
@@ -2454,17 +2570,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         SUM(CASE WHEN routing_status IN ('registered_player_deposit', 'deposit_window_matched') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registeredPlayerDeposits')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('registrationMatched')},
         SUM(CASE WHEN routing_status IN ('searching', 'unrouted') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('waiting')},
-        SUM(CASE WHEN routing_status IN ('frozen', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozen')},
-        SUM(CASE WHEN routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
+        SUM(CASE WHEN routing_status IN ('frozen', 'untouched_unmatched') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozen')},
+        SUM(CASE WHEN routing_status IN ('parse_failed', 'route_failed', 'expired_deposit', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('manualReview')},
         SUM(CASE WHEN LOWER(COALESCE(processing_status, '')) = 'completed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('completed')},
         SUM(CASE WHEN routing_status IN ('untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('frozenManualReview')},
         SUM(CASE WHEN routing_status = 'expired_deposit' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('expiredWindowMatch')},
         SUM(CASE WHEN routing_status = 'parse_failed' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailed')},
         SUM(CASE WHEN routing_status = 'ignored' THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')},
-        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review', 'frozen') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
+        SUM(CASE WHEN routing_status IN ('expired_deposit', 'parse_failed', 'route_failed', 'untouched_unmatched', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('exceptions')},
         SUM(CASE WHEN routing_status IN ('registration_payment_matched', 'appbeg_owned') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('appbegOwned')},
         SUM(CASE WHEN processing_status = 'Failed' OR routing_status IN ('parse_failed', 'route_failed', 'expired_deposit') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('failed')},
-        COUNT(*) AS ${sql.quoteAlias('totalMessages')}
+        SUM(CASE WHEN routing_status NOT IN ('parse_failed', 'route_failed', 'expired_deposit', 'ignored', 'duplicate_ignored', 'manual_review') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('totalMessages')}
       FROM payment_events
     `).get({ today });
       return normalizeAggregateStats(row, [
@@ -2486,6 +2602,79 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         'totalMessages'
       ]);
     }
+  }
+
+  async function getManualReviewStats() {
+    const row = await db.prepare(`
+      SELECT
+        SUM(CASE WHEN (
+          (routing_status = 'manual_review'
+            AND unmatched_reason IS NOT NULL
+            AND unmatched_reason NOT IN (
+              'no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch',
+              'non_payment_message', 'cashout_message'
+            ))
+          OR (
+            routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+            AND (
+              unmatched_reason IS NULL
+              OR unmatched_reason NOT IN ('non_payment_message', 'cashout_message')
+            )
+          )
+        ) THEN 1 ELSE 0 END) AS ${sql.quoteAlias('unresolved')},
+        SUM(CASE WHEN routing_status = 'manual_review'
+          AND unmatched_reason IN ('ambiguous_match', 'multiple_active_matching_windows')
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ambiguous')},
+        SUM(CASE WHEN routing_status IN ('parse_failed', 'route_failed')
+          OR unmatched_reason IN ('malformed_payment_message', 'unsupported_payment_format', 'parser_exception', 'invalid_payment_app')
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('parseFailures')},
+        SUM(CASE WHEN unmatched_reason IN ('non_payment_message', 'cashout_message', 'unsupported_payment_format')
+          AND routing_status NOT IN ('ignored', 'duplicate_ignored')
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('nonPaymentUnsupported')},
+        SUM(CASE WHEN (
+          (routing_status = 'manual_review'
+            AND unmatched_reason IS NOT NULL
+            AND unmatched_reason NOT IN (
+              'no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch',
+              'non_payment_message', 'cashout_message'
+            ))
+          OR (
+            routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+            AND (
+              unmatched_reason IS NULL
+              OR unmatched_reason NOT IN ('non_payment_message', 'cashout_message')
+            )
+          )
+        ) AND handled_by IS NOT NULL AND handled_by != '' AND handled_by != 'AppBegBot'
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('assigned')},
+        SUM(CASE WHEN (
+          (routing_status = 'manual_review'
+            AND unmatched_reason IS NOT NULL
+            AND unmatched_reason NOT IN (
+              'no_active_window', 'window_expired', 'amount_mismatch', 'name_mismatch',
+              'non_payment_message', 'cashout_message'
+            ))
+          OR (
+            routing_status IN ('parse_failed', 'route_failed', 'expired_deposit')
+            AND (
+              unmatched_reason IS NULL
+              OR unmatched_reason NOT IN ('non_payment_message', 'cashout_message')
+            )
+          )
+        ) AND (handled_by IS NULL OR handled_by = '' OR handled_by = 'AppBegBot')
+          THEN 1 ELSE 0 END) AS ${sql.quoteAlias('unassigned')},
+        SUM(CASE WHEN routing_status IN ('ignored', 'duplicate_ignored') THEN 1 ELSE 0 END) AS ${sql.quoteAlias('ignored')}
+      FROM payment_events
+    `).get();
+    return normalizeAggregateStats(row, [
+      'unresolved',
+      'ambiguous',
+      'parseFailures',
+      'nonPaymentUnsupported',
+      'assigned',
+      'unassigned',
+      'ignored'
+    ]);
   }
 
   async function listUnroutedPaymentEvents(limit = 50) {
@@ -2745,14 +2934,58 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getPaymentEvent(paymentEventId);
   }
 
-  async function markPaymentIgnored(paymentEventId, { staffName = 'Staff' } = {}) {
+  async function markPaymentIgnored(paymentEventId, { staffName = 'Staff', unmatchedReason = null } = {}) {
+    const current = await getPaymentEvent(paymentEventId);
+    if (!current) throw new Error('Payment event not found.');
+    if (current.routing_status === 'ignored' || current.routing_status === 'duplicate_ignored') {
+      await logPaymentRouting(paymentEventId, 'ignored_idempotent', 'Ignore requested but payment already ignored.', { staffName });
+      return current;
+    }
     await updatePaymentRouting(paymentEventId, {
       routing_status: 'ignored',
       routing_owner: 'appbeg',
       routed_at: new Date().toISOString(),
+      handled_by: staffName,
+      unmatched_reason: unmatchedReason || current.unmatched_reason || 'non_payment_message'
+    });
+    await logPaymentRouting(paymentEventId, 'ignored', 'Payment message marked ignored by staff.', {
+      staffName,
+      unmatchedReason: unmatchedReason || current.unmatched_reason || 'non_payment_message'
+    });
+    return await getPaymentEvent(paymentEventId);
+  }
+
+  async function markPaymentFrozenByStaff(paymentEventId, { staffName = 'Staff', unmatchedReason = 'no_active_window' } = {}) {
+    const current = await getPaymentEvent(paymentEventId);
+    if (!current) throw new Error('Payment event not found.');
+    if (current.routing_status === 'frozen') {
+      await logPaymentRouting(paymentEventId, 'freeze_idempotent', 'Freeze requested but payment already frozen.', { staffName });
+      return current;
+    }
+    const now = nowIso();
+    await updatePaymentRouting(paymentEventId, {
+      routing_status: 'frozen',
+      routing_owner: 'appbeg',
+      routing_reason: 'Frozen by staff',
+      routed_at: now,
+      frozen_at: now,
+      handled_by: staffName,
+      unmatched_reason: unmatchedReason || current.unmatched_reason || 'no_active_window'
+    });
+    await logPaymentRouting(paymentEventId, 'payment_frozen_staff', 'Payment frozen by staff from Manual Review.', {
+      staffName,
+      unmatchedReason: unmatchedReason || current.unmatched_reason || 'no_active_window'
+    });
+    return await getPaymentEvent(paymentEventId);
+  }
+
+  async function assignManualReviewOwner(paymentEventId, { staffName = 'Staff' } = {}) {
+    const current = await getPaymentEvent(paymentEventId);
+    if (!current) throw new Error('Payment event not found.');
+    await updatePaymentRouting(paymentEventId, {
       handled_by: staffName
     });
-    await logPaymentRouting(paymentEventId, 'ignored', 'Payment message marked ignored by staff.', { staffName });
+    await logPaymentRouting(paymentEventId, 'manual_review_assigned', 'Manual review assigned to staff.', { staffName });
     return await getPaymentEvent(paymentEventId);
   }
 
@@ -4286,6 +4519,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getPaymentEvent,
     getPaymentEventByTelegramMessageId,
     getPaymentStats,
+    getManualReviewStats,
     listUnroutedPaymentEvents,
     listSearchingOrUnroutedPaymentEvents,
     ensurePaymentIdempotencyKey,
@@ -4293,6 +4527,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     updatePaymentRouting,
     resetPaymentRoutingForReprocess,
     markPaymentIgnored,
+    markPaymentFrozenByStaff,
+    assignManualReviewOwner,
     manuallyLinkPaymentEvent,
     logPaymentRouting,
     backfillMissingPaymentFreezeAt,
@@ -4472,7 +4708,13 @@ function hydratePaymentEvent(event) {
     matched_at: matchedAt || null,
     raw_payload
   };
-  return enrichPaymentQueueFields(base);
+  const enriched = enrichPaymentQueueFields(base);
+  const reviewReason = normalizeManualReviewReason(unmatchedReason, enriched.routing_status);
+  return {
+    ...enriched,
+    review_reason: reviewReason,
+    review_reason_label: manualReviewReasonLabel(reviewReason)
+  };
 }
 
 function hydrateDepositEvent(event) {

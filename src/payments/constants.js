@@ -25,7 +25,8 @@ export const MATCHING_STATUS = {
   MATCHED: 'matched',
   COMPLETED: 'completed',
   FROZEN: 'frozen',
-  MANUAL_REVIEW: 'manual_review'
+  MANUAL_REVIEW: 'manual_review',
+  IGNORED: 'ignored'
 };
 
 /** Default queue sort: Waiting → Manual Review → Frozen → Matched → Completed. */
@@ -34,7 +35,8 @@ export const MATCHING_STATUS_SORT_PRIORITY = {
   [MATCHING_STATUS.MANUAL_REVIEW]: 2,
   [MATCHING_STATUS.FROZEN]: 3,
   [MATCHING_STATUS.MATCHED]: 4,
-  [MATCHING_STATUS.COMPLETED]: 5
+  [MATCHING_STATUS.COMPLETED]: 5,
+  [MATCHING_STATUS.IGNORED]: 6
 };
 
 export const ROUTING_REASON = {
@@ -57,8 +59,42 @@ export const UNMATCHED_REASON = {
   AMOUNT_MISMATCH: 'amount_mismatch',
   NAME_MISMATCH: 'name_mismatch',
   AMBIGUOUS_MATCH: 'ambiguous_match',
-  UNSUPPORTED_PAYMENT_METHOD: 'unsupported_payment_method'
+  UNSUPPORTED_PAYMENT_METHOD: 'unsupported_payment_method',
+  MALFORMED_PAYMENT_MESSAGE: 'malformed_payment_message',
+  UNSUPPORTED_PAYMENT_FORMAT: 'unsupported_payment_format',
+  MISSING_AMOUNT: 'missing_amount',
+  MISSING_PAYMENT_NAME: 'missing_payment_name',
+  NON_PAYMENT_MESSAGE: 'non_payment_message',
+  CASHOUT_MESSAGE: 'cashout_message',
+  DUPLICATE_PAYMENT: 'duplicate_payment',
+  PARSER_EXCEPTION: 'parser_exception',
+  INVALID_PAYMENT_APP: 'invalid_payment_app',
+  STAFF_REVIEW_REQUESTED: 'staff_review_requested'
 };
+
+/** Reasons that belong on the Manual Review panel (not Payments). */
+export const MANUAL_REVIEW_UNMATCHED_REASONS = [
+  UNMATCHED_REASON.AMBIGUOUS_MATCH,
+  UNMATCHED_REASON.MALFORMED_PAYMENT_MESSAGE,
+  UNMATCHED_REASON.UNSUPPORTED_PAYMENT_FORMAT,
+  UNMATCHED_REASON.MISSING_AMOUNT,
+  UNMATCHED_REASON.MISSING_PAYMENT_NAME,
+  UNMATCHED_REASON.NON_PAYMENT_MESSAGE,
+  UNMATCHED_REASON.CASHOUT_MESSAGE,
+  UNMATCHED_REASON.DUPLICATE_PAYMENT,
+  UNMATCHED_REASON.PARSER_EXCEPTION,
+  UNMATCHED_REASON.INVALID_PAYMENT_APP,
+  UNMATCHED_REASON.STAFF_REVIEW_REQUESTED,
+  UNMATCHED_REASON.UNSUPPORTED_PAYMENT_METHOD
+];
+
+/** Frozen-style unmatched reasons that stay on Payments as Frozen. */
+export const FROZEN_UNMATCHED_REASONS = [
+  UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+  UNMATCHED_REASON.WINDOW_EXPIRED,
+  UNMATCHED_REASON.AMOUNT_MISMATCH,
+  UNMATCHED_REASON.NAME_MISMATCH
+];
 
 export const ROUTING_OWNER = {
   APPBEG: 'appbeg',
@@ -158,7 +194,7 @@ export function remainingSecondsUntil(freezeAt, now = new Date()) {
 
 /**
  * Derive staff-facing matching_status from internal routing fields.
- * Possible values: searching | matched | completed | frozen | manual_review
+ * Possible values: searching | matched | completed | frozen | manual_review | ignored
  */
 export function deriveMatchingStatus(payment = {}, now = new Date()) {
   const routing = payment.routing_status;
@@ -166,6 +202,10 @@ export function deriveMatchingStatus(payment = {}, now = new Date()) {
   const processing = String(payment.processing_status || '').toLowerCase();
 
   if (processing === 'completed') return MATCHING_STATUS.COMPLETED;
+
+  if (routing === ROUTING_STATUS.IGNORED || routing === ROUTING_STATUS.DUPLICATE_IGNORED) {
+    return MATCHING_STATUS.IGNORED;
+  }
 
   if (routing === ROUTING_STATUS.SEARCHING || routing === ROUTING_STATUS.UNROUTED) {
     const remaining = remainingSecondsUntil(payment.freeze_at, now);
@@ -175,18 +215,17 @@ export function deriveMatchingStatus(payment = {}, now = new Date()) {
 
   if (routing === ROUTING_STATUS.FROZEN) return MATCHING_STATUS.FROZEN;
 
+  if (routing === ROUTING_STATUS.PARSE_FAILED
+    || routing === ROUTING_STATUS.ROUTE_FAILED
+    || routing === ROUTING_STATUS.EXPIRED_DEPOSIT) {
+    return MATCHING_STATUS.MANUAL_REVIEW;
+  }
+
   if (routing === ROUTING_STATUS.MANUAL_REVIEW || routing === ROUTING_STATUS.UNTOUCHED_UNMATCHED) {
     if (unmatched === UNMATCHED_REASON.AMBIGUOUS_MATCH) return MATCHING_STATUS.MANUAL_REVIEW;
-    if (
-      unmatched === UNMATCHED_REASON.NO_ACTIVE_WINDOW
-      || unmatched === UNMATCHED_REASON.WINDOW_EXPIRED
-      || unmatched === UNMATCHED_REASON.AMOUNT_MISMATCH
-      || unmatched === UNMATCHED_REASON.NAME_MISMATCH
-    ) {
-      return MATCHING_STATUS.FROZEN;
-    }
-    // Legacy frozen/manual_review without reason → treat as frozen (search timed out).
+    if (FROZEN_UNMATCHED_REASONS.includes(unmatched)) return MATCHING_STATUS.FROZEN;
     if (!unmatched) return MATCHING_STATUS.FROZEN;
+    if (MANUAL_REVIEW_UNMATCHED_REASONS.includes(unmatched)) return MATCHING_STATUS.MANUAL_REVIEW;
     return MATCHING_STATUS.MANUAL_REVIEW;
   }
 
@@ -197,16 +236,6 @@ export function deriveMatchingStatus(payment = {}, now = new Date()) {
     || routing === ROUTING_STATUS.APPBEG_OWNED
   ) {
     return MATCHING_STATUS.MATCHED;
-  }
-
-  if (
-    routing === ROUTING_STATUS.PARSE_FAILED
-    || routing === ROUTING_STATUS.ROUTE_FAILED
-    || routing === ROUTING_STATUS.EXPIRED_DEPOSIT
-    || routing === ROUTING_STATUS.IGNORED
-    || routing === ROUTING_STATUS.DUPLICATE_IGNORED
-  ) {
-    return MATCHING_STATUS.MANUAL_REVIEW;
   }
 
   return MATCHING_STATUS.MANUAL_REVIEW;
@@ -247,6 +276,7 @@ export function matchingStatusLabel(matchingStatus) {
     case MATCHING_STATUS.COMPLETED: return 'Completed';
     case MATCHING_STATUS.FROZEN: return 'Frozen';
     case MATCHING_STATUS.MANUAL_REVIEW: return 'Manual Review';
+    case MATCHING_STATUS.IGNORED: return 'Ignored';
     default: return matchingStatus || 'Waiting';
   }
 }
@@ -258,6 +288,7 @@ export function matchingStatusEmoji(matchingStatus) {
     case MATCHING_STATUS.COMPLETED: return '🔵';
     case MATCHING_STATUS.FROZEN: return '🔴';
     case MATCHING_STATUS.MANUAL_REVIEW: return '🟠';
+    case MATCHING_STATUS.IGNORED: return '⚪';
     default: return '🟡';
   }
 }
@@ -318,9 +349,8 @@ export function paymentRoutingLabel(routingStatus) {
     case ROUTING_STATUS.PARSE_FAILED:
       return 'Manual Review';
     case ROUTING_STATUS.IGNORED:
-      return 'Manual Review';
     case ROUTING_STATUS.DUPLICATE_IGNORED:
-      return 'Manual Review';
+      return 'Ignored';
     case ROUTING_STATUS.UNROUTED:
       return 'Waiting';
     default:

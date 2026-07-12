@@ -13,9 +13,11 @@ import {
 } from './contactOverview.js';
 import {
   PAYMENT_STATUS_FILTERS,
+  MANUAL_REVIEW_FILTERS,
   deriveMatchingStatus,
   matchingStatusLabel,
   matchingStatusFilterLabel,
+  manualReviewFilterLabel,
   matchingStatusEmoji,
   paymentStatusDetailCopy,
   renderPaymentStatusCell,
@@ -23,7 +25,8 @@ import {
   formatFreezeCountdown,
   sortPaymentsByStatus,
   MATCHING_STATUS,
-  resolvePaymentFreezeAt
+  resolvePaymentFreezeAt,
+  reviewReasonLabel
 } from './paymentStatus.js';
 
 const app = document.querySelector('#app');
@@ -32,6 +35,7 @@ const socket = io({ withCredentials: true });
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
 const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
 const paymentStatusFilters = PAYMENT_STATUS_FILTERS;
+const manualReviewFilters = MANUAL_REVIEW_FILTERS;
 
 let state = {
   section: 'contacts',
@@ -53,6 +57,12 @@ let state = {
   paymentQuery: '',
   paymentStatusFilter: 'All',
   paymentExceptionsOnly: false,
+  manualReviewItems: [],
+  manualReviewStats: {},
+  selectedManualReviewId: null,
+  manualReviewQuery: '',
+  manualReviewFilter: 'All',
+  mobileManualReviewPane: 'list',
   selectedContactId: null,
   contact: null,
   contactLoading: false,
@@ -1239,28 +1249,64 @@ function normalizePaymentStats(stats = {}) {
 
 async function refreshPayments({ keepSelection = true } = {}) {
   const query = new URLSearchParams({
+    queue: 'payments',
     matchingStatus: state.paymentStatusFilter,
-    exceptionsOnly: state.paymentExceptionsOnly ? 'true' : 'false',
     query: state.paymentQuery,
     limit: '500'
   });
-  const [paymentsPayload, statsPayload, syncPayload] = await Promise.all([
+  const [paymentsPayload, statsPayload, syncPayload, reviewStatsPayload] = await Promise.all([
     api(`/api/payments?${query}`),
     api('/api/payment-stats'),
-    api('/api/payment-sync/status')
+    api('/api/payment-sync/status'),
+    api('/api/manual-review/stats')
   ]);
   const payments = Array.isArray(paymentsPayload?.payments) ? paymentsPayload.payments : [];
   state.payments = sortPaymentsByStatus(payments);
   state.paymentStats = normalizePaymentStats(statsPayload?.stats || {});
   state.paymentSync = syncPayload?.sync || {};
+  state.manualReviewStats = normalizeManualReviewStats(reviewStatsPayload?.stats || {});
   console.log(`[payments-ui] loaded ${payments.length} payments`, {
     matchingStatus: state.paymentStatusFilter,
-    exceptionsOnly: state.paymentExceptionsOnly,
     totalMessages: state.paymentStats.totalMessages
   });
   if (!keepSelection || !state.selectedPaymentId || !payments.some((payment) => Number(payment.id) === Number(state.selectedPaymentId))) {
     state.selectedPaymentId = payments[0]?.id || null;
   }
+}
+
+async function refreshManualReview({ keepSelection = true } = {}) {
+  const query = new URLSearchParams({
+    reviewFilter: state.manualReviewFilter,
+    query: state.manualReviewQuery,
+    limit: '500'
+  });
+  const data = await api(`/api/manual-review?${query}`);
+  const payments = Array.isArray(data?.payments) ? data.payments : [];
+  state.manualReviewItems = payments;
+  state.manualReviewStats = normalizeManualReviewStats(data?.stats || {});
+  if (!keepSelection || !state.selectedManualReviewId
+    || !payments.some((payment) => Number(payment.id) === Number(state.selectedManualReviewId))) {
+    state.selectedManualReviewId = payments[0]?.id || null;
+  }
+  if (state.selectedManualReviewId) {
+    state.selectedPaymentId = state.selectedManualReviewId;
+    await refreshSelectedPayment();
+  } else {
+    state.payment = null;
+    state.paymentRoutingLogs = [];
+  }
+}
+
+function normalizeManualReviewStats(stats = {}) {
+  return {
+    unresolved: Number(stats.unresolved ?? 0) || 0,
+    ambiguous: Number(stats.ambiguous ?? 0) || 0,
+    parseFailures: Number(stats.parseFailures ?? stats.parsefailures ?? 0) || 0,
+    nonPaymentUnsupported: Number(stats.nonPaymentUnsupported ?? stats.nonpaymentunsupported ?? 0) || 0,
+    assigned: Number(stats.assigned ?? 0) || 0,
+    unassigned: Number(stats.unassigned ?? 0) || 0,
+    ignored: Number(stats.ignored ?? 0) || 0
+  };
 }
 
 async function refreshSelectedPayment() {
@@ -1399,9 +1445,9 @@ function syncStatus() {
 
 function filterButtons(items, active, attr) {
   return items.map((item) => {
-    const label = attr === 'payment-status'
-      ? matchingStatusFilterLabel(item)
-      : item;
+    let label = item;
+    if (attr === 'payment-status') label = matchingStatusFilterLabel(item);
+    if (attr === 'manual-review-filter') label = manualReviewFilterLabel(item);
     return `
     <button class="filter-chip ${active === item ? 'active' : ''}" data-${attr}="${item}">${escapeHtml(label)}</button>
   `;
@@ -1976,13 +2022,28 @@ function automationLogItems() {
 
 function paymentStatCards() {
   const cards = [
-    ['Messages Today', state.paymentStats.messagesToday || 0],
     ['Waiting', state.paymentStats.waiting || 0],
     ['Matched', state.paymentStats.matched || 0],
     ['Completed', state.paymentStats.completed || 0],
-    ['Frozen', state.paymentStats.frozen || 0],
-    ['Manual Review', state.paymentStats.manualReview || 0],
-    ['Total', state.paymentStats.totalMessages || 0]
+    ['Frozen', state.paymentStats.frozen || 0]
+  ];
+  return cards.map(([label, value]) => `
+    <article class="stat-card">
+      <div class="stat-number">${value}</div>
+      <div class="stat-name">${label}</div>
+    </article>
+  `).join('');
+}
+
+function manualReviewStatCards() {
+  const stats = state.manualReviewStats || {};
+  const cards = [
+    ['Unresolved', stats.unresolved || 0],
+    ['Ambiguous', stats.ambiguous || 0],
+    ['Parse Failures', stats.parseFailures || 0],
+    ['Non-Payment', stats.nonPaymentUnsupported || 0],
+    ['Assigned', stats.assigned || 0],
+    ['Unassigned', stats.unassigned || 0]
   ];
   return cards.map(([label, value]) => `
     <article class="stat-card">
@@ -2271,10 +2332,6 @@ function paymentsWorkspace() {
           <div class="payments-toolbar">
             <input id="paymentSearchInput" class="search" value="${escapeHtml(state.paymentQuery)}" placeholder="Search sender, preview, message ID" />
             <div class="filter-row">${filterButtons(paymentStatusFilters, state.paymentStatusFilter, 'payment-status')}</div>
-            <label class="checkbox-inline">
-              <input id="paymentExceptionsOnly" type="checkbox" ${state.paymentExceptionsOnly ? 'checked' : ''} />
-              Exceptions &amp; frozen only
-            </label>
           </div>
           <div class="payment-hscroll-top" id="paymentHScrollTop" hidden aria-hidden="true">
             <div class="payment-hscroll-spacer" id="paymentHScrollSpacer"></div>
@@ -2302,6 +2359,158 @@ function paymentsWorkspace() {
         </div>
       </section>
     </main>
+  `;
+}
+
+function manualReviewRows() {
+  if (!state.manualReviewItems.length) {
+    return '<div class="empty-state">No manual review items match the current filters.</div>';
+  }
+  return state.manualReviewItems.map((payment) => {
+    const reason = payment.review_reason_label || reviewReasonLabel(payment.unmatched_reason || payment.review_reason);
+    const status = deriveMatchingStatus(payment);
+    return `
+    <button class="payment-row manual-review-row ${Number(state.selectedManualReviewId) === Number(payment.id) ? 'selected' : ''}" data-manual-review-id="${payment.id}">
+      <span>${fmtDateTime(payment.message_date)}</span>
+      <span class="truncate">${escapeHtml(payment.sender_name || payment.sender_username || 'Unknown')}</span>
+      <span>${payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : '—'}</span>
+      <span class="truncate">${escapeHtml(payment.parsed_payment_app || '—')}</span>
+      <span class="truncate">${escapeHtml(payment.message_text || '[non-text message]')}</span>
+      <span>${payment.telegram_message_id}</span>
+      <span class="truncate">${escapeHtml(reason)}</span>
+      <span class="truncate">${escapeHtml(payment.telegram_group_title || String(payment.telegram_group_id || '—'))}</span>
+      <span class="badge matching-${status}">${matchingStatusEmoji(status)} ${escapeHtml(matchingStatusLabel(status))}</span>
+    </button>
+  `;
+  }).join('');
+}
+
+function manualReviewWorkspace() {
+  const pane = state.mobileManualReviewPane || 'list';
+  const unresolved = Number(state.manualReviewStats?.unresolved || 0);
+  return `
+    <main class="ops-main payments-workspace manual-review-workspace mobile-pane-${escapeHtml(pane)}">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Exceptions</div>
+          <h1>Manual Review${unresolved ? ` <span class="nav-count-badge">${unresolved}</span>` : ''}</h1>
+          <div class="subtle">Ambiguous matches, malformed payments, and messages that need staff inspection.</div>
+        </div>
+        <div class="stats">${manualReviewStatCards()}</div>
+      </header>
+
+      <section class="payments-layout">
+        <section class="payments-feed">
+          <div class="payments-toolbar">
+            <input id="manualReviewSearchInput" class="search" value="${escapeHtml(state.manualReviewQuery)}" placeholder="Search sender, amount, reason, message ID, owner" />
+            <div class="filter-row">${filterButtons(manualReviewFilters, state.manualReviewFilter, 'manual-review-filter')}</div>
+          </div>
+          <div class="payment-table-scroll" id="manualReviewTableScroll">
+            <div class="payment-table-header manual-review-table-header">
+              <span>Time</span>
+              <span>Sender</span>
+              <span>Amount</span>
+              <span>Payment App</span>
+              <span>Preview</span>
+              <span>Telegram ID</span>
+              <span>Reason</span>
+              <span>Source Group</span>
+              <span>Status</span>
+            </div>
+            <div class="payment-table">${manualReviewRows()}</div>
+          </div>
+        </section>
+
+        <div class="payment-detail-wrap">
+          <div class="details-sheet-bar mobile-only">
+            <button type="button" class="icon-back" data-mobile-back="manual-review" aria-label="Back to manual review">←</button>
+            <strong>Review detail</strong>
+          </div>
+          ${manualReviewDetailPanel()}
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function manualReviewDetailPanel() {
+  const payment = state.payment;
+  if (!payment || Number(payment.id) !== Number(state.selectedManualReviewId)) {
+    return '<aside class="payment-detail"><section class="chat-empty-panel">Select a manual review item to inspect it.</section></aside>';
+  }
+  const busy = state.paymentActionBusy;
+  const reason = payment.review_reason_label || reviewReasonLabel(payment.unmatched_reason || payment.review_reason);
+  const status = deriveMatchingStatus(payment);
+  const logs = state.paymentRoutingLogs || [];
+  return `
+    <aside class="payment-detail">
+      <section class="card">
+        <div class="card-title">Manual Review</div>
+        ${infoRow('Status', `${matchingStatusEmoji(status)} ${matchingStatusLabel(status)}`)}
+        ${infoRow('Reason', reason)}
+        ${infoRow('Details', paymentStatusDetailCopy(payment))}
+        ${infoRow('Owner', payment.routing_owner || '—')}
+        ${infoRow('Handled By', payment.handled_by || 'Unassigned')}
+        ${infoRow('Sender', payment.sender_name || payment.sender_username || 'Unknown')}
+        ${infoRow('Group', payment.telegram_group_title || payment.telegram_group_id || '—')}
+        ${infoRow('Telegram Message ID', payment.telegram_message_id)}
+        ${infoRow('Received', fmtDateTime(payment.message_date))}
+        ${infoRow('Edited', payment.is_edited ? 'Yes' : 'No')}
+        <div class="status-card-actions payment-detail-actions">
+          <button type="button" class="button secondary" data-payment-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>
+          <button type="button" class="button secondary" data-payment-action="freeze" ${busy ? 'disabled' : ''}>Freeze</button>
+          <button type="button" class="button secondary" data-payment-action="ignore" ${busy ? 'disabled' : ''}>Mark Ignored</button>
+          <button type="button" class="button secondary" data-payment-action="assign-review" ${busy ? 'disabled' : ''}>Assign Owner</button>
+          ${payment.contact_id
+    ? `<button type="button" class="button secondary" data-payment-action="open-contact" data-contact-id="${payment.contact_id}">Open Contact</button>`
+    : ''}
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Full Message</div>
+        <pre class="payload-box message-box">${escapeHtml(payment.message_text || '[non-text message]')}</pre>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Parser Output</div>
+        ${infoRow('Amount', payment.parsed_amount != null ? `$${payment.parsed_amount}` : 'Not parsed')}
+        ${infoRow('Payment Name', payment.parsed_sender_name || 'Not parsed')}
+        ${infoRow('Payment App', payment.parsed_payment_app || 'Not detected')}
+        ${infoRow('Payment Tag', payment.parsed_recipient_tag || '—')}
+        ${infoRow('Parse Error', payment.parse_error || '—')}
+      </section>
+
+      <section class="card">
+        <div class="card-title">Match / Link</div>
+        <div class="payment-link-form">
+          <label class="field-label">
+            <span>Contact ID</span>
+            <input id="paymentLinkContactId" value="${escapeHtml(String(payment.contact_id || ''))}" placeholder="Ledger contact id" ${busy ? 'disabled' : ''} />
+          </label>
+          <label class="field-label">
+            <span>Payment Window ID</span>
+            <input id="paymentLinkWindowId" value="${escapeHtml(String(payment.registration_payment_window_id || ''))}" placeholder="Registration or deposit window id" ${busy ? 'disabled' : ''} />
+          </label>
+          <div class="status-card-actions payment-detail-actions">
+            <button type="button" class="button secondary" data-payment-action="link" ${busy ? 'disabled' : ''}>Match to Window</button>
+            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark AppBeg Owned</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Audit History</div>
+        ${logs.length
+    ? `<div class="timeline">${logs.map((log) => `
+          <div class="timeline-item">
+            <div class="timeline-time">${fmtDateTime(log.created_at)}</div>
+            <div><strong>${escapeHtml(log.event_type || log.action || 'event')}</strong> — ${escapeHtml(log.message || '')}</div>
+          </div>
+        `).join('')}</div>`
+    : '<div class="subtle">No routing audit entries yet.</div>'}
+      </section>
+    </aside>
   `;
 }
 
@@ -2448,6 +2657,16 @@ async function handlePaymentAction(action, button) {
         method: 'POST',
         body: JSON.stringify({ staffName: state.staffName })
       });
+    } else if (action === 'freeze') {
+      await api(`/api/payments/${paymentId}/freeze`, {
+        method: 'POST',
+        body: JSON.stringify({ staffName: state.staffName })
+      });
+    } else if (action === 'assign-review') {
+      await api(`/api/payments/${paymentId}/assign-review`, {
+        method: 'POST',
+        body: JSON.stringify({ staffName: state.staffName })
+      });
     } else if (action === 'link') {
       const contactId = Number(document.querySelector('#paymentLinkContactId')?.value || 0);
       const registrationPaymentWindowId = Number(document.querySelector('#paymentLinkWindowId')?.value || 0);
@@ -2474,8 +2693,12 @@ async function handlePaymentAction(action, button) {
         })
       });
     }
-    await refreshPayments({ keepSelection: true });
-    await refreshSelectedPayment();
+    if (state.section === 'manual-review') {
+      await refreshManualReview({ keepSelection: true });
+    } else {
+      await refreshPayments({ keepSelection: true });
+      await refreshSelectedPayment();
+    }
   } catch (error) {
     console.error('[payments] action failed:', error);
     alert(error.message || 'Payment action failed.');
@@ -2491,13 +2714,19 @@ function render() {
     { id: 'players', label: 'Players', icon: '👥' },
     { id: 'appbeg-players', label: 'AppBeg Players', icon: '📊' },
     { id: 'payments', label: 'Payments', icon: '💳' },
+    {
+      id: 'manual-review',
+      label: 'Manual Review',
+      icon: '🟠',
+      badge: Number(state.manualReviewStats?.unresolved || state.paymentStats?.manualReview || 0) || 0
+    },
     { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
     { id: 'settings', label: 'Settings', icon: '⚙️', adminOnly: true }
   ].filter((item) => !item.adminOnly || isAdmin());
   const navHtml = items.map((item) => `
     <button class="nav-item ${state.section === item.id ? 'active' : ''}" data-section="${item.id}" type="button">
       <span class="nav-icon" aria-hidden="true">${item.icon}</span>
-      <span class="nav-label">${item.label}</span>
+      <span class="nav-label">${item.label}${item.badge ? ` <span class="nav-count-badge">${item.badge}</span>` : ''}</span>
     </button>
   `).join('');
   const sectionTitle = items.find((item) => item.id === state.section)?.label || 'Operations';
@@ -2526,6 +2755,8 @@ function render() {
       </div>
       ${state.section === 'payments'
     ? paymentsWorkspace()
+    : state.section === 'manual-review'
+      ? manualReviewWorkspace()
     : state.section === 'payment-info'
       ? paymentInfoController.renderPaymentInfoWorkspace(state)
     : state.section === 'appbeg-players'
@@ -2829,6 +3060,7 @@ function bindEvents() {
       state.navOpen = false;
       if (state.section === 'contacts') state.mobileContactsPane = 'list';
       if (state.section === 'payments') state.mobilePaymentsPane = 'list';
+      if (state.section === 'manual-review') state.mobileManualReviewPane = 'list';
       if (state.section === 'players') state.mobilePlayersPane = 'list';
       if (state.section === 'settings') {
         state.settingsError = null;
@@ -2842,6 +3074,12 @@ function bindEvents() {
         state.paymentQuery = '';
         await refreshPayments({ keepSelection: true });
         await refreshSelectedPayment();
+      }
+      if (state.section === 'manual-review') {
+        state.mobileManualReviewPane = 'list';
+        state.manualReviewFilter = 'All';
+        state.manualReviewQuery = '';
+        await refreshManualReview({ keepSelection: true });
       }
       if (state.section === 'players') {
         await refreshPlayers({ keepSelection: true });
@@ -2964,11 +3202,35 @@ function bindEvents() {
     });
   });
 
-  document.querySelector('#paymentExceptionsOnly')?.addEventListener('change', async (event) => {
-    state.paymentExceptionsOnly = event.target.checked;
-    await refreshPayments({ keepSelection: false });
-    await refreshSelectedPayment();
+  document.querySelectorAll('[data-manual-review-filter]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      state.manualReviewFilter = button.dataset.manualReviewFilter;
+      await refreshManualReview({ keepSelection: false });
+      render();
+    });
+  });
+
+  document.querySelector('#manualReviewSearchInput')?.addEventListener('input', async (event) => {
+    state.manualReviewQuery = event.target.value;
+    await refreshManualReview({ keepSelection: true });
     render();
+  });
+
+  document.querySelectorAll('[data-manual-review-id]').forEach((row) => {
+    row.addEventListener('click', async () => {
+      state.selectedManualReviewId = Number(row.dataset.manualReviewId);
+      state.selectedPaymentId = state.selectedManualReviewId;
+      state.mobileManualReviewPane = 'detail';
+      await refreshSelectedPayment();
+      render();
+    });
+  });
+
+  document.querySelectorAll('[data-mobile-back="manual-review"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.mobileManualReviewPane = 'list';
+      render();
+    });
   });
 
   document.querySelectorAll('[data-registration]').forEach((button) => {
@@ -3602,7 +3864,10 @@ async function boot() {
       refreshContacts({ keepSelection: false, force: true, reason: 'startup' }),
       refreshStats({ force: true, reason: 'startup' }),
       refreshSyncStatus({ force: true, reason: 'startup' }),
-      refreshCoadminSettings()
+      refreshCoadminSettings(),
+      api('/api/manual-review/stats').then((payload) => {
+        state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
+      }).catch(() => {})
     ]);
     await refreshSelectedContact({ reason: 'startup selected contact' });
     render();
@@ -3729,24 +3994,55 @@ socket.on('players:changed', () => {});
 socket.on('player:updated', () => {});
 
 socket.on('payments:changed', () => {
-  if (state.section !== 'payments') return;
-  void refreshPayments({ keepSelection: true })
-    .then(() => refreshSelectedPayment())
-    .then(() => render());
+  if (state.section === 'payments') {
+    void refreshPayments({ keepSelection: true })
+      .then(() => refreshSelectedPayment())
+      .then(() => render());
+    return;
+  }
+  if (state.section === 'manual-review') {
+    void refreshManualReview({ keepSelection: true }).then(() => render());
+    return;
+  }
+  // Keep sidebar badge fresh when elsewhere
+  void api('/api/manual-review/stats').then((payload) => {
+    state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
+    render();
+  }).catch(() => {});
+});
+
+socket.on('manual-review:changed', () => {
+  if (state.section === 'manual-review') {
+    void refreshManualReview({ keepSelection: true }).then(() => render());
+    return;
+  }
+  void api('/api/manual-review/stats').then((payload) => {
+    state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
+    if (state.section === 'payments') {
+      return refreshPayments({ keepSelection: true }).then(() => refreshSelectedPayment());
+    }
+    return null;
+  }).then(() => render()).catch(() => {});
 });
 
 socket.on('payment:frozen', () => {
-  if (state.section !== 'payments') return;
-  void refreshPayments({ keepSelection: true })
-    .then(() => refreshSelectedPayment())
-    .then(() => render());
+  if (state.section === 'payments') {
+    void refreshPayments({ keepSelection: true })
+      .then(() => refreshSelectedPayment())
+      .then(() => render());
+  } else if (state.section === 'manual-review') {
+    void refreshManualReview({ keepSelection: true }).then(() => render());
+  }
 });
 
 socket.on('payment:new', () => {
-  if (state.section !== 'payments') return;
-  void refreshPayments({ keepSelection: true })
-    .then(() => refreshSelectedPayment())
-    .then(() => render());
+  if (state.section === 'payments') {
+    void refreshPayments({ keepSelection: true })
+      .then(() => refreshSelectedPayment())
+      .then(() => render());
+  } else if (state.section === 'manual-review') {
+    void refreshManualReview({ keepSelection: true }).then(() => render());
+  }
 });
 
 socket.on('payment-sync:changed', () => {

@@ -11,6 +11,10 @@ import {
   UNMATCHED_REASON
 } from './constants.js';
 import {
+  classifyPaymentGroupMessage,
+  shouldAutoIgnore
+} from './messageClassifier.js';
+import {
   classifyUnmatchedReason,
   findMatchingActivePaymentWindow,
   isDepositWindow,
@@ -134,19 +138,59 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   const idempotencyKey = payment.idempotency_key || buildIdempotencyKey(payment.telegram_group_id, payment.telegram_message_id);
   await store.ensurePaymentIdempotencyKey(payment.id, idempotencyKey);
 
+  const classification = classifyPaymentGroupMessage(payment.message_text);
+  if (shouldAutoIgnore(classification)) {
+    console.log(
+      `[payment-router] payment_auto_ignored payment=${payment.id} kind=${classification.kind} reason=${classification.reason}`
+    );
+    await store.updatePaymentRouting(payment.id, {
+      routing_status: ROUTING_STATUS.IGNORED,
+      routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: classification.kind === 'cashout'
+        ? 'Cashout message — not a payment credit event'
+        : 'Non-payment group message — ignored from payment operations',
+      routed_at: new Date().toISOString(),
+      handled_by: HANDLED_BY_APPBEG_BOT,
+      unmatched_reason: classification.reason
+    });
+    await store.logPaymentRouting(payment.id, 'payment_auto_ignored', 'Message classified as non-payment or cashout; ignored.', {
+      kind: classification.kind,
+      unmatchedReason: classification.reason
+    });
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: ROUTING_STATUS.IGNORED,
+      unmatchedReason: classification.reason
+    };
+  }
+
   const parsed = parsePaymentMessage(payment.message_text);
   if (!parsed) {
-    console.log(`[payment-router] payment_parse_failed payment=${payment.id}`);
-    await store.applyPaymentParseResult(payment.id, null, { parseError: 'Parser did not match payment notification format.' });
+    const reviewReason = classification.reason
+      || UNMATCHED_REASON.MALFORMED_PAYMENT_MESSAGE;
+    console.log(`[payment-router] payment_manual_review payment=${payment.id} reason=${reviewReason}`);
+    await store.applyPaymentParseResult(payment.id, null, {
+      parseError: 'Parser did not match payment notification format.'
+    });
     await store.updatePaymentRouting(payment.id, {
       routing_status: ROUTING_STATUS.PARSE_FAILED,
       routing_owner: ROUTING_OWNER.APPBEG,
       routing_reason: ROUTING_REASON.UNABLE_TO_PARSE,
       routed_at: new Date().toISOString(),
-      handled_by: HANDLED_BY_APPBEG_BOT
+      handled_by: HANDLED_BY_APPBEG_BOT,
+      unmatched_reason: reviewReason
     });
-    await store.logPaymentRouting(payment.id, 'payment_parse_failed', 'Payment message could not be parsed.');
-    return { ok: true, payment: await store.getPaymentEvent(payment.id), outcome: ROUTING_STATUS.PARSE_FAILED };
+    await store.logPaymentRouting(payment.id, 'payment_parse_failed', 'Payment-like message could not be parsed; sent to Manual Review.', {
+      unmatchedReason: reviewReason,
+      classification: classification.kind
+    });
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: ROUTING_STATUS.PARSE_FAILED,
+      unmatchedReason: reviewReason
+    };
   }
 
   console.log(`[payment-router] payment_parse_success payment=${payment.id} amount=${parsed.amount} app=${parsed.payment_app || 'unknown'}`);

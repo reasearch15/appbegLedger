@@ -21,6 +21,7 @@ export async function processPaymentFreezeTick({ store, io = null, now = new Dat
 
     if ((result.count || 0) > 0 && io) {
       io.emit('payments:changed');
+      io.emit('manual-review:changed');
     }
 
     console.log(

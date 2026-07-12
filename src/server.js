@@ -526,22 +526,49 @@ app.get('/api/payment-stats', async (req, res) => {
   res.json({ stats });
 });
 
+app.get('/api/manual-review/stats', async (req, res) => {
+  const stats = await store.getManualReviewStats();
+  res.json({ stats });
+});
+
 app.get('/api/payments', async (req, res) => {
+  const queue = String(req.query.queue || 'payments').toLowerCase() === 'manual_review'
+    ? 'manual_review'
+    : 'payments';
   const payments = await store.listPaymentEvents({
     limit: req.query.limit || 500,
     status: req.query.status || 'All',
     routingStatus: req.query.routingStatus || req.query.matchingStatus || 'All',
     matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
     query: req.query.query || '',
-    exceptionsOnly: req.query.exceptionsOnly === 'true'
+    exceptionsOnly: req.query.exceptionsOnly === 'true',
+    queue,
+    reviewFilter: req.query.reviewFilter || 'All'
   });
   console.log(`[payments-api] GET /api/payments returned ${payments.length} rows`, JSON.stringify({
+    queue,
     matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
+    reviewFilter: req.query.reviewFilter || 'All',
     exceptionsOnly: req.query.exceptionsOnly === 'true',
     missingFreezeAt: payments.filter((p) => p.matching_status === 'searching' && !p.freeze_at).length
   }));
   res.json({
     payments,
+    server_now: new Date().toISOString()
+  });
+});
+
+app.get('/api/manual-review', async (req, res) => {
+  const payments = await store.listPaymentEvents({
+    limit: req.query.limit || 500,
+    query: req.query.query || '',
+    queue: 'manual_review',
+    reviewFilter: req.query.reviewFilter || 'All'
+  });
+  const stats = await store.getManualReviewStats();
+  res.json({
+    payments,
+    stats,
     server_now: new Date().toISOString()
   });
 });
@@ -604,8 +631,38 @@ app.post('/api/payments/:id/reprocess', async (req, res) => {
 app.post('/api/payments/:id/ignore', async (req, res) => {
   try {
     const payment = await store.markPaymentIgnored(Number(req.params.id), {
-      staffName: req.body.staffName || 'Staff'
+      staffName: req.body.staffName || req.ledgerUser?.username || 'Staff',
+      unmatchedReason: req.body.unmatchedReason || null
     });
+    io.emit('payments:changed');
+    io.emit('manual-review:changed');
+    res.json({ payment });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/payments/:id/freeze', async (req, res) => {
+  try {
+    const payment = await store.markPaymentFrozenByStaff(Number(req.params.id), {
+      staffName: req.body.staffName || req.ledgerUser?.username || 'Staff',
+      unmatchedReason: req.body.unmatchedReason || 'no_active_window'
+    });
+    io.emit('payments:changed');
+    io.emit('manual-review:changed');
+    io.emit('payment:frozen', { paymentId: payment.id, payment });
+    res.json({ payment });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/payments/:id/assign-review', async (req, res) => {
+  try {
+    const payment = await store.assignManualReviewOwner(Number(req.params.id), {
+      staffName: req.body.staffName || req.ledgerUser?.username || 'Staff'
+    });
+    io.emit('manual-review:changed');
     io.emit('payments:changed');
     res.json({ payment });
   } catch (error) {
@@ -651,6 +708,7 @@ app.post('/api/payments/:id/link', async (req, res) => {
 
 function emitPaymentChanged(payment) {
   io.emit('payments:changed');
+  io.emit('manual-review:changed');
   if (payment?.contact_id) {
     io.emit('contact:changed', { contactId: payment.contact_id, userId: payment.contact_id });
     io.emit('contacts:changed');

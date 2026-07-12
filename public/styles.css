@@ -1049,6 +1049,40 @@ h2 {
   font-variant-numeric: tabular-nums;
   color: #854d0e;
 }
+
+.nav-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4em;
+  padding: 0 6px;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: #c2410c;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+.manual-review-table-header,
+.manual-review-row {
+  display: grid;
+  grid-template-columns:
+    minmax(110px, 140px)
+    minmax(90px, 120px)
+    minmax(64px, 80px)
+    minmax(80px, 110px)
+    minmax(140px, 1fr)
+    minmax(70px, 90px)
+    minmax(120px, 160px)
+    minmax(100px, 140px)
+    minmax(110px, 140px);
+  gap: 8px;
+  align-items: center;
+  min-width: 1100px;
+}
 .badge.routing-registered_player_deposit { color: #1d4ed8; background: #dbeafe; }
 .badge.routing-registration_payment_matched,
 .badge.routing-appbeg_owned { color: #047857; background: #d1fae5; }
