@@ -35,9 +35,11 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
 import { registerAppBegPlayerRoutes } from './routes/appbegPlayers.js';
+import { registerOngoingRoutes } from './routes/ongoing.js';
 import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
+import { emitOngoingChanged } from './ongoing/emit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -181,6 +183,7 @@ app.use('/media', (req, res, next) => {
 registerHealthRoutes(app, { store });
 registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
 registerAppBegPlayerRoutes(app, { appbegStore });
+registerOngoingRoutes(app, { store });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });
@@ -885,6 +888,7 @@ app.post('/api/contacts/:id/assign', async (req, res) => {
   io.emit('contacts:changed');
   io.emit('users:changed');
   io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+  emitOngoingChanged(io, { reason: 'assignment_changed', contactId: contact.id });
   res.json({ contact });
 });
 

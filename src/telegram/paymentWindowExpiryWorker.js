@@ -1,6 +1,7 @@
 import { queueBotReply } from './chatbotProcessor.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 import { registeredMenuButtons } from './botRegistrationState.js';
+import { emitOngoingChanged } from '../ongoing/emit.js';
 
 export const REGISTRATION_PAYMENT_EXPIRY_MESSAGE = [
   'Registration failed.',
@@ -44,6 +45,12 @@ export async function processPaymentWindowExpiryTick({
         `[chatbot] payment_window_expired contact=${window.contact_id} window=${window.id} ` +
         `flow=${window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION}`
       );
+      emitOngoingChanged(io, {
+        reason: 'expired',
+        windowId: window.id,
+        contactId: window.contact_id,
+        flowType: window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION
+      });
     }
 
     const claimed = await store.claimRegistrationPaymentWindowExpiryNotification(window.id);
@@ -97,6 +104,12 @@ export async function processPaymentWindowExpiryTick({
       io.emit('message:new', { userId: contact.id, contactId: contact.id, telegramId: contact.telegram_id });
       io.emit('contacts:changed');
       io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+      emitOngoingChanged(io, {
+        reason: 'expiry_notified',
+        windowId: window.id,
+        contactId: contact.id,
+        flowType
+      });
     }
   }
 

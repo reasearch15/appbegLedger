@@ -18,6 +18,8 @@ import {
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
 import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY, computePaymentFreezeAt, ROUTING_STATUS, ROUTING_REASON, UNMATCHED_REASON, ROUTING_OWNER } from '../payments/constants.js';
+import { formatWorkflowStepLabel } from '../ongoing/stepLabels.js';
+import { remainingSecondsUntil, resolveOngoingUrgency, ONGOING_URGENCY } from '../ongoing/urgency.js';
 import { manualReviewReasonLabel, normalizeManualReviewReason } from '../payments/messageClassifier.js';
 import {
   CONVERSATION_STATUSES,
@@ -4389,6 +4391,148 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
   }
 
+  /**
+   * Active registration + deposit payment windows for the Ongoing dashboard.
+   * Timers come from persistent window created_at / expires_at (never recomputed).
+   */
+  async function listOngoingWorkflows({ staffName = null, isAdmin = true } = {}) {
+    const now = nowIso();
+    const nowMs = Date.now();
+    const today = now.slice(0, 10);
+    const expiresDay = sql.datePrefixExpr('w.expires_at');
+
+    const rows = await db.prepare(`
+      SELECT
+        w.id AS window_id,
+        w.contact_id,
+        w.telegram_user_id,
+        w.flow_type,
+        w.status AS window_status,
+        w.payment_display_name,
+        w.first_deposit_amount,
+        w.matched_payment_event_id,
+        w.created_at AS window_started_at,
+        w.expires_at AS window_expires_at,
+        w.completed_at,
+        u.id AS contact_db_id,
+        u.display_name,
+        u.username AS telegram_username,
+        u.first_name,
+        u.last_name,
+        u.profile_photo_url,
+        u.registration_status,
+        u.appbeg_account_id,
+        c.id AS conversation_id,
+        c.assigned_staff_name,
+        c.assigned_at,
+        cas.current_flow,
+        cas.current_step,
+        cas.registration_info_json
+      FROM registration_payment_windows w
+      INNER JOIN telegram_users u ON u.id = w.contact_id
+      LEFT JOIN conversations c
+        ON c.telegram_user_id = u.id AND c.channel = 'telegram_private'
+      LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+      WHERE w.status = 'active'
+        AND w.matched_payment_event_id IS NULL
+        AND COALESCE(w.flow_type, 'registration') IN ('registration', 'deposit')
+      ORDER BY w.expires_at ASC, w.id ASC
+    `).all();
+
+    const expiredTodayRow = await db.prepare(`
+      SELECT COUNT(*) AS ${sql.quoteAlias('expiredToday')}
+      FROM registration_payment_windows w
+      WHERE w.status = 'expired'
+        AND ${expiresDay} = ?
+    `).get(today);
+    const expiredToday = Number(expiredTodayRow?.expiredToday || 0);
+
+    const staffKey = String(staffName || '').trim().toLowerCase();
+    const items = rows.map((row) => {
+      const info = parseJsonField(row.registration_info_json, {});
+      const flowType = row.flow_type === PAYMENT_WINDOW_FLOW.DEPOSIT
+        ? PAYMENT_WINDOW_FLOW.DEPOSIT
+        : PAYMENT_WINDOW_FLOW.REGISTRATION;
+      const startedAt = row.window_started_at;
+      const expiresAt = row.window_expires_at;
+      const remaining = remainingSecondsUntil(expiresAt, nowMs);
+      const urgency = resolveOngoingUrgency(remaining);
+      const step = row.current_step || (flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
+        ? 'deposit_await_payment'
+        : 'await_payment');
+      const appbegUsername = info.preferred_appbeg_username
+        || info.appbeg_username
+        || row.appbeg_account_id
+        || null;
+      const paymentTag = info.payment_tag
+        || row.payment_display_name
+        || info.payment_display_name
+        || info.payment_name
+        || null;
+      const depositAmount = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
+        ? (row.first_deposit_amount ?? info.deposit_requested_amount ?? null)
+        : (row.first_deposit_amount ?? info.first_deposit_amount ?? info.requested_deposit_amount ?? null);
+
+      return {
+        id: Number(row.window_id),
+        window_id: Number(row.window_id),
+        contact_id: Number(row.contact_id),
+        conversation_id: row.conversation_id != null ? Number(row.conversation_id) : null,
+        telegram_user_id: row.telegram_user_id,
+        flow_type: flowType,
+        display_name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown',
+        telegram_username: row.telegram_username || null,
+        profile_photo_url: row.profile_photo_url || null,
+        registration_status: row.registration_status || null,
+        current_flow: row.current_flow || null,
+        current_step: step,
+        current_step_label: formatWorkflowStepLabel(step),
+        appbeg_username: appbegUsername,
+        payment_tag: paymentTag,
+        payment_display_name: row.payment_display_name || info.payment_display_name || null,
+        deposit_amount: depositAmount != null ? Number(depositAmount) : null,
+        assigned_staff_name: row.assigned_staff_name || null,
+        assigned_at: row.assigned_at || null,
+        // Persistent DB timestamps — aliases for the feature contract
+        registration_window_started_at: flowType === PAYMENT_WINDOW_FLOW.REGISTRATION ? startedAt : null,
+        registration_window_expires_at: flowType === PAYMENT_WINDOW_FLOW.REGISTRATION ? expiresAt : null,
+        deposit_window_started_at: flowType === PAYMENT_WINDOW_FLOW.DEPOSIT ? startedAt : null,
+        deposit_window_expires_at: flowType === PAYMENT_WINDOW_FLOW.DEPOSIT ? expiresAt : null,
+        window_started_at: startedAt,
+        window_expires_at: expiresAt,
+        remaining_seconds: remaining,
+        urgency,
+        matched_payment_event_id: row.matched_payment_event_id != null
+          ? Number(row.matched_payment_event_id)
+          : null
+      };
+    }).filter((item) => {
+      if (isAdmin || !staffKey) return true;
+      const assignee = String(item.assigned_staff_name || '').trim().toLowerCase();
+      if (!assignee) return true;
+      return assignee === staffKey;
+    });
+
+    const registrations = items.filter((item) => item.flow_type === PAYMENT_WINDOW_FLOW.REGISTRATION);
+    const deposits = items.filter((item) => item.flow_type === PAYMENT_WINDOW_FLOW.DEPOSIT);
+    const expiringSoon = items.filter((item) => (
+      item.urgency === ONGOING_URGENCY.EXPIRING_SOON
+      || item.urgency === ONGOING_URGENCY.CRITICAL
+    )).length;
+
+    return {
+      serverTime: now,
+      registrations,
+      deposits,
+      summary: {
+        activeRegistrations: registrations.length,
+        activeDeposits: deposits.length,
+        expiringSoon,
+        expiredToday
+      }
+    };
+  }
+
   async function resetRegistrationFlowToIdle(userId, actorName = 'System') {
     const user = await getUserProfile(userId);
     if (!user) return null;
@@ -4687,6 +4831,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getActiveRegistrationPaymentWindow,
     getRegistrationPaymentWindow,
     listActiveRegistrationPaymentWindows,
+    listOngoingWorkflows,
     listExpiredRegistrationPaymentWindowsForMatch,
     claimPaymentWindowMatch,
     completeRegistrationPaymentWindow,

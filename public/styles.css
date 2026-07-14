@@ -3592,3 +3592,230 @@ textarea {
     flex: 1 1 auto;
   }
 }
+
+/* —— Ongoing dashboard (registration / deposit windows) —— */
+.ongoing-workspace {
+  overflow: auto;
+}
+
+.ongoing-workspace .topbar {
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ongoing-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 0 20px 24px;
+  align-items: start;
+}
+
+.ongoing-section-title {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 750;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ongoing-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-muted, #e2e8f0);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.ongoing-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ongoing-card {
+  background: var(--panel, #fff);
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 14px;
+  padding: 14px 16px;
+  border-left-width: 4px;
+  border-left-color: #22c55e;
+}
+
+.ongoing-card.urgency-active {
+  border-left-color: #22c55e;
+}
+
+.ongoing-card.urgency-expiring_soon {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.ongoing-card.urgency-critical {
+  border-left-color: #ef4444;
+  background: #fef2f2;
+}
+
+.ongoing-card.urgency-expired {
+  border-left-color: #64748b;
+  background: #f8fafc;
+  opacity: 0.92;
+}
+
+.ongoing-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ongoing-card-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ongoing-card-names {
+  min-width: 0;
+}
+
+.ongoing-card-name {
+  font-weight: 750;
+  line-height: 1.25;
+  word-break: break-word;
+}
+
+.ongoing-card-username {
+  color: var(--muted, #64748b);
+  font-size: 0.9rem;
+}
+
+.ongoing-card-timer-wrap {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.ongoing-countdown {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.55rem;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  margin-top: 4px;
+}
+
+.ongoing-card.urgency-active .ongoing-countdown { color: #15803d; }
+.ongoing-card.urgency-expiring_soon .ongoing-countdown { color: #b45309; }
+.ongoing-card.urgency-critical .ongoing-countdown { color: #b91c1c; }
+.ongoing-card.urgency-expired .ongoing-countdown { color: #475569; }
+
+.ongoing-urgency-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.ongoing-urgency-badge.urgency-active {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.ongoing-urgency-badge.urgency-expiring_soon {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.ongoing-urgency-badge.urgency-critical {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.ongoing-urgency-badge.urgency-expired {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.ongoing-meta-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 38%) 1fr;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 0.92rem;
+}
+
+.ongoing-meta-label {
+  color: var(--muted, #64748b);
+  font-weight: 600;
+}
+
+.ongoing-meta-value {
+  word-break: break-word;
+  font-weight: 550;
+}
+
+.ongoing-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line, #e2e8f0);
+}
+
+@media (max-width: 1023px) {
+  .ongoing-layout {
+    grid-template-columns: 1fr;
+    padding: 0 14px 20px;
+  }
+}
+
+@media (max-width: 767px) {
+  .ongoing-workspace .topbar .stats {
+    display: none;
+  }
+
+  .ongoing-workspace .mobile-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 0 14px 12px;
+  }
+
+  .ongoing-card-top {
+    flex-direction: column;
+  }
+
+  .ongoing-card-timer-wrap {
+    text-align: left;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 10px;
+  }
+
+  .ongoing-countdown {
+    font-size: 1.75rem;
+  }
+
+  .ongoing-meta-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+    padding: 6px 0;
+  }
+
+  .ongoing-card-actions .button {
+    flex: 1 1 auto;
+  }
+}

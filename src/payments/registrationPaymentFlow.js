@@ -3,6 +3,7 @@ import {
   APPBEG_USERNAME_HELP,
   validateAppBegUsername
 } from '../registration/appbegValidation.js';
+import { emitOngoingChanged } from '../ongoing/emit.js';
 
 const USERNAME_PROMPT = [
   'Payment received and verified!',
@@ -59,6 +60,7 @@ export async function continueBotRegistrationAfterPayment(store, {
     if (io) {
       io.emit('contacts:changed');
       io.emit('contact:changed', { contactId, userId: contactId });
+      emitOngoingChanged(io, { reason: 'registration_matched', contactId, windowId });
     }
     return { contact, window, botSkipped: true };
   }
@@ -100,6 +102,7 @@ export async function continueBotRegistrationAfterPayment(store, {
   if (io) {
     io.emit('contacts:changed');
     io.emit('contact:changed', { contactId, userId: contactId });
+    emitOngoingChanged(io, { reason: 'registration_matched', contactId, windowId });
   }
 
   return { contact, window };

@@ -28,6 +28,7 @@ import {
   resolvePaymentFreezeAt,
   reviewReasonLabel
 } from './paymentStatus.js';
+import { createOngoingController } from './ongoing.js';
 
 const app = document.querySelector('#app');
 const socket = io({ withCredentials: true });
@@ -143,12 +144,25 @@ let state = {
   appbegPlayersLimit: 100,
   appbegPlayersShowTestData: false,
   appbegPlayersDetail: null,
-  appbegPlayersDrawerOpen: false
+  appbegPlayersDrawerOpen: false,
+  ongoingRegistrations: [],
+  ongoingDeposits: [],
+  ongoingSummary: {
+    activeRegistrations: 0,
+    activeDeposits: 0,
+    expiringSoon: 0,
+    expiredToday: 0
+  },
+  ongoingServerTime: null,
+  ongoingServerSkewMs: 0,
+  ongoingLoading: false,
+  ongoingError: null
 };
 
 let playersController;
 let paymentInfoController;
 let appbegPlayersController;
+let ongoingController;
 
 let composerEventsBound = false;
 let sendingMessage = false;
@@ -683,6 +697,16 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
 function openContactConversation(contactId) {
   return openContactById(contactId, { pane: 'chat' });
 }
+
+ongoingController = createOngoingController({
+  api,
+  getState: () => state,
+  setState: (patch) => {
+    state = { ...state, ...patch };
+  },
+  render,
+  openContact: openContactConversation
+});
 
 function startRegistrationWizard(contactId) {
   const id = Number(contactId || state.selectedContactId);
@@ -2716,6 +2740,12 @@ function render() {
     { id: 'appbeg-players', label: 'AppBeg Players', icon: '📊' },
     { id: 'payments', label: 'Payments', icon: '💳' },
     {
+      id: 'ongoing',
+      label: 'Ongoing',
+      icon: '⏱️',
+      badge: Number((state.ongoingSummary?.activeRegistrations || 0) + (state.ongoingSummary?.activeDeposits || 0)) || 0
+    },
+    {
       id: 'manual-review',
       label: 'Manual Review',
       icon: '🟠',
@@ -2756,6 +2786,8 @@ function render() {
       </div>
       ${state.section === 'payments'
     ? paymentsWorkspace()
+    : state.section === 'ongoing'
+      ? ongoingController.renderWorkspace(state)
     : state.section === 'manual-review'
       ? manualReviewWorkspace()
     : state.section === 'payment-info'
@@ -2780,7 +2812,11 @@ function render() {
   if (state.section === 'appbeg-players') {
     appbegPlayersController.bindAppBegPlayersEvents(app);
   }
+  if (state.section === 'ongoing') {
+    ongoingController.bindEvents(app);
+  }
   syncPaymentFreezeTicker();
+  ongoingController.syncTicker();
   syncPaymentTableHorizontalScroll();
   scrollChatToBottom();
 }
@@ -3093,6 +3129,10 @@ function bindEvents() {
       }
       if (state.section === 'appbeg-players') {
         await appbegPlayersController.refreshAppBegPlayers();
+      }
+      if (state.section === 'ongoing') {
+        state.ongoingLoading = true;
+        await ongoingController.refreshOngoing();
       }
       render();
     });
@@ -3881,7 +3921,8 @@ async function boot() {
       refreshCoadminSettings(),
       api('/api/manual-review/stats').then((payload) => {
         state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
-      }).catch(() => {})
+      }).catch(() => {}),
+      ongoingController.refreshOngoing().catch(() => {})
     ]);
     await refreshSelectedContact({ reason: 'startup selected contact' });
     render();
@@ -3963,7 +4004,11 @@ socket.on('telegram-sync:changed', (payload = {}) => {
   scheduleTelegramSyncRefresh(payload);
 });
 
-socket.on('contacts:changed', () => {});
+socket.on('contacts:changed', () => {
+  if (state.section === 'ongoing') {
+    void ongoingController.refreshOngoing().then(() => render());
+  }
+});
 
 socket.on('users:changed', () => {});
 
@@ -4066,6 +4111,17 @@ socket.on('payment-sync:changed', () => {
       state.paymentSync = sync;
       render();
     });
+});
+
+socket.on('ongoing:changed', () => {
+  if (state.section !== 'ongoing') {
+    void ongoingController.refreshOngoing().then(() => {
+      // Keep nav badge fresh when elsewhere
+      render();
+    }).catch(() => {});
+    return;
+  }
+  void ongoingController.refreshOngoing().then(() => render());
 });
 
 boot();

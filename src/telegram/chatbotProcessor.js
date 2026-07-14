@@ -614,4 +614,5 @@ function emitUpdates(io, contact) {
   io.emit('users:changed');
   io.emit('players:changed');
   io.emit('contact:changed', { contactId: contact.id, userId: contact.id });
+  io.emit('ongoing:changed', { reason: 'contact_update', contactId: contact.id });
 }

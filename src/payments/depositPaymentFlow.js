@@ -2,6 +2,7 @@ import { queueBotReply } from '../telegram/chatbotProcessor.js';
 import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
 import { formatDepositAmount } from './methodUtils.js';
 import { PAYMENT_WINDOW_FLOW } from './constants.js';
+import { emitOngoingChanged } from '../ongoing/emit.js';
 
 const DEPOSIT_RECEIVED_MESSAGE = [
   'Payment received and verified!',
@@ -121,6 +122,7 @@ export async function continueRegisteredDepositAfterPayment(store, {
     io.emit('contacts:changed');
     io.emit('contact:changed', { contactId, userId: contactId });
     io.emit('payments:changed');
+    emitOngoingChanged(io, { reason: 'deposit_matched', contactId, windowId });
   }
 
   return { contact, window };
