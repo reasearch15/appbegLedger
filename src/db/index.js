@@ -2260,7 +2260,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     query = '',
     exceptionsOnly = false,
     queue = 'payments',
-    reviewFilter = 'All'
+    reviewFilter = 'All',
+    cursor = null
   } = {}) {
     const where = [];
     if (status && status !== 'All') where.push('processing_status = @status');
@@ -2386,6 +2387,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         CAST(parsed_amount AS TEXT) LIKE @query
       )`);
     }
+    if (cursor?.messageDate && cursor?.id) {
+      where.push(`(
+        message_date < @cursorMessageDate
+        OR (message_date = @cursorMessageDate AND id < @cursorId)
+      )`);
+    }
     const querySql = `
       SELECT *
       FROM payment_events
@@ -2449,23 +2456,118 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     }
     // Re-read after heal so freeze_at / frozen status are current for the UI.
     const refreshed = needsHeal ? await db.prepare(querySql).all(params) : rows;
-    const payments = refreshed.map(hydratePaymentEvent).sort((a, b) => {
-      const pa = MATCHING_STATUS_SORT_PRIORITY[a.matching_status] ?? 99;
-      const pb = MATCHING_STATUS_SORT_PRIORITY[b.matching_status] ?? 99;
-      if (pa !== pb) return pa - pb;
-      // Waiting: soonest freeze_at first
-      if (a.matching_status === 'searching' && b.matching_status === 'searching') {
-        const fa = a.freeze_at ? new Date(a.freeze_at).getTime() : Number.POSITIVE_INFINITY;
-        const fb = b.freeze_at ? new Date(b.freeze_at).getTime() : Number.POSITIVE_INFINITY;
-        if (fa !== fb) return fa - fb;
-      }
-      const ta = new Date(a.message_date || 0).getTime();
-      const tb = new Date(b.message_date || 0).getTime();
-      if (tb !== ta) return tb - ta;
-      return Number(b.id) - Number(a.id);
-    });
+    const payments = refreshed.map(hydratePaymentEvent).sort(sortPaymentEventsForUi);
     console.log(`[payments-api] payment_visible_in_ui count=${payments.length} queue=${queue}`);
     return payments;
+  }
+
+  function encodePaymentCursor(payment) {
+    if (!payment?.message_date || !payment?.id) return null;
+    return Buffer.from(JSON.stringify({
+      messageDate: payment.message_date,
+      id: Number(payment.id)
+    }), 'utf8').toString('base64url');
+  }
+
+  function decodePaymentCursor(cursor) {
+    if (!cursor) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+      const messageDate = String(parsed.messageDate || '').trim();
+      const id = Number(parsed.id);
+      if (!messageDate || !Number.isInteger(id) || id <= 0) return null;
+      return { messageDate, id };
+    } catch {
+      return null;
+    }
+  }
+
+  async function listPaymentEventsPage({
+    limit = 15,
+    cursor = null,
+    status = 'All',
+    routingStatus = 'All',
+    matchingStatus = 'All',
+    query = '',
+    exceptionsOnly = false,
+    queue = 'payments',
+    reviewFilter = 'All'
+  } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 15, 1), 15);
+    const decodedCursor = decodePaymentCursor(cursor);
+    const params = {
+      limit: safeLimit + 1,
+      status,
+      routingStatus,
+      query: `%${String(query || '').trim().toLowerCase()}%`,
+      cursorMessageDate: decodedCursor?.messageDate || null,
+      cursorId: decodedCursor?.id || null
+    };
+    const { querySql, where } = buildPaymentEventsQuery({
+      status,
+      routingStatus,
+      matchingStatus,
+      query,
+      exceptionsOnly,
+      queue,
+      reviewFilter,
+      cursor: decodedCursor
+    });
+    console.log('[payments-api] listPaymentEventsPage', JSON.stringify({
+      where,
+      orderBy: 'message_date DESC, id DESC',
+      limit: safeLimit,
+      hasCursor: Boolean(decodedCursor),
+      status,
+      routingStatus,
+      matchingStatus,
+      queue,
+      reviewFilter,
+      exceptionsOnly: Boolean(exceptionsOnly),
+      query: String(query || '').trim() || null
+    }));
+    const rows = await db.prepare(querySql).all(params);
+    const visibleRows = rows.slice(0, safeLimit);
+    let needsHeal = false;
+    for (const row of visibleRows) {
+      const status = String(row.routing_status || '');
+      if (!['searching', 'unrouted', 'waiting', 'parsed'].includes(status)) continue;
+      if (row.freeze_at) continue;
+      needsHeal = true;
+      await ensurePaymentSearchDeadline(row.id, {
+        receivedAt: row.message_date || row.created_at || nowIso()
+      });
+    }
+    if (needsHeal) {
+      await freezeOverdueSearchingPayments({ now: new Date() });
+    }
+    const refreshedRows = needsHeal
+      ? await db.prepare(querySql).all(params)
+      : rows;
+    const pageRows = refreshedRows.slice(0, safeLimit);
+    const payments = pageRows.map(hydratePaymentEvent);
+    const cursorSource = pageRows[pageRows.length - 1] || null;
+    return {
+      items: payments,
+      payments,
+      nextCursor: refreshedRows.length > safeLimit ? encodePaymentCursor(cursorSource) : null,
+      hasMore: refreshedRows.length > safeLimit
+    };
+  }
+
+  function sortPaymentEventsForUi(a, b) {
+    const pa = MATCHING_STATUS_SORT_PRIORITY[a.matching_status] ?? 99;
+    const pb = MATCHING_STATUS_SORT_PRIORITY[b.matching_status] ?? 99;
+    if (pa !== pb) return pa - pb;
+    if (a.matching_status === 'searching' && b.matching_status === 'searching') {
+      const fa = a.freeze_at ? new Date(a.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+      const fb = b.freeze_at ? new Date(b.freeze_at).getTime() : Number.POSITIVE_INFINITY;
+      if (fa !== fb) return fa - fb;
+    }
+    const ta = new Date(a.message_date || 0).getTime();
+    const tb = new Date(b.message_date || 0).getTime();
+    if (tb !== ta) return tb - ta;
+    return Number(b.id) - Number(a.id);
   }
 
   async function getPaymentEvent(id) {
@@ -4990,6 +5092,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listEligibleBotApiContactIdsForDefaultCoadmin,
     listSettingsAuditLog,
     listPaymentEvents,
+    listPaymentEventsPage,
     getPaymentEvent,
     getPaymentEventByTelegramMessageId,
     getPaymentStats,

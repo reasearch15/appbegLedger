@@ -40,6 +40,7 @@ import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
 import { emitOngoingChanged } from './ongoing/emit.js';
+import { parsePaymentPageLimit } from './payments/pagination.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -548,8 +549,11 @@ app.get('/api/payments', async (req, res) => {
   const queue = String(req.query.queue || 'payments').toLowerCase() === 'manual_review'
     ? 'manual_review'
     : 'payments';
-  const payments = await store.listPaymentEvents({
-    limit: req.query.limit || 500,
+  const parsedLimit = parsePaymentPageLimit(req.query.limit);
+  if (!parsedLimit.ok) return res.status(400).json({ error: parsedLimit.error });
+  const page = await store.listPaymentEventsPage({
+    limit: parsedLimit.limit,
+    cursor: req.query.cursor || null,
     status: req.query.status || 'All',
     routingStatus: req.query.routingStatus || req.query.matchingStatus || 'All',
     matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
@@ -558,15 +562,21 @@ app.get('/api/payments', async (req, res) => {
     queue,
     reviewFilter: req.query.reviewFilter || 'All'
   });
+  const payments = page.items || page.payments || [];
   console.log(`[payments-api] GET /api/payments returned ${payments.length} rows`, JSON.stringify({
     queue,
     matchingStatus: req.query.matchingStatus || req.query.routingStatus || 'All',
     reviewFilter: req.query.reviewFilter || 'All',
     exceptionsOnly: req.query.exceptionsOnly === 'true',
-    missingFreezeAt: payments.filter((p) => p.matching_status === 'searching' && !p.freeze_at).length
+    missingFreezeAt: payments.filter((p) => p.matching_status === 'searching' && !p.freeze_at).length,
+    hasMore: Boolean(page.hasMore),
+    nextCursor: page.nextCursor ? 'present' : null
   }));
   res.json({
+    items: payments,
     payments,
+    nextCursor: page.nextCursor,
+    hasMore: page.hasMore,
     server_now: new Date().toISOString()
   });
 });

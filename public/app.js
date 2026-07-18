@@ -23,7 +23,6 @@ import {
   renderPaymentStatusCell,
   remainingSecondsUntil,
   formatFreezeCountdown,
-  sortPaymentsByStatus,
   MATCHING_STATUS,
   resolvePaymentFreezeAt,
   reviewReasonLabel
@@ -119,6 +118,10 @@ let state = {
   paymentInfoError: null,
   paymentInfoSuccess: null,
   paymentActionBusy: false,
+  paymentsLoading: false,
+  paymentsLoadingMore: false,
+  paymentNextCursor: null,
+  paymentHasMore: false,
   autoRegistrationBot: { enabled: true, enabled_at: null },
   autoRegistrationBotSaving: false,
   customerSupportAi: { mode: 'train', configured: true },
@@ -171,6 +174,7 @@ let selectedContactRequestId = 0;
 let contactsRefreshPromise = null;
 let statsRefreshPromise = null;
 let syncStatusRefreshPromise = null;
+let paymentsRefreshPromise = null;
 let selectedContactRefreshPromise = null;
 let selectedContactRefreshId = null;
 let lastContactsRefreshAt = 0;
@@ -189,6 +193,7 @@ const STATS_REFRESH_DEBOUNCE_MS = 3000;
 const SYNC_STATUS_REFRESH_DEBOUNCE_MS = 5000;
 const REFRESH_DEDUPE_MS = 1000;
 const CONTACTS_POLL_MS = 30000;
+const PAYMENT_PAGE_LIMIT = 15;
 let staffAiDraftPollTimer = null;
 let staffAiDraftPollStartedAt = 0;
 const CONTACT_DETAIL_CACHE_MS = 5000;
@@ -1271,30 +1276,93 @@ function normalizePaymentStats(stats = {}) {
   };
 }
 
-async function refreshPayments({ keepSelection = true } = {}) {
-  const query = new URLSearchParams({
-    queue: 'payments',
-    matchingStatus: state.paymentStatusFilter,
-    query: state.paymentQuery,
-    limit: '500'
-  });
-  const [paymentsPayload, statsPayload, syncPayload, reviewStatsPayload] = await Promise.all([
-    api(`/api/payments?${query}`),
+function mergePayments(existing = [], incoming = [], { prepend = false } = {}) {
+  const seen = new Set();
+  const merged = [];
+  const add = (payment) => {
+    const id = Number(payment?.id);
+    if (!Number.isFinite(id) || seen.has(id)) return;
+    seen.add(id);
+    merged.push(payment);
+  };
+  if (prepend) {
+    incoming.forEach(add);
+    existing.forEach(add);
+  } else {
+    existing.forEach(add);
+    incoming.forEach(add);
+  }
+  return merged;
+}
+
+async function refreshPaymentStatsAndSync() {
+  const [statsPayload, syncPayload, reviewStatsPayload] = await Promise.all([
     api('/api/payment-stats'),
     api('/api/payment-sync/status'),
     api('/api/manual-review/stats')
   ]);
-  const payments = Array.isArray(paymentsPayload?.payments) ? paymentsPayload.payments : [];
-  state.payments = sortPaymentsByStatus(payments);
   state.paymentStats = normalizePaymentStats(statsPayload?.stats || {});
   state.paymentSync = syncPayload?.sync || {};
   state.manualReviewStats = normalizeManualReviewStats(reviewStatsPayload?.stats || {});
-  console.log(`[payments-ui] loaded ${payments.length} payments`, {
+}
+
+async function refreshPayments({ keepSelection = true, mode = 'reset' } = {}) {
+  const loadingMore = mode === 'append';
+  const liveMerge = mode === 'live';
+  if (loadingMore && (state.paymentsLoadingMore || !state.paymentHasMore || !state.paymentNextCursor)) return;
+  if (paymentsRefreshPromise && !loadingMore) return paymentsRefreshPromise;
+
+  const cursor = loadingMore ? state.paymentNextCursor : null;
+  const query = new URLSearchParams({
+    queue: 'payments',
     matchingStatus: state.paymentStatusFilter,
-    totalMessages: state.paymentStats.totalMessages
+    query: state.paymentQuery,
+    limit: String(PAYMENT_PAGE_LIMIT)
   });
-  if (!keepSelection || !state.selectedPaymentId || !payments.some((payment) => Number(payment.id) === Number(state.selectedPaymentId))) {
-    state.selectedPaymentId = payments[0]?.id || null;
+  if (cursor) query.set('cursor', cursor);
+
+  if (loadingMore) state.paymentsLoadingMore = true;
+  else state.paymentsLoading = true;
+  const hadPaymentsBefore = state.payments.length > 0;
+
+  const run = (async () => {
+    const [paymentsPayload] = await Promise.all([
+      api(`/api/payments?${query}`),
+      refreshPaymentStatsAndSync()
+    ]);
+    const payments = Array.isArray(paymentsPayload?.items)
+      ? paymentsPayload.items
+      : (Array.isArray(paymentsPayload?.payments) ? paymentsPayload.payments : []);
+
+    if (loadingMore) {
+      state.payments = mergePayments(state.payments, payments);
+    } else if (liveMerge) {
+      state.payments = mergePayments(state.payments, payments, { prepend: true });
+    } else {
+      state.payments = payments;
+    }
+    if (!liveMerge || !hadPaymentsBefore) {
+      state.paymentNextCursor = paymentsPayload?.nextCursor || null;
+      state.paymentHasMore = Boolean(paymentsPayload?.hasMore);
+    }
+    console.log(`[payments-ui] loaded ${payments.length} payments`, {
+      matchingStatus: state.paymentStatusFilter,
+      totalMessages: state.paymentStats.totalMessages,
+      mode,
+      hasMore: state.paymentHasMore
+    });
+    if (!keepSelection || !state.selectedPaymentId || !state.payments.some((payment) => Number(payment.id) === Number(state.selectedPaymentId))) {
+      state.selectedPaymentId = state.payments[0]?.id || null;
+    }
+  })();
+
+  if (!loadingMore) paymentsRefreshPromise = run;
+  try {
+    return await run;
+  } finally {
+    if (loadingMore) state.paymentsLoadingMore = false;
+    else state.paymentsLoading = false;
+    if (!loadingMore) paymentsRefreshPromise = null;
   }
 }
 
@@ -2089,6 +2157,7 @@ function paymentSyncStatus() {
 }
 
 function paymentRows() {
+  if (!state.payments.length && state.paymentsLoading) return '<div class="empty-state">Loading payments...</div>';
   if (!state.payments.length) return '<div class="empty-state">No payment messages match the current filters.</div>';
   const now = Date.now();
   return state.payments.map((payment) => `
@@ -2102,6 +2171,20 @@ function paymentRows() {
       ${renderPaymentStatusCell(payment, now)}
     </button>
   `).join('');
+}
+
+function paymentLoadMoreControl() {
+  const disabled = state.paymentsLoadingMore || !state.paymentHasMore;
+  const label = state.paymentsLoadingMore
+    ? 'Loading...'
+    : (state.paymentHasMore ? 'Load more' : 'No more payments');
+  return `
+    <div class="payment-load-more">
+      <button type="button" class="button secondary" data-payment-load-more ${disabled ? 'disabled' : ''}>
+        ${label}
+      </button>
+    </div>
+  `;
 }
 
 function paymentDetailPanel() {
@@ -2372,6 +2455,7 @@ function paymentsWorkspace() {
             </div>
             <div class="payment-table">${paymentRows()}</div>
           </div>
+          ${paymentLoadMoreControl()}
         </section>
 
         <div class="payment-detail-wrap">
@@ -3243,6 +3327,14 @@ function bindEvents() {
     });
   });
 
+  document.querySelector('[data-payment-load-more]')?.addEventListener('click', async () => {
+    if (state.paymentsLoadingMore || !state.paymentHasMore) return;
+    const promise = refreshPayments({ keepSelection: true, mode: 'append' });
+    render();
+    await promise;
+    render();
+  });
+
   document.querySelectorAll('[data-manual-review-filter]').forEach((button) => {
     button.addEventListener('click', async () => {
       state.manualReviewFilter = button.dataset.manualReviewFilter;
@@ -4054,7 +4146,7 @@ socket.on('player:updated', () => {});
 
 socket.on('payments:changed', () => {
   if (state.section === 'payments') {
-    void refreshPayments({ keepSelection: true })
+    void refreshPayments({ keepSelection: true, mode: 'live' })
       .then(() => refreshSelectedPayment())
       .then(() => render());
     return;
@@ -4078,7 +4170,7 @@ socket.on('manual-review:changed', () => {
   void api('/api/manual-review/stats').then((payload) => {
     state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
     if (state.section === 'payments') {
-      return refreshPayments({ keepSelection: true }).then(() => refreshSelectedPayment());
+      return refreshPayments({ keepSelection: true, mode: 'live' }).then(() => refreshSelectedPayment());
     }
     return null;
   }).then(() => render()).catch(() => {});
@@ -4086,7 +4178,7 @@ socket.on('manual-review:changed', () => {
 
 socket.on('payment:frozen', () => {
   if (state.section === 'payments') {
-    void refreshPayments({ keepSelection: true })
+    void refreshPayments({ keepSelection: true, mode: 'live' })
       .then(() => refreshSelectedPayment())
       .then(() => render());
   } else if (state.section === 'manual-review') {
@@ -4096,7 +4188,7 @@ socket.on('payment:frozen', () => {
 
 socket.on('payment:new', () => {
   if (state.section === 'payments') {
-    void refreshPayments({ keepSelection: true })
+    void refreshPayments({ keepSelection: true, mode: 'live' })
       .then(() => refreshSelectedPayment())
       .then(() => render());
   } else if (state.section === 'manual-review') {
