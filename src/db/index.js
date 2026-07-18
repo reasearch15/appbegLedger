@@ -32,6 +32,7 @@ import { createQueryHelpers } from './query-helpers.js';
 import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '../payments/methodUtils.js';
 import { normalizeAutoRegistrationBotSettings, isMessageAfterBotResumeCheckpoint } from '../telegram/autoRegistrationBot.js';
 import { isCustomerSupportAiConfigured } from '../telegram/customerSupportAiConfig.js';
+import { buildPaymentEventIdempotencyKey, creditAppBegDepositViaApi } from '../appbeg/depositCreditClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -3118,6 +3119,228 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await getDepositEvent(depositEventId);
   }
 
+  async function creditRegisteredDeposit({
+    contactId,
+    amount,
+    paymentEventId,
+    windowId,
+    actorName = 'PaymentGroupListener',
+    flowType = PAYMENT_WINDOW_FLOW.DEPOSIT,
+    playerUid = null
+  } = {}) {
+    const id = Number(contactId);
+    const eventId = Number(paymentEventId);
+    const matchedWindowId = Number(windowId);
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Valid contactId is required for deposit credit.');
+    if (!Number.isInteger(eventId) || eventId <= 0) throw new Error('Valid paymentEventId is required for deposit credit.');
+    if (!Number.isInteger(matchedWindowId) || matchedWindowId <= 0) throw new Error('Valid windowId is required for deposit credit.');
+
+    const contact = await getUserProfile(id);
+    if (!contact) throw new Error('Contact not found for deposit credit.');
+
+    const window = await getRegistrationPaymentWindow(matchedWindowId);
+    if (!window) throw new Error('Payment window not found for deposit credit.');
+    if (Number(window.contact_id) !== id) {
+      throw new Error('Payment window does not belong to this contact.');
+    }
+    const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? PAYMENT_WINDOW_FLOW.REGISTRATION
+      : PAYMENT_WINDOW_FLOW.DEPOSIT;
+    const windowFlow = window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    if (windowFlow !== normalizedFlow) {
+      throw new Error(`Payment window flow mismatch: expected ${normalizedFlow}, got ${windowFlow}.`);
+    }
+    if (window.status !== 'matched' && window.status_raw !== 'completed') {
+      throw new Error('Payment window has not been matched.');
+    }
+    if (Number(window.matched_payment_event_id) !== eventId) {
+      throw new Error('Payment window is not matched to the requested payment event.');
+    }
+
+    const payment = await getPaymentEvent(eventId);
+    if (!payment) throw new Error('Payment event not found for deposit credit.');
+    if (Number(payment.contact_id) !== id) {
+      throw new Error('Payment event does not belong to this contact.');
+    }
+    if (Number(payment.registration_payment_window_id) !== matchedWindowId) {
+      throw new Error('Payment event is not linked to the requested payment window.');
+    }
+
+    const authoritativeAmount = Number(window.first_deposit_amount);
+    const requestedAmount = amount == null ? authoritativeAmount : Number(amount);
+    if (!Number.isFinite(authoritativeAmount) || authoritativeAmount <= 0) {
+      throw new Error('Matched payment window amount must be positive.');
+    }
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new Error('Deposit credit amount must be positive.');
+    }
+    if (Math.round(authoritativeAmount * 100) !== Math.round(requestedAmount * 100)) {
+      throw new Error('Deposit credit amount does not match the matched payment window amount.');
+    }
+
+    const automation = await getAutomationState(id);
+    const info = automation?.registration_info || {};
+    const resolvedPlayerUid = String(
+      playerUid
+      || info.appbeg_player_uid
+      || contact.appbeg_account_id
+      || ''
+    ).trim();
+    if (!resolvedPlayerUid) {
+      throw new Error('AppBeg player UID is required before crediting a deposit.');
+    }
+
+    const idempotencyKey = buildPaymentEventIdempotencyKey(eventId);
+    const sourceFlow = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? 'registration_initial_deposit'
+      : 'registered_user_deposit';
+    async function patchCreditMetadata(patch) {
+      const currentState = await ensureAutomationState(id);
+      await updateAutomationState(id, {
+        registrationInfo: {
+          ...(currentState.registration_info || {}),
+          ...(patch || {})
+        }
+      });
+    }
+    const metadataPatch = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? {
+        initial_deposit_status: 'crediting',
+        initial_deposit_amount: authoritativeAmount,
+        initial_deposit_payment_event_id: eventId,
+        initial_deposit_window_id: matchedWindowId,
+        initial_deposit_idempotency_key: idempotencyKey,
+        initial_deposit_error: null
+      }
+      : {
+        last_deposit_credit_status: 'crediting',
+        last_deposit_credit_amount: authoritativeAmount,
+        last_deposit_credit_payment_event_id: eventId,
+        last_deposit_credit_window_id: matchedWindowId,
+        last_deposit_credit_idempotency_key: idempotencyKey,
+        last_deposit_credit_error: null
+      };
+
+    await patchCreditMetadata(metadataPatch);
+    console.log(
+      `[ledger] deposit_credit_started contact=${id} payment=${eventId} window=${matchedWindowId} ` +
+      `player=${resolvedPlayerUid} amount=${authoritativeAmount} key=${idempotencyKey} flow=${sourceFlow}`
+    );
+
+    let result;
+    try {
+      result = await creditAppBegDepositViaApi({
+        playerUid: resolvedPlayerUid,
+        amount: authoritativeAmount,
+        externalReference: idempotencyKey,
+        sourceFlow,
+        ledgerContactId: id,
+        paymentEventId: eventId,
+        windowId: matchedWindowId,
+        actorName
+      });
+    } catch (error) {
+      const failedPatch = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+        ? {
+          initial_deposit_status: 'failed',
+          initial_deposit_amount: authoritativeAmount,
+          initial_deposit_payment_event_id: eventId,
+          initial_deposit_window_id: matchedWindowId,
+          initial_deposit_idempotency_key: idempotencyKey,
+          initial_deposit_error: String(error.message || error).slice(0, 500)
+        }
+        : {
+          last_deposit_credit_status: 'failed',
+          last_deposit_credit_amount: authoritativeAmount,
+          last_deposit_credit_payment_event_id: eventId,
+          last_deposit_credit_window_id: matchedWindowId,
+          last_deposit_credit_idempotency_key: idempotencyKey,
+          last_deposit_credit_error: String(error.message || error).slice(0, 500)
+        };
+      await patchCreditMetadata(failedPatch).catch(() => null);
+      await logEvent({
+        telegramUserId: id,
+        eventType: 'deposit_credit_failed',
+        title: 'AppBeg Deposit Credit Failed',
+        body: error.message || 'AppBeg deposit credit failed.',
+        actorName,
+        metadata: {
+          paymentEventId: eventId,
+          windowId: matchedWindowId,
+          amount: authoritativeAmount,
+          playerUid: resolvedPlayerUid,
+          idempotencyKey,
+          sourceFlow
+        }
+      }).catch(() => null);
+      console.log(
+        `[ledger] deposit_credit_failed contact=${id} payment=${eventId} window=${matchedWindowId} ` +
+        `player=${resolvedPlayerUid} amount=${authoritativeAmount} key=${idempotencyKey} error=${error.message}`
+      );
+      throw error;
+    }
+
+    const creditedAt = nowIso();
+    const successPatch = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? {
+        initial_deposit_status: 'credited',
+        initial_deposit_amount: authoritativeAmount,
+        initial_deposit_payment_event_id: eventId,
+        initial_deposit_window_id: matchedWindowId,
+        initial_deposit_idempotency_key: idempotencyKey,
+        initial_deposit_credited_at: creditedAt,
+        initial_deposit_error: null,
+        initial_deposit_financial_event_id: result.financialEventId || null,
+        appbeg_player_uid: resolvedPlayerUid
+      }
+      : {
+        last_deposit_credit_status: 'credited',
+        last_deposit_credit_amount: authoritativeAmount,
+        last_deposit_credit_payment_event_id: eventId,
+        last_deposit_credit_window_id: matchedWindowId,
+        last_deposit_credit_idempotency_key: idempotencyKey,
+        last_deposit_credit_credited_at: creditedAt,
+        last_deposit_credit_error: null,
+        last_deposit_credit_financial_event_id: result.financialEventId || null
+      };
+    await patchCreditMetadata(successPatch);
+
+    await logEvent({
+      telegramUserId: id,
+      eventType: result.alreadyCredited ? 'deposit_credit_already_credited' : 'deposit_credit_succeeded',
+      title: result.alreadyCredited ? 'AppBeg Deposit Already Credited' : 'AppBeg Deposit Credited',
+      body: `${sourceFlow} ${result.alreadyCredited ? 'already credited' : 'credited'} for ${authoritativeAmount}.`,
+      actorName,
+      metadata: {
+        paymentEventId: eventId,
+        windowId: matchedWindowId,
+        amount: authoritativeAmount,
+        playerUid: resolvedPlayerUid,
+        idempotencyKey,
+        sourceFlow,
+        financialEventId: result.financialEventId || null
+      }
+    });
+    console.log(
+      `[ledger] deposit_credit_${result.alreadyCredited ? 'already_credited' : 'succeeded'} ` +
+      `contact=${id} payment=${eventId} window=${matchedWindowId} player=${resolvedPlayerUid} ` +
+      `amount=${authoritativeAmount} key=${idempotencyKey}`
+    );
+
+    return {
+      ok: true,
+      status: result.status,
+      credited: result.credited,
+      alreadyCredited: result.alreadyCredited,
+      amount: authoritativeAmount,
+      paymentEventId: eventId,
+      windowId: matchedWindowId,
+      playerUid: resolvedPlayerUid,
+      idempotencyKey,
+      financialEventId: result.financialEventId || null
+    };
+  }
+
   async function cancelDepositEvent(depositEventId, { cancelledBy = 'Staff', reason = '' } = {}) {
     const cancelledAt = nowIso();
     await db.prepare(`
@@ -4793,6 +5016,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     findActiveDepositByPaymentTag,
     findLatestExpiredDepositByPaymentTag,
     completeDepositEvent,
+    creditRegisteredDeposit,
     cancelDepositEvent,
     getPaymentSyncState,
     updatePaymentSyncState,

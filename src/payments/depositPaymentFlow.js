@@ -86,7 +86,8 @@ export async function continueRegisteredDepositAfterPayment(store, {
       amount: window.first_deposit_amount,
       paymentEventId,
       windowId,
-      actorName
+      actorName,
+      flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
     });
   }
 

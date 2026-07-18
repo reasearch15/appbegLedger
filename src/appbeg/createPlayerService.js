@@ -2,6 +2,7 @@ import { createAppBegPlayerViaApi } from '../appbeg/createPlayerClient.js';
 import { createReplySender } from '../telegram/messageDelivery.js';
 import { validateAppBegPassword, validateAppBegUsername } from '../registration/appbegValidation.js';
 import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
+import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 
 function registrationInfoForCreate(info = {}) {
   const usernameResult = validateAppBegUsername(info.preferred_appbeg_username || info.appbeg_username);
@@ -33,6 +34,60 @@ async function sendTelegramText(store, contact, text, buttons = []) {
     bot: globalThis.telegramBot || null
   });
   await sendReply({ user: contact, text, buttons });
+}
+
+async function findExistingEquivalentPlayer(username, coadminUid) {
+  const appbeg = globalThis.appbegStore;
+  if (!appbeg?.configured || typeof appbeg.getPlayerByUsername !== 'function') return null;
+  const player = await appbeg.getPlayerByUsername(username);
+  if (!player) return null;
+  const playerUsername = String(player.username || '').trim().toLowerCase();
+  if (playerUsername !== String(username || '').trim().toLowerCase()) return null;
+  const playerCoadmin = String(player.coadmin_uid || player.created_by || '').trim();
+  if (coadminUid && playerCoadmin && playerCoadmin !== coadminUid) {
+    throw new Error('Existing AppBeg player username belongs to a different coadmin.');
+  }
+  return {
+    ok: true,
+    playerUid: player.uid || player.player_uid || player.id,
+    username: player.username || username,
+    resumed: true
+  };
+}
+
+async function createOrResumeAppBegPlayer({
+  info,
+  username,
+  password,
+  referralCode,
+  coadminUid,
+  ledgerContactId,
+  telegramUserId
+}) {
+  if (info.appbeg_player_uid && !info.appbeg_creation_complete) {
+    return {
+      ok: true,
+      playerUid: info.appbeg_player_uid,
+      username: info.preferred_appbeg_username || username,
+      resumed: true
+    };
+  }
+
+  try {
+    return await createAppBegPlayerViaApi({
+      username,
+      password,
+      referralCode,
+      coadminUid,
+      ledgerContactId,
+      telegramUserId
+    });
+  } catch (error) {
+    if (!/already|exists|duplicate/i.test(String(error.message || ''))) throw error;
+    const existing = await findExistingEquivalentPlayer(username, coadminUid);
+    if (!existing?.playerUid) throw error;
+    return existing;
+  }
 }
 
 export async function createAppBegPlayerForContact(store, {
@@ -78,7 +133,8 @@ export async function createAppBegPlayerForContact(store, {
   });
 
   try {
-    const result = await createAppBegPlayerViaApi({
+    const result = await createOrResumeAppBegPlayer({
+      info,
       username,
       password,
       referralCode,
@@ -86,6 +142,10 @@ export async function createAppBegPlayerForContact(store, {
       ledgerContactId: id,
       telegramUserId: contact.telegram_id
     });
+
+    if (result.resumed) {
+      console.log(`[ledger] create_player_resumed contact=${id} playerUid=${result.playerUid || 'n/a'}`);
+    }
 
     const nextInfo = {
       ...info,
@@ -96,6 +156,47 @@ export async function createAppBegPlayerForContact(store, {
       ready_to_create_player: false,
       registration_confirmed: true
     };
+
+    if (typeof store.creditRegisteredDeposit !== 'function') {
+      throw new Error('AppBeg deposit credit helper is not available.');
+    }
+
+    const windowId = Number(nextInfo.registration_payment_window_id);
+    if (!Number.isInteger(windowId) || windowId <= 0) {
+      throw new Error('Matched registration payment window is required before creating the account.');
+    }
+    const window = await store.getRegistrationPaymentWindow(windowId);
+    if (!window) throw new Error('Matched registration payment window was not found.');
+    if ((window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION) !== PAYMENT_WINDOW_FLOW.REGISTRATION) {
+      throw new Error('Matched payment window is not a registration payment.');
+    }
+    if (Number(window.contact_id) !== id) {
+      throw new Error('Matched registration payment window belongs to a different contact.');
+    }
+    if (window.status !== 'matched' && window.status_raw !== 'completed') {
+      throw new Error('Registration payment window has not been matched.');
+    }
+    if (!window.matched_payment_event_id) {
+      throw new Error('Registration payment window does not have a matched payment event.');
+    }
+    const creditAmount = Number(window.first_deposit_amount);
+    if (!Number.isFinite(creditAmount) || creditAmount <= 0) {
+      throw new Error('Matched registration payment amount must be positive.');
+    }
+
+    console.log(
+      `[ledger] registration_credit_started contact=${id} payment=${window.matched_payment_event_id} ` +
+      `window=${windowId} player=${result.playerUid || 'n/a'} amount=${creditAmount}`
+    );
+    await store.creditRegisteredDeposit({
+      contactId: id,
+      amount: creditAmount,
+      paymentEventId: Number(window.matched_payment_event_id),
+      windowId,
+      actorName,
+      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
+      playerUid: result.playerUid
+    });
 
     const updatedContact = await store.markAppBegPlayerCreated({
       userId: id,
