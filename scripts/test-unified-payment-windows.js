@@ -125,10 +125,10 @@ async function run() {
   console.log('Active-window-only payment matcher tests');
 
   assert.equal(PAYMENT_WINDOW_MINUTES, 7);
-  assert.equal(PAYMENT_SEARCH_MINUTES, 5);
+  assert.equal(PAYMENT_SEARCH_MINUTES, 15);
   assert.equal(paymentWindowMinutes(), 7);
-  assert.equal(paymentSearchMinutes(), 5);
-  console.log('ok window=7m search/freeze=5m constants');
+  assert.equal(paymentSearchMinutes(), 15);
+  console.log('ok window=7m search/freeze=15m constants');
 
   const parsed = parsePaymentMessage(paymentText());
   assert.ok(parsed);
@@ -280,10 +280,10 @@ async function run() {
     console.log('ok payment without active window enters searching');
   }
 
-  // Freeze after 5 minutes with no active window
+  // Freeze after 15 minutes with no active window
   {
     const store = createRouterStore({ windows: [] });
-    const started = new Date(Date.now() - 6 * 60 * 1000);
+    const started = new Date(Date.now() - 16 * 60 * 1000);
     store.payments.set(5, {
       id: 5,
       message_text: paymentText(),
@@ -298,7 +298,7 @@ async function run() {
     assert.equal(result.outcome, ROUTING_STATUS.FROZEN);
     assert.equal(result.unmatchedReason, UNMATCHED_REASON.NO_ACTIVE_WINDOW);
     assert.ok(result.payment.routed_at);
-    console.log('ok payment freezes after 5 minutes when no active window appears');
+    console.log('ok payment freezes after 15 minutes when no active window appears');
   }
 
   // Searching payment can still match if window appears before freeze

@@ -119,7 +119,7 @@ export const PAYMENT_WINDOW_FLOW = {
 export const PAYMENT_WINDOW_MINUTES = 7;
 
 /** How long an unmatched payment keeps searching for an active window before freeze. */
-export const PAYMENT_SEARCH_MINUTES = 5;
+export const PAYMENT_SEARCH_MINUTES = 15;
 
 export const PAYMENT_WINDOW_STATUS = {
   ACTIVE: 'active',

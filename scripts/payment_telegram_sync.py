@@ -182,7 +182,7 @@ def set_checkpoint(db, message_id):
     )
 
 
-def freeze_at_from_message_date(sent_at: str, minutes: int = 5) -> str:
+def freeze_at_from_message_date(sent_at: str, minutes: int = 15) -> str:
     try:
         base = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
     except Exception:
@@ -202,7 +202,7 @@ def store_payment_message(db, message, sender, group, edited=False):
         (group_id, message.id),
     ).fetchone()
     payload = message_payload(message, sender, group)
-    freeze_at = freeze_at_from_message_date(sent_at, int(os.getenv("PAYMENT_SEARCH_MINUTES", "5")))
+    freeze_at = freeze_at_from_message_date(sent_at, int(os.getenv("PAYMENT_SEARCH_MINUTES", "15")))
     db.execute(
         payment_event_upsert_sql(),
         (

@@ -4966,7 +4966,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function normalizePaymentDeadlinesOnBoot() {
     try {
-      // Backfill freeze_at from message_date/created_at + 5m, then freeze overdue unmatched rows.
+      // Backfill freeze_at from message_date/created_at + configured search window, then freeze overdue unmatched rows.
       const result = await freezeOverdueSearchingPayments({ now: new Date() });
       // Canonical vocabulary: legacy waiting/unrouted/parsed → searching while still in window.
       await db.prepare(`
@@ -5488,7 +5488,7 @@ async function migrate(db) {
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_routing_logs_payment ON payment_routing_logs(payment_event_id, created_at DESC)');
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_events_idempotency_key ON payment_events(idempotency_key) WHERE idempotency_key IS NOT NULL');
 
-  // One-time safe backfill for searching payments missing freeze_at (message_date + 5m, never extended).
+  // One-time safe backfill for searching payments missing freeze_at (message_date + configured search window, never extended).
   try {
     const missing = await db.prepare(`
       SELECT id, message_date, created_at

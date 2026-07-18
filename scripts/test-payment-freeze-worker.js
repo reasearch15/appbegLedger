@@ -49,7 +49,7 @@ async function run() {
   const store = await createDataStore({ dialect: 'sqlite', databasePath: dbPath });
   const now = new Date('2026-07-12T15:00:00.000Z');
 
-  // New payment gets freeze_at = received + 5 minutes
+  // New payment gets freeze_at = received + 15 minutes
   {
     const received = new Date('2026-07-12T14:55:00.000Z').toISOString();
     const expected = computePaymentFreezeAt(received);
@@ -57,7 +57,7 @@ async function run() {
     const ensured = await store.ensurePaymentSearchDeadline(1, { receivedAt: received });
     assert.equal(ensured.freeze_at, expected);
     assert.ok(ensured.matching_status === 'searching' || ensured.routing_status === 'unrouted');
-    console.log('✓ new payment gets freeze_at = received_at + 5 minutes');
+    console.log('✓ new payment gets freeze_at = received_at + 15 minutes');
   }
 
   // Searching before deadline stays searching
@@ -74,7 +74,7 @@ async function run() {
 
   // Overdue searching becomes frozen
   {
-    const received = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
+    const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
     const freezeAt = computePaymentFreezeAt(received);
     await insertPayment(store, { id: 3, routingStatus: 'searching', messageDate: received, freezeAt });
     const result = await store.freezeOverdueSearchingPayments({ now });
@@ -159,7 +159,7 @@ async function run() {
 
   // Startup tick freezes overdue
   {
-    const received = new Date(now.getTime() - 12 * 60 * 1000).toISOString();
+    const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
     await insertPayment(store, {
       id: 8,
       routingStatus: 'searching',
