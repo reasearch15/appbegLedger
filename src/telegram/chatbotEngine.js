@@ -67,6 +67,7 @@ export const BOT_REGISTRATION_STEPS = [
   'enter_appbeg_username',
   'password',
   'enter_appbeg_password',
+  'referral_choice',
   'review',
   'creating_account',
   'submitted',
@@ -322,7 +323,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     action = 'staff:takeover';
   } else if (!action && isConfirmCommand(text) && normalizedStep === 'review' && isRegistrationFlow(flow)) {
     action = 'bot:confirm';
-  } else if (!action && isEditCommand(text) && isRegistrationFlow(flow)) {
+  } else if (!action && isEditCommand(text) && isRegistrationFlow(flow) && normalizedStep === 'review') {
     action = 'bot:edit';
   }
 

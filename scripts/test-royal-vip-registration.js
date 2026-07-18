@@ -5,6 +5,7 @@ import {
   guestMenuButtons,
   registeredMenuButtons,
   reviewScreenButtons,
+  referralChoiceButtons,
   maskPaymentIdentifier,
   redactRegistrationInfoForApi
 } from '../src/telegram/botRegistrationState.js';
@@ -187,19 +188,90 @@ async function run() {
   fresh.apply(usernameOk);
   console.log('ok username advances to password');
 
-  // Password -> review masked
+  // Password -> referral choice
   const passwordOk = await decideBotReply({
     store: fresh,
     contact: { ...guest, registration_status: 'Collecting Info' },
     messageText: 'secret1'
   });
-  assert.equal(passwordOk.kind, 'registration_review');
-  assert.match(passwordOk.replies[0].text, /Password:\n••••••/);
-  assert.doesNotMatch(passwordOk.replies[0].text, /secret1/);
+  assert.equal(passwordOk.kind, 'registration_ask_referral_choice');
+  assert.equal(passwordOk.statePatch.currentStep, 'referral_choice');
+  assert.equal(passwordOk.statePatch.registrationInfo.appbeg_password, 'secret1');
+  assert.match(passwordOk.replies[0].text, /Do you have a referral code/);
+  assert.deepEqual(referralChoiceButtons()[0].map((b) => b.text), ['Yes', 'No']);
+  fresh.apply(passwordOk);
+  console.log('ok password advances to referral choice');
+
+  const noReferralReview = await decideBotReply({
+    store: fresh,
+    contact: { ...guest, registration_status: 'Collecting Info' },
+    messageText: 'no'
+  });
+  assert.equal(noReferralReview.kind, 'registration_review');
+  assert.equal(noReferralReview.statePatch.registrationInfo.referral_code, null);
+  assert.match(noReferralReview.replies[0].text, /Password:\n••••••/);
+  assert.match(noReferralReview.replies[0].text, /Referral Code:\nNone/);
+  assert.doesNotMatch(noReferralReview.replies[0].text, /secret1/);
   const reviewActions = reviewScreenButtons().flat().map((b) => b.data);
   assert.ok(reviewActions.includes('register:confirm'));
-  fresh.apply(passwordOk);
+  fresh.apply(noReferralReview);
+  console.log('ok no referral leads to review');
   console.log('ok review masks password');
+
+  // Yes referral -> code prompt -> review with referral
+  const referralStore = createMockStore({
+    automationState: {
+      current_flow: 'bot_registration',
+      current_step: 'referral_choice',
+      registration_info: {
+        payment_confirmed: true,
+        first_deposit_amount: 10,
+        payment_display_name: 'John Smith',
+        preferred_appbeg_username: 'JohnVIP01',
+        appbeg_password: 'secret1'
+      }
+    }
+  });
+  const yesReferral = await decideBotReply({
+    store: referralStore,
+    contact: { ...guest, registration_status: 'Collecting Info' },
+    messageText: 'yes'
+  });
+  assert.equal(yesReferral.kind, 'registration_ask_referral_code');
+  assert.equal(yesReferral.statePatch.currentStep, 'referral_code');
+  referralStore.apply(yesReferral);
+  const referralReview = await decideBotReply({
+    store: referralStore,
+    contact: { ...guest, registration_status: 'Collecting Info' },
+    messageText: 'REF123'
+  });
+  assert.equal(referralReview.kind, 'registration_review');
+  assert.equal(referralReview.statePatch.registrationInfo.referral_code, 'REF123');
+  assert.match(referralReview.replies[0].text, /Referral Code:\nREF123/);
+  console.log('ok referral code leads to review');
+
+  // Skip at referral code -> review with no referral
+  const skipReferralStore = createMockStore({
+    automationState: {
+      current_flow: 'bot_registration',
+      current_step: 'referral_code',
+      registration_info: {
+        payment_confirmed: true,
+        first_deposit_amount: 10,
+        payment_display_name: 'John Smith',
+        preferred_appbeg_username: 'JohnVIP01',
+        appbeg_password: 'secret1'
+      }
+    }
+  });
+  const skippedReferral = await decideBotReply({
+    store: skipReferralStore,
+    contact: { ...guest, registration_status: 'Collecting Info' },
+    messageText: 'skip'
+  });
+  assert.equal(skippedReferral.kind, 'registration_review');
+  assert.equal(skippedReferral.statePatch.registrationInfo.referral_code, null);
+  console.log('ok skip referral code leads to review');
 
   // Confirm creates account (idempotent flag)
   const confirm = await decideBotReply({

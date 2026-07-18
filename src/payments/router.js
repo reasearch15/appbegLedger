@@ -337,7 +337,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       paymentEventId: payment.id,
       bot,
       io,
-      alreadyClaimed: true
+      alreadyClaimed: true,
+      matchingMethod: match.matchMethod || 'exact_name'
     });
 
     return {
@@ -397,6 +398,31 @@ export async function routeUnprocessedPayments(store, { limit = 50, bot = null, 
 }
 
 export async function reprocessPaymentEvent(store, paymentId, { bot = null, io = null } = {}) {
+  const current = await store.getPaymentEvent(paymentId);
+  if (
+    current
+    && current.routing_status === ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED
+    && current.registration_payment_window_id
+  ) {
+    await store.logPaymentRouting(paymentId, 'reprocess_registration_continuation_requested', 'Staff requested registration continuation for an already matched payment.');
+    await continueBotRegistrationAfterPayment(store, {
+      contactId: current.contact_id,
+      windowId: current.registration_payment_window_id,
+      paymentEventId: current.id,
+      actorName: 'Staff',
+      bot,
+      io,
+      alreadyClaimed: true,
+      matchingMethod: 'already_matched_reprocess'
+    });
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(paymentId),
+      outcome: current.routing_status,
+      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
+      resumedContinuation: true
+    };
+  }
   await store.resetPaymentRoutingForReprocess(paymentId);
   await store.logPaymentRouting(paymentId, 'reprocess_requested', 'Staff requested payment reprocessing.');
   return await routePaymentEvent(store, paymentId, { force: true, bot, io });
@@ -436,7 +462,8 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
       paymentEventId: paymentId,
       actorName: staffName,
       bot,
-      io
+      io,
+      matchingMethod: 'manual_link'
     });
   }
 

@@ -41,14 +41,17 @@ function paymentText(name = 'Amy Fei', amount = 9) {
   ].join('\n');
 }
 
-function createRouterStore({ windows = [] } = {}) {
+function createRouterStore({ windows = [], autoBotEnabled = false } = {}) {
   const payments = new Map();
   const logs = [];
+  const outbound = [];
+  const automationState = new Map();
 
   return {
     windows,
     payments,
     logs,
+    outbound,
     async getPaymentEvent(id) {
       const payment = payments.get(Number(id));
       return payment ? { ...payment } : null;
@@ -122,17 +125,56 @@ function createRouterStore({ windows = [] } = {}) {
       return windows.find((w) => w.id === id) || null;
     },
     async getUserProfile(id) {
-      return { id, telegram_id: 1000 + id, registration_status: 'Collecting Info' };
+      return {
+        id,
+        telegram_id: 1000 + id,
+        registration_status: 'Collecting Info',
+        telegram_sync_source: 'bot_api',
+        active_messaging_source: 'bot_api'
+      };
     },
-    async getAutomationState() {
-      return { registration_info: {}, current_flow: null, current_step: null };
+    async getAutomationState(id = 10) {
+      return automationState.get(Number(id)) || { registration_info: {}, current_flow: null, current_step: null };
     },
-    async updateRegistrationInfo() {},
-    async updateAutomationState() {},
+    async ensureAutomationState(id = 10) {
+      return this.getAutomationState(id);
+    },
+    async updateRegistrationInfo(id, patch) {
+      const current = await this.getAutomationState(id);
+      const next = {
+        ...current,
+        registration_info: {
+          ...(current.registration_info || {}),
+          ...(patch || {})
+        }
+      };
+      automationState.set(Number(id), next);
+      return next;
+    },
+    async updateAutomationState(id, patch) {
+      const current = await this.getAutomationState(id);
+      const next = {
+        ...current,
+        current_flow: patch.currentFlow ?? patch.current_flow ?? current.current_flow,
+        current_step: patch.currentStep ?? patch.current_step ?? current.current_step,
+        registration_info: patch.registrationInfo
+          ? { ...(current.registration_info || {}), ...patch.registrationInfo }
+          : (current.registration_info || {})
+      };
+      automationState.set(Number(id), next);
+      return next;
+    },
     async updateRegistrationStatus() {},
     async completeRegistrationPaymentWindow() {},
     async getAutoRegistrationBotSettings() {
-      return { enabled: false };
+      return { enabled: autoBotEnabled };
+    },
+    async getContactPreferredMessageSource() {
+      return 'bot_api';
+    },
+    async storeOutgoingMessage(message) {
+      outbound.push(message);
+      return { id: outbound.length, ...message };
     },
     async logEvent() {}
   };
@@ -316,6 +358,96 @@ async function run() {
     assert.equal(store.payments.get(11).unmatched_reason, null);
     assert.equal(store.logs.some((log) => log.metadata?.matchingMethod === 'surname_initial'), true);
     console.log('ok router matches active registration window by surname initial');
+  }
+
+  // Router continuation sends username prompt after exact-name registration match.
+  {
+    const windows = [makeWindow({ id: 121, flow_type: 'registration', contact_id: 21 })];
+    const store = createRouterStore({ windows, autoBotEnabled: true });
+    const bot = {
+      telegram: {
+        async sendMessage(chatId, text) {
+          return { message_id: 501, chat: { id: chatId }, text };
+        }
+      }
+    };
+    store.payments.set(21, {
+      id: 21,
+      message_text: paymentText(),
+      telegram_group_id: 'g1',
+      telegram_message_id: 21,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    const result = await routePaymentEvent(store, 21, { bot });
+    const state = await store.getAutomationState(21);
+    assert.equal(result.outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal(state.current_flow, 'bot_registration');
+    assert.equal(state.current_step, 'username');
+    assert.equal(state.registration_info.payment_confirmed, true);
+    assert.equal(state.registration_info.registration_payment_window_id, 121);
+    assert.equal(state.registration_info.registration_payment_event_id, 21);
+    assert.equal(state.registration_info.confirmed_deposit_amount, 9);
+    assert.match(store.outbound[0].text, /Payment confirmed\. What Royal VIP username would you like to create\?/);
+    console.log('ok exact-name registration match asks for Royal VIP username');
+  }
+
+  // Router continuation sends username prompt after surname-initial registration match.
+  {
+    const windows = [makeWindow({ id: 122, flow_type: 'registration', contact_id: 22, payment_display_name: 'Amy Field', first_deposit_amount: 5 })];
+    const store = createRouterStore({ windows, autoBotEnabled: true });
+    const bot = {
+      telegram: {
+        async sendMessage(chatId, text) {
+          return { message_id: 502, chat: { id: chatId }, text };
+        }
+      }
+    };
+    store.payments.set(22, {
+      id: 22,
+      message_text: paymentText('Amy F.', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 22,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    const result = await routePaymentEvent(store, 22, { bot });
+    const state = await store.getAutomationState(22);
+    assert.equal(result.outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal(state.current_step, 'username');
+    assert.equal(store.outbound.length, 1);
+    assert.equal(store.logs.some((log) => log.metadata?.matchingMethod === 'surname_initial'), true);
+    console.log('ok surname-initial registration match asks for Royal VIP username');
+  }
+
+  // Duplicate continuation does not send duplicate username prompts or reset state.
+  {
+    const windows = [makeWindow({ id: 123, flow_type: 'registration', contact_id: 23 })];
+    const store = createRouterStore({ windows, autoBotEnabled: true });
+    const bot = {
+      telegram: {
+        async sendMessage(chatId, text) {
+          return { message_id: 503 + store.outbound.length, chat: { id: chatId }, text };
+        }
+      }
+    };
+    store.payments.set(23, {
+      id: 23,
+      message_text: paymentText(),
+      telegram_group_id: 'g1',
+      telegram_message_id: 23,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    await routePaymentEvent(store, 23, { bot });
+    await reprocessPaymentEvent(store, 23, { bot });
+    assert.equal(store.outbound.length, 1);
+    assert.equal(store.payments.get(23).routing_status, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal((await store.getAutomationState(23)).current_step, 'username');
+    console.log('ok duplicate/reprocess payment callback does not create duplicate prompt');
   }
 
   // Reprocess uses same improved matching logic.

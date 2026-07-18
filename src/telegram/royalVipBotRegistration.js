@@ -9,7 +9,8 @@
 import {
   MIN_REGISTRATION_DEPOSIT,
   parseFirstDepositAmount,
-  chatbotWelcomeCooldownMs
+  chatbotWelcomeCooldownMs,
+  isReferralSkipInput
 } from '../registration/utils.js';
 import {
   APPBEG_PASSWORD_HELP,
@@ -23,6 +24,7 @@ import {
   clearedBotRegistrationInfo,
   guestMenuButtons,
   paymentQrRetryButtons,
+  referralChoiceButtons,
   registrationNavButtons,
   registeredMenuButtons,
   resolveEffectiveRegistrationState,
@@ -63,6 +65,14 @@ export const PASSWORD_PROMPT = [
   '',
   'Minimum:',
   '6 characters'
+].join('\n');
+
+export const REFERRAL_CHOICE_PROMPT = 'Do you have a referral code?';
+
+export const REFERRAL_CODE_PROMPT = [
+  'Please enter your referral code.',
+  '',
+  'You can also type Skip.'
 ].join('\n');
 
 export const ACCOUNT_CREATE_PROGRESS = [
@@ -140,6 +150,25 @@ function offTopicGuard(text, promptText, info, step, buttons) {
   return flowReminder(promptText, info, step, buttons);
 }
 
+function isReferralYesInput(text = '') {
+  return /^(yes|y)$/i.test(String(text || '').trim());
+}
+
+function isReferralNoInput(text = '') {
+  return /^(no|n|skip)$/i.test(String(text || '').trim());
+}
+
+function validateReferralCodeInput(text = '') {
+  const value = String(text || '').trim();
+  if (!value) {
+    return { ok: false, error: 'Referral code cannot be blank. Enter the code or tap Skip.' };
+  }
+  if (value.length > 64 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    return { ok: false, error: 'That referral code format is not valid. Enter letters, numbers, dashes, or underscores only, or tap Skip.' };
+  }
+  return { ok: true, referralCode: value };
+}
+
 export function reviewDecision(info) {
   const amount = info.first_deposit_amount ?? info.requested_deposit_amount;
   const text = [
@@ -155,6 +184,9 @@ export function reviewDecision(info) {
     '',
     'Password:',
     info.appbeg_password ? '••••••' : '—',
+    '',
+    'Referral Code:',
+    info.referral_code || 'None',
     '━━━━━━━━━━━━━━'
   ].join('\n');
 
@@ -329,6 +361,31 @@ export async function continueRoyalVipRegistration({
       statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'password', registrationInfo: info },
       escalate: false
     };
+  }
+
+  if (action === 'bot:edit_referral') {
+    return {
+      kind: 'registration_ask_referral_choice',
+      replies: [{ text: REFERRAL_CHOICE_PROMPT, buttons: referralChoiceButtons() }],
+      statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'referral_choice', registrationInfo: info },
+      escalate: false
+    };
+  }
+
+  if (action === 'bot:enter_referral') {
+    console.log('[chatbot] referral_choice_recorded', JSON.stringify({ contactId: contact?.id, choice: 'yes' }));
+    return {
+      kind: 'registration_ask_referral_code',
+      replies: [{ text: REFERRAL_CODE_PROMPT, buttons: referralChoiceButtons() }],
+      statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'referral_code', registrationInfo: info },
+      escalate: false,
+      logEvent: { event: 'referral_choice_recorded', choice: 'yes' }
+    };
+  }
+
+  if (action === 'bot:skip_referral') {
+    console.log('[chatbot] referral_choice_recorded', JSON.stringify({ contactId: contact?.id, choice: 'no' }));
+    return reviewDecision({ ...info, referral_code: null });
   }
 
   if (action === 'bot:payment_instructions') {
@@ -698,7 +755,73 @@ export async function continueRoyalVipRegistration({
     }
 
     const nextInfo = { ...info, appbeg_password: passwordResult.password };
-    return reviewDecision(nextInfo);
+    return {
+      kind: 'registration_ask_referral_choice',
+      replies: [{ text: REFERRAL_CHOICE_PROMPT, buttons: referralChoiceButtons() }],
+      statePatch: {
+        currentFlow: BOT_REGISTRATION_FLOW,
+        currentStep: 'referral_choice',
+        registrationInfo: nextInfo
+      },
+      escalate: false,
+      logEvent: { event: 'flow_step', step: 'referral_choice' }
+    };
+  }
+
+  if (normalizedStep === 'referral_choice') {
+    if (!info.payment_confirmed) {
+      return {
+        kind: 'registration_waiting_payment',
+        replies: [{
+          text: 'We are still waiting to verify your payment.',
+          buttons: cancelButtons
+        }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
+        escalate: false
+      };
+    }
+    if (isReferralYesInput(text)) {
+      console.log('[chatbot] referral_choice_recorded', JSON.stringify({ contactId: contact?.id, choice: 'yes' }));
+      return {
+        kind: 'registration_ask_referral_code',
+        replies: [{ text: REFERRAL_CODE_PROMPT, buttons: referralChoiceButtons() }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'referral_code', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'referral_choice_recorded', choice: 'yes' }
+      };
+    }
+    if (isReferralNoInput(text)) {
+      console.log('[chatbot] referral_choice_recorded', JSON.stringify({ contactId: contact?.id, choice: 'no' }));
+      return reviewDecision({ ...info, referral_code: null });
+    }
+    return {
+      kind: 'registration_ask_referral_choice',
+      replies: [{ text: REFERRAL_CHOICE_PROMPT, buttons: referralChoiceButtons() }],
+      statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'referral_choice', registrationInfo: info },
+      escalate: false
+    };
+  }
+
+  if (normalizedStep === 'referral_code') {
+    if (isReferralSkipInput(text)) {
+      console.log('[chatbot] referral_code_recorded', JSON.stringify({ contactId: contact?.id, hasReferralCode: false }));
+      return reviewDecision({ ...info, referral_code: null });
+    }
+    const referralResult = validateReferralCodeInput(text);
+    if (!referralResult.ok) {
+      return {
+        kind: 'registration_ask_referral_code',
+        replies: [{
+          text: referralResult.error,
+          buttons: referralChoiceButtons()
+        }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'referral_code', registrationInfo: info },
+        escalate: false,
+        logEvent: { event: 'referral_code_invalid' }
+      };
+    }
+    console.log('[chatbot] referral_code_recorded', JSON.stringify({ contactId: contact?.id, hasReferralCode: true }));
+    return reviewDecision({ ...info, referral_code: referralResult.referralCode });
   }
 
   if (normalizedStep === 'review' || normalizedStep === 'creating_account') {

@@ -14,6 +14,7 @@ export const PHASE1_REGISTRATION_STEPS = [
   'enter_payment_display_name',
   'enter_appbeg_username',
   'enter_appbeg_password',
+  'referral_choice',
   'enter_referral_code',
   'review',
   'submitted',
@@ -37,7 +38,11 @@ const STEP_ALIASES = {
   payment_display_name: 'payment_name',
   enter_appbeg_username: 'username',
   enter_appbeg_password: 'password',
+  awaiting_royal_vip_username: 'username',
+  awaiting_royal_vip_password: 'password',
+  awaiting_referral_choice: 'referral_choice',
   enter_referral_code: 'referral_code',
+  awaiting_referral_code: 'referral_code',
   appbeg_username: 'username',
   confirm: 'review',
   chime_payment_name: 'payment_name',
@@ -316,8 +321,8 @@ export function restartConfirmButtons() {
 
 export function reviewScreenButtons() {
   return [
-    [{ label: '✅ Create My Account', action: 'register:confirm', text: 'Create My Account', data: 'register:confirm' }],
-    [{ label: '✏️ Edit Information', action: 'register:edit_payment', text: 'Edit Information', data: 'register:edit_payment' }],
+    [{ label: 'Confirm', action: 'register:confirm', text: 'Confirm', data: 'register:confirm' }],
+    [{ label: 'Back', action: 'register:edit_password', text: 'Back', data: 'register:edit_password' }],
     [{ label: '❌ Cancel Registration', action: 'register:cancel_request', text: 'Cancel Registration', data: 'register:cancel_request' }]
   ];
 }
@@ -325,8 +330,8 @@ export function reviewScreenButtons() {
 export function referralChoiceButtons() {
   return [
     [
-      { label: 'Enter Referral Code', action: 'register:enter_referral', text: 'Enter Referral Code', data: 'register:enter_referral' },
-      { label: 'Skip', action: 'register:skip_referral', text: 'Skip', data: 'register:skip_referral' }
+      { label: 'Yes', action: 'register:enter_referral', text: 'Yes', data: 'register:enter_referral' },
+      { label: 'No', action: 'register:skip_referral', text: 'No', data: 'register:skip_referral' }
     ]
   ];
 }

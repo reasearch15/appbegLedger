@@ -6,9 +6,7 @@ import {
 import { emitOngoingChanged } from '../ongoing/emit.js';
 
 const USERNAME_PROMPT = [
-  'Payment received and verified!',
-  '',
-  'Now choose your Royal VIP username.',
+  'Payment confirmed. What Royal VIP username would you like to create?',
   '',
   'Example:',
   'JohnVIP01',
@@ -23,7 +21,8 @@ export async function continueBotRegistrationAfterPayment(store, {
   actorName = 'PaymentGroupListener',
   bot = null,
   io = null,
-  alreadyClaimed = false
+  alreadyClaimed = false,
+  matchingMethod = null
 }) {
   const contact = await store.getUserProfile(contactId);
   if (!contact) throw new Error('Contact not found for registration payment continuation.');
@@ -38,13 +37,37 @@ export async function continueBotRegistrationAfterPayment(store, {
   }
 
   const automation = await store.getAutomationState(contactId);
+  const previousInfo = automation?.registration_info || {};
+  const confirmedAt = previousInfo.payment_confirmed_at || new Date().toISOString();
+  const depositAmount = Number(window.first_deposit_amount);
   const info = {
-    ...(automation?.registration_info || {}),
+    ...previousInfo,
     payment_confirmed: true,
-    payment_confirmed_at: new Date().toISOString(),
+    payment_confirmed_at: confirmedAt,
     payment_confirmed_by: 'payment_group_listener',
-    registration_payment_window_id: windowId
+    matched_payment_event_id: paymentEventId,
+    registration_payment_event_id: paymentEventId,
+    registration_payment_window_id: windowId,
+    confirmed_deposit_amount: Number.isFinite(depositAmount) ? depositAmount : previousInfo.confirmed_deposit_amount
   };
+
+  console.log('[payment-router] registration_payment_matched', JSON.stringify({
+    contactId,
+    windowId,
+    paymentEventId,
+    matchingMethod,
+    currentPhase: automation?.current_step || null,
+    nextPhase: 'username'
+  }));
+  if (paymentEventId) {
+    await store.logPaymentRouting(paymentEventId, 'registration_payment_continuation_started', 'Registration payment matched; starting bot continuation.', {
+      contactId,
+      windowId,
+      matchingMethod,
+      currentPhase: automation?.current_step || null,
+      nextPhase: 'username'
+    });
+  }
 
   await store.updateRegistrationInfo(contactId, info, actorName);
 
@@ -70,6 +93,23 @@ export async function continueBotRegistrationAfterPayment(store, {
     currentStep: 'username',
     registrationInfo: info
   });
+  console.log('[payment-router] registration_session_phase_updated', JSON.stringify({
+    contactId,
+    windowId,
+    paymentEventId,
+    matchingMethod,
+    currentPhase: automation?.current_step || null,
+    nextPhase: 'username'
+  }));
+  if (paymentEventId) {
+    await store.logPaymentRouting(paymentEventId, 'registration_session_phase_updated', 'Registration session advanced after payment confirmation.', {
+      contactId,
+      windowId,
+      matchingMethod,
+      currentPhase: automation?.current_step || null,
+      nextPhase: 'username'
+    });
+  }
   if (store.updateRegistrationStatus) {
     await store.updateRegistrationStatus(contactId, 'Collecting Info', actorName).catch(() => null);
   }
@@ -83,12 +123,63 @@ export async function continueBotRegistrationAfterPayment(store, {
     metadata: { windowId, paymentEventId }
   });
 
-  await queueBotReply({
-    store,
-    user: contact,
-    text: USERNAME_PROMPT,
-    bot: bot || globalThis.telegramBot || null
-  });
+  const alreadyPrompted = Boolean(previousInfo.post_payment_username_prompted_at);
+  if (!alreadyPrompted) {
+    try {
+      await queueBotReply({
+        store,
+        user: contact,
+        text: USERNAME_PROMPT,
+        bot: bot || globalThis.telegramBot || null
+      });
+      const promptedAt = new Date().toISOString();
+      await store.updateRegistrationInfo(contactId, {
+        post_payment_username_prompted_at: promptedAt
+      }, actorName);
+      console.log('[payment-router] registration_username_prompt_sent', JSON.stringify({
+        contactId,
+        windowId,
+        paymentEventId,
+        matchingMethod,
+        nextPhase: 'username'
+      }));
+      if (paymentEventId) {
+        await store.logPaymentRouting(paymentEventId, 'registration_username_prompt_sent', 'Royal VIP username prompt sent after payment confirmation.', {
+          contactId,
+          windowId,
+          matchingMethod,
+          nextPhase: 'username'
+        });
+      }
+    } catch (error) {
+      console.log('[payment-router] registration_continuation_failure', JSON.stringify({
+        contactId,
+        windowId,
+        paymentEventId,
+        matchingMethod,
+        phase: 'username',
+        error: error.message
+      }));
+      if (paymentEventId) {
+        await store.logPaymentRouting(paymentEventId, 'registration_continuation_failure', 'Registration session was advanced, but the username prompt could not be sent.', {
+          contactId,
+          windowId,
+          matchingMethod,
+          phase: 'username',
+          error: error.message
+        }, 'warn');
+      }
+      return { contact, window, messageFailed: true };
+    }
+  } else {
+    console.log('[payment-router] registration_username_prompt_duplicate_skipped', JSON.stringify({
+      contactId,
+      windowId,
+      paymentEventId,
+      matchingMethod,
+      nextPhase: 'username'
+    }));
+  }
 
   console.log(`[payment-router] registration_continued_after_payment_match contact=${contactId} window=${windowId}`);
 

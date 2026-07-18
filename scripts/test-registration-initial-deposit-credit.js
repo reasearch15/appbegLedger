@@ -31,14 +31,15 @@ function makeResponse(status, payload) {
   };
 }
 
-function makeCreateStore({ creditFails = false, markFails = false } = {}) {
+function makeCreateStore({ creditFails = false, markFails = false, registrationInfo = {} } = {}) {
   const calls = [];
   const info = {
     payment_confirmed: true,
     preferred_appbeg_username: 'JohnVIP01',
     appbeg_password: 'secret123',
     registration_payment_window_id: 44,
-    appbeg_coadmin_uid: 'coadmin_1'
+    appbeg_coadmin_uid: 'coadmin_1',
+    ...registrationInfo
   };
   return {
     calls,
@@ -108,6 +109,23 @@ async function testRegistrationCreditBeforeRegistered() {
   assert.equal(store.calls.some(([name]) => name === 'markRegistered'), true);
   assert.equal(store.calls.find(([name]) => name === 'credit')[1].paymentEventId, 123);
   assert.equal(store.calls.find(([name]) => name === 'credit')[1].amount, 25);
+}
+
+async function testReferralCodeReachesCreatePlayerApi() {
+  process.env.APPBEG_API_URL = 'https://appbeg.test';
+  process.env.APPBEG_LEDGER_INTERNAL_TOKEN = 'token';
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return makeResponse(200, { ok: true, playerUid: 'player_1', username: 'JohnVIP01' });
+  };
+  const store = makeCreateStore({ registrationInfo: { referral_code: 'REF123' } });
+  await createAppBegPlayerForContact(store, { contactId: 10, actorName: 'Chatbot' });
+  assert.equal(requests[0].url, 'https://appbeg.test/api/internal/ledger/create-player');
+  assert.equal(requests[0].body.referralCode, 'REF123');
+  assert.equal(requests[0].body.coadminUid, 'coadmin_1');
+  assert.equal(requests[0].body.ledgerContactId, 10);
+  assert.equal(requests[0].body.telegramUserId, '777');
 }
 
 async function testCreditFailureBlocksRegistered() {
@@ -235,6 +253,7 @@ async function testNormalDepositUsesSharedCredit() {
 
 try {
   await testRegistrationCreditBeforeRegistered();
+  await testReferralCodeReachesCreatePlayerApi();
   await testCreditFailureBlocksRegistered();
   await testLocalFailureRetriesAsAlreadyCredited();
   await testCreditClientIdempotencyAndConflict();
