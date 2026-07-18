@@ -64,7 +64,7 @@ export function registrationWizardIndex(stepKey) {
   return index >= 0 ? index : 0;
 }
 
-export function renderContactOverview({ contact, automationState, wizard, coadminSettings = {}, loading = false, appbegCreateState = null }) {
+export function renderContactOverview({ contact, automationState, wizard, coadminSettings = {}, loading = false, appbegCreateState = null, isAdmin = false, revokeState = null }) {
   if (loading && !contact) {
     return `
       <section class="contact-overview-panel">
@@ -106,7 +106,7 @@ export function renderContactOverview({ contact, automationState, wizard, coadmi
       </header>
 
       ${registered
-    ? renderRegisteredCard(contact, info)
+    ? renderRegisteredCard(contact, info, { isAdmin, revokeState })
     : readyToCreate
       ? renderReadyToCreateCard(contact, info, coadminSettings, appbegCreateState)
       : renderUnregisteredCard(contact, info)}
@@ -122,7 +122,9 @@ export function renderContactOverview({ contact, automationState, wizard, coadmi
   `;
 }
 
-function renderRegisteredCard(contact, info) {
+function renderRegisteredCard(contact, info, { isAdmin = false, revokeState = null } = {}) {
+  const revoking = Boolean(revokeState?.revoking);
+  const error = revokeState?.error || '';
   return `
     <section class="status-card status-card-success">
       <div class="status-card-icon" aria-hidden="true">✅</div>
@@ -137,7 +139,9 @@ function renderRegisteredCard(contact, info) {
         <div class="status-card-actions">
           <button type="button" class="button" data-overview-action="open-chat">Open Conversation</button>
           <button type="button" class="button secondary" data-overview-action="view-profile">View Player Profile</button>
+          ${isAdmin ? `<button type="button" class="button danger" data-overview-action="revoke-registration" ${revoking ? 'disabled' : ''}>${revoking ? 'Revoking...' : 'Revoke Registration'}</button>` : ''}
         </div>
+        ${error ? `<div class="modal-error">${escapeHtml(error)}</div>` : ''}
       </div>
     </section>
   `;

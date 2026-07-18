@@ -103,6 +103,8 @@ let state = {
   settingsSuccess: null,
   settingsError: null,
   registrationModal: null,
+  revokeRegistrationModal: null,
+  revokeRegistrationState: null,
   registrationWizard: null,
   appbegCreateState: null,
   paymentMethods: [],
@@ -902,6 +904,10 @@ async function handleOverviewAction(action) {
     render();
     return;
   }
+  if (action === 'revoke-registration') {
+    openRevokeRegistrationModal();
+    return;
+  }
   if (action === 'start-register') {
     startRegistrationWizard(state.selectedContactId);
     return;
@@ -1005,6 +1011,64 @@ async function openRegistrationModal(contactId) {
 function closeRegistrationModal() {
   state.registrationModal = null;
   render();
+}
+
+function openRevokeRegistrationModal() {
+  if (!isAdmin() || state.contact?.registration_status !== 'Registered') return;
+  state.revokeRegistrationModal = {
+    open: true,
+    contactId: state.contact.id,
+    contactName: state.contact.display_name || 'this contact',
+    saving: false,
+    error: null
+  };
+  state.revokeRegistrationState = null;
+  render();
+}
+
+function closeRevokeRegistrationModal() {
+  state.revokeRegistrationModal = null;
+  render();
+}
+
+async function confirmRevokeRegistration() {
+  const modal = state.revokeRegistrationModal;
+  if (!modal?.open || modal.saving) return;
+
+  state.revokeRegistrationModal = { ...modal, saving: true, error: null };
+  state.revokeRegistrationState = { revoking: true, error: null };
+  render();
+
+  try {
+    const payload = await api(`/api/contacts/${modal.contactId}/registration/revoke`, {
+      method: 'POST',
+      body: JSON.stringify({ staffName: state.staffName })
+    });
+    contactDetailCache.delete(Number(modal.contactId));
+    state.contact = normalizeContact(payload.contact);
+    state.automationState = payload.automationState || null;
+    state.registrationWizard = null;
+    state.revokeRegistrationModal = null;
+    state.revokeRegistrationState = null;
+    await Promise.all([
+      refreshContacts({ force: true, reason: 'registration revoked' }),
+      refreshStats({ force: true, reason: 'registration revoked' })
+    ]);
+    await refreshPlayers({ keepSelection: true, silent: true });
+    render();
+  } catch (error) {
+    console.error('[registration-revoke] failed:', error);
+    state.revokeRegistrationModal = {
+      ...state.revokeRegistrationModal,
+      saving: false,
+      error: error.message || 'Failed to revoke registration.'
+    };
+    state.revokeRegistrationState = {
+      revoking: false,
+      error: error.message || 'Failed to revoke registration.'
+    };
+    render();
+  }
 }
 
 const REGISTRATION_MODAL_ACTIONS = new Set(['register', 'edit', 'continue', 'review', 'open']);
@@ -2360,7 +2424,9 @@ function contactsWorkspace() {
     wizard: state.registrationWizard,
     coadminSettings: state.coadminSettings,
     loading: state.contactLoading,
-    appbegCreateState: state.appbegCreateState
+    appbegCreateState: state.appbegCreateState,
+    isAdmin: isAdmin(),
+    revokeState: state.revokeRegistrationState
   });
   const wizardActive = Boolean(state.registrationWizard?.active);
   return `
@@ -2885,6 +2951,7 @@ function render() {
         : contactsWorkspace()}
     </div>
     ${renderRegistrationModal(state)}
+    ${renderRevokeRegistrationModal()}
   `;
   bindEvents();
   if (state.section === 'players') {
@@ -2903,6 +2970,37 @@ function render() {
   ongoingController.syncTicker();
   syncPaymentTableHorizontalScroll();
   scrollChatToBottom();
+}
+
+function renderRevokeRegistrationModal() {
+  const modal = state.revokeRegistrationModal;
+  if (!modal?.open) return '';
+  const saving = Boolean(modal.saving);
+  return `
+    <div class="modal-backdrop" id="revokeRegistrationModalBackdrop" data-modal-backdrop>
+      <section class="modal-card danger-modal" role="dialog" aria-modal="true" aria-labelledby="revokeRegistrationTitle">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">Admin action</div>
+            <h2 id="revokeRegistrationTitle">Revoke Registration</h2>
+          </div>
+          <button type="button" class="modal-close" id="closeRevokeRegistrationModal" aria-label="Close">&times;</button>
+        </div>
+        <p>
+          This will clear local registration data for ${escapeHtml(modal.contactName)} and let the user register again from the beginning.
+          Telegram conversation history, notes, tags, AppBeg ledger history, and the AppBeg player account will not be deleted.
+        </p>
+        <p class="modal-error">
+          A new registration will require a new payment. Already consumed payment events will stay consumed and will not be reused.
+        </p>
+        ${modal.error ? `<div class="modal-error">${escapeHtml(modal.error)}</div>` : ''}
+        <div class="modal-actions">
+          <button type="button" class="button secondary" id="cancelRevokeRegistrationModal" ${saving ? 'disabled' : ''}>Cancel</button>
+          <button type="button" class="button danger" id="confirmRevokeRegistration" ${saving ? 'disabled' : ''}>${saving ? 'Revoking...' : 'Revoke Registration'}</button>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 let paymentHScrollSyncing = false;
@@ -3110,8 +3208,22 @@ function bindPersistentEvents() {
       closeRegistrationModal();
       return;
     }
+    if (event.target.closest('#cancelRevokeRegistrationModal') || event.target.closest('#closeRevokeRegistrationModal')) {
+      event.preventDefault();
+      closeRevokeRegistrationModal();
+      return;
+    }
+    if (event.target.closest('#confirmRevokeRegistration')) {
+      event.preventDefault();
+      void confirmRevokeRegistration();
+      return;
+    }
     if (event.target.closest('[data-modal-backdrop]') && event.target.id === 'registrationModalBackdrop') {
       closeRegistrationModal();
+      return;
+    }
+    if (event.target.closest('[data-modal-backdrop]') && event.target.id === 'revokeRegistrationModalBackdrop') {
+      closeRevokeRegistrationModal();
     }
   });
 

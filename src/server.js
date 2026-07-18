@@ -924,6 +924,24 @@ app.post('/api/contacts/:id/read', async (req, res) => {
   res.json({ ok: true, contactId, unreadCount: 0, contact });
 });
 
+app.post('/api/contacts/:id/registration/revoke', requireAdmin, async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const actorName = req.ledgerUser?.username || req.body.staffName || 'Admin';
+    const result = await store.revokeRegistration(contactId, actorName);
+    if (!result) return res.status(404).json({ error: 'Contact not found.' });
+
+    io.emit('contacts:changed');
+    io.emit('users:changed');
+    io.emit('contact:changed', { contactId, userId: contactId });
+    emitOngoingChanged(io, { reason: 'registration_revoked', contactId });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    const status = error.code === 'NOT_REGISTERED' ? 409 : 400;
+    res.status(status).json({ error: error.message });
+  }
+});
+
 app.post('/api/contacts/:id/bot-state', async (req, res) => {
   const contact = await store.getUserProfile(Number(req.params.id));
   if (!contact) return res.status(404).json({ error: 'Contact not found.' });

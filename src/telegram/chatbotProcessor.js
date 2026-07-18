@@ -519,10 +519,16 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
         console.log(`[chatbot] create_player_success contact=${contact.id} username=${created?.username || 'n/a'}`);
       } catch (error) {
         console.log(`[chatbot] create_player_failed contact=${contact.id} error=${error.message}`);
+        const currentInfo = (await store.getAutomationState(contact.id).catch(() => null))?.registration_info || {};
+        const decisionInfo = decision.statePatch?.registrationInfo || {};
+        const safeErrorMessage = String(error.message || 'AppBeg player creation failed.').slice(0, 500);
         await store.updateAutomationState(contact.id, {
           currentStep: 'review',
           registrationInfo: {
-            create_account_in_progress: false
+            ...currentInfo,
+            ...decisionInfo,
+            create_account_in_progress: false,
+            create_account_error: safeErrorMessage
           }
         }).catch(() => null);
         await queueBotReply({

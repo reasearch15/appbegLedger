@@ -9,6 +9,7 @@ export function registrationTimeoutHours() {
 }
 
 export function computeRegistrationProgress(player, info = {}, automationState = null) {
+  const status = player?.registration_status || 'New';
   const useBotProgress = automationState?.current_flow === 'bot_registration'
     || info.registration_method === 'chatbot'
     || Boolean(info.payment_method_name || info.payment_display_name)
@@ -21,7 +22,12 @@ export function computeRegistrationProgress(player, info = {}, automationState =
     {
       key: 'telegram',
       label: 'Telegram Connected',
-      done: Boolean(player.telegram_id)
+      done: status !== 'New' || Boolean(
+        info.preferred_appbeg_username
+        || info.payment_tag
+        || info.payment_display_name
+        || automationState?.current_flow
+      )
     },
     {
       key: 'appbeg',
@@ -36,7 +42,7 @@ export function computeRegistrationProgress(player, info = {}, automationState =
     {
       key: 'submitted',
       label: 'Submitted for Review',
-      done: ['Pending Verification', 'Registered'].includes(player.registration_status)
+      done: ['Pending Verification', 'Registered'].includes(status)
     }
   ];
   const completed = steps.filter((step) => step.done).length;

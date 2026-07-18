@@ -1851,6 +1851,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       lastRuleId: null,
       lastAutomationResponse: null,
       lastAutomationAt: null,
+      lastAutoWelcomeAt: null,
       infoReviewedAt: null,
       infoReviewedBy: null
     });
@@ -1862,6 +1863,114 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       actorName
     });
     return state;
+  }
+
+  async function revokeRegistration(userId, actorName = 'Staff') {
+    const existing = await getUserProfile(userId);
+    if (!existing) return null;
+    if (existing.registration_status !== 'Registered') {
+      const err = new Error('Only registered contacts can be revoked.');
+      err.code = 'NOT_REGISTERED';
+      throw err;
+    }
+
+    const now = nowIso();
+    const previousState = await getAutomationState(userId);
+    const previousInfo = previousState?.registration_info || {};
+    const activeWindows = await db.prepare(`
+      SELECT id, flow_type, status, matched_payment_event_id
+      FROM registration_payment_windows
+      WHERE contact_id = ?
+        AND status = 'active'
+    `).all(userId);
+
+    await db.prepare(`
+      UPDATE telegram_users
+      SET registration_status = 'New',
+          appbeg_account_id = NULL,
+          appbeg_link_status = NULL,
+          payment_profile_status = NULL,
+          verification_status = NULL,
+          registered_at = NULL,
+          registration_method = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `).run(now, userId);
+
+    await db.prepare(`
+      INSERT INTO contact_automation_state (telegram_user_id, registration_info_json, intents_json, updated_at)
+      VALUES (?, '{}', '{}', ?)
+      ON CONFLICT(telegram_user_id) DO NOTHING
+    `).run(userId, now);
+
+    await db.prepare(`
+      UPDATE contact_automation_state
+      SET current_flow = NULL,
+          current_step = NULL,
+          registration_info_json = '{}',
+          intents_json = '{}',
+          last_matched_keyword = NULL,
+          last_rule_id = NULL,
+          last_automation_response = NULL,
+          last_automation_at = NULL,
+          last_auto_welcome_at = NULL,
+          info_reviewed_at = NULL,
+          info_reviewed_by = NULL,
+          updated_at = ?
+      WHERE telegram_user_id = ?
+    `).run(now, userId);
+
+    await db.prepare(`
+      INSERT INTO bot_sessions (telegram_user_id, current_screen, state_stack_json, context_json, created_at, updated_at)
+      VALUES (?, 'Home', '[]', '{}', ?, ?)
+      ON CONFLICT(telegram_user_id) DO NOTHING
+    `).run(userId, now, now);
+
+    await db.prepare(`
+      UPDATE bot_sessions
+      SET current_screen = 'Home',
+          workflow_key = NULL,
+          workflow_step = NULL,
+          state_stack_json = '[]',
+          context_json = '{}',
+          canceled_at = NULL,
+          updated_at = ?
+      WHERE telegram_user_id = ?
+    `).run(now, userId);
+
+    const expiredWindowsResult = await db.prepare(`
+      UPDATE registration_payment_windows
+      SET status = 'expired',
+          updated_at = ?,
+          expiry_notified_at = COALESCE(expiry_notified_at, ?)
+      WHERE contact_id = ?
+        AND status = 'active'
+        AND matched_payment_event_id IS NULL
+    `).run(now, now, userId);
+
+    await logEvent({
+      telegramUserId: userId,
+      eventType: 'registration_revoked',
+      title: 'Registration Revoked',
+      body: 'Registration data was cleared. Telegram conversation history was preserved.',
+      actorName,
+      metadata: {
+        fromStatus: existing.registration_status,
+        toStatus: 'New',
+        previousAppBegAccountId: existing.appbeg_account_id || null,
+        previousPlayerUid: previousInfo.appbeg_player_uid || null,
+        previousUsername: previousInfo.preferred_appbeg_username || null,
+        activeWindowIds: activeWindows.map((window) => window.id),
+        expiredWindowCount: Number(expiredWindowsResult.changes || 0)
+      },
+      createdAt: now
+    });
+
+    return {
+      contact: await getUserProfile(userId),
+      automationState: await getAutomationState(userId),
+      expiredWindowCount: Number(expiredWindowsResult.changes || 0)
+    };
   }
 
   async function logRegistrationFieldChange(userId, fieldName, oldValue, newValue, changedBy = 'System') {
@@ -5000,6 +5109,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   return {
     db,
+    logEvent,
     upsertTelegramUser,
     ensureConversation,
     countIncomingMessages,
@@ -5028,6 +5138,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     startAutomationFlow,
     cancelAutomationFlow,
     resetAutomationState,
+    revokeRegistration,
     updateRegistrationInfo,
     markRegistrationInfoReviewed,
     markAutoWelcomeSent,
