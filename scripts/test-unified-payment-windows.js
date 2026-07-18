@@ -14,7 +14,7 @@ import {
   isEligibleActivePaymentWindow,
   windowMatchesParsed
 } from '../src/payments/paymentWindowMatcher.js';
-import { routePaymentEvent } from '../src/payments/router.js';
+import { reprocessPaymentEvent, routePaymentEvent } from '../src/payments/router.js';
 import { parsePaymentMessage } from '../src/payments/parser.js';
 
 function makeWindow(overrides = {}) {
@@ -71,6 +71,23 @@ function createRouterStore({ windows = [] } = {}) {
     },
     async logPaymentRouting(id, step, message, metadata = {}) {
       logs.push({ id, step, message, metadata });
+    },
+    async resetPaymentRoutingForReprocess(id) {
+      const payment = payments.get(Number(id));
+      Object.assign(payment, {
+        routing_status: 'unrouted',
+        routing_owner: null,
+        routing_reason: null,
+        contact_id: null,
+        registration_payment_window_id: null,
+        routed_at: null,
+        handled_by: null,
+        freeze_at: null,
+        unmatched_reason: null,
+        frozen_at: null,
+        matched_at: null
+      });
+      return { ...payment };
     },
     async listActiveRegistrationPaymentWindows() {
       const now = Date.now();
@@ -200,6 +217,67 @@ async function run() {
   assert.equal(windowMatchesParsed(activeReg, { ...parsed, amount: 8 }), false);
   assert.equal(windowMatchesParsed(activeReg, { ...parsed, payment_sender_name: 'Other' }), false);
 
+  // Conservative surname-initial matching.
+  {
+    const amyField = makeWindow({ id: 21, payment_display_name: 'Amy Field', first_deposit_amount: 5 });
+    const amyInitial = parsePaymentMessage(paymentText('Amy F.', 5));
+    const match = findMatchingActivePaymentWindow([amyField], amyInitial);
+    assert.equal(match.result, 'exact_match');
+    assert.equal(match.window.id, 21);
+    assert.equal(match.matchMethod, 'surname_initial');
+    console.log('ok Amy Field matches Amy F. by surname initial');
+  }
+  {
+    const amyField = makeWindow({ id: 22, payment_display_name: 'amy field', first_deposit_amount: 5 });
+    const amyInitial = parsePaymentMessage(paymentText('AMY F', 5));
+    const match = findMatchingActivePaymentWindow([amyField], amyInitial);
+    assert.equal(match.result, 'exact_match');
+    assert.equal(match.matchMethod, 'surname_initial');
+    console.log('ok surname initial match is case-insensitive and period optional');
+  }
+  {
+    const amyField = makeWindow({ id: 23, payment_display_name: 'Amy Field', first_deposit_amount: 5 });
+    assert.equal(findMatchingActivePaymentWindow([amyField], parsePaymentMessage(paymentText('Amy S.', 5))).result, 'no_match');
+    assert.equal(findMatchingActivePaymentWindow([amyField], parsePaymentMessage(paymentText('Amy', 5))).result, 'no_match');
+    assert.equal(findMatchingActivePaymentWindow([amyField], parsePaymentMessage(paymentText('A. Field', 5))).result, 'no_match');
+    assert.equal(findMatchingActivePaymentWindow([amyField], parsePaymentMessage(paymentText('Amy Franks', 5))).result, 'no_match');
+    console.log('ok unsafe abbreviated-name variants do not auto-match');
+  }
+  {
+    const windows = [
+      makeWindow({ id: 24, payment_display_name: 'Amy Field', first_deposit_amount: 5 }),
+      makeWindow({ id: 25, payment_display_name: 'Amy Foster', first_deposit_amount: 5 })
+    ];
+    const match = findMatchingActivePaymentWindow(windows, parsePaymentMessage(paymentText('Amy F.', 5)));
+    assert.equal(match.result, 'ambiguous_match');
+    assert.equal(match.unmatchedReason, UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME);
+    console.log('ok duplicate surname-initial candidates are ambiguous');
+  }
+  {
+    const amyField = makeWindow({ id: 26, payment_display_name: 'Amy Field', first_deposit_amount: 6 });
+    assert.equal(findMatchingActivePaymentWindow([amyField], parsePaymentMessage(paymentText('Amy F.', 5))).result, 'no_match');
+    console.log('ok different amounts do not match by surname initial');
+  }
+  {
+    const expired = makeWindow({
+      id: 27,
+      payment_display_name: 'Amy Field',
+      first_deposit_amount: 5,
+      expires_at: new Date(Date.now() - 1000).toISOString()
+    });
+    assert.equal(findMatchingActivePaymentWindow([expired], parsePaymentMessage(paymentText('Amy F.', 5))).result, 'no_match');
+    console.log('ok expired windows do not match by surname initial');
+  }
+  {
+    const exact = makeWindow({ id: 28, payment_display_name: 'Amy F', first_deposit_amount: 5 });
+    const initial = makeWindow({ id: 29, payment_display_name: 'Amy Field', first_deposit_amount: 5 });
+    const match = findMatchingActivePaymentWindow([exact, initial], parsePaymentMessage(paymentText('Amy F', 5)));
+    assert.equal(match.result, 'exact_match');
+    assert.equal(match.window.id, 28);
+    assert.equal(match.matchMethod, 'exact_name');
+    console.log('ok exact full-name match is preferred over surname-initial match');
+  }
+
   // Router: active registration match
   {
     const windows = [makeWindow({ id: 101, flow_type: 'registration' })];
@@ -217,6 +295,75 @@ async function run() {
     assert.equal(result.outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
     assert.equal(windows[0].matched_payment_event_id, 1);
     console.log('ok router matches active registration window');
+  }
+
+  // Router: active registration match using surname initial
+  {
+    const windows = [makeWindow({ id: 111, flow_type: 'registration', payment_display_name: 'Amy Field', first_deposit_amount: 5 })];
+    const store = createRouterStore({ windows });
+    store.payments.set(11, {
+      id: 11,
+      message_text: paymentText('Amy F.', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 11,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    const result = await routePaymentEvent(store, 11);
+    assert.equal(result.outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal(windows[0].matched_payment_event_id, 11);
+    assert.equal(store.payments.get(11).unmatched_reason, null);
+    assert.equal(store.logs.some((log) => log.metadata?.matchingMethod === 'surname_initial'), true);
+    console.log('ok router matches active registration window by surname initial');
+  }
+
+  // Reprocess uses same improved matching logic.
+  {
+    const windows = [makeWindow({ id: 112, flow_type: 'registration', payment_display_name: 'Amy Field', first_deposit_amount: 5 })];
+    const store = createRouterStore({ windows });
+    store.payments.set(12, {
+      id: 12,
+      message_text: paymentText('Amy F', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 12,
+      message_date: new Date().toISOString(),
+      routed_at: new Date().toISOString(),
+      routing_status: ROUTING_STATUS.SEARCHING,
+      unmatched_reason: UNMATCHED_REASON.NAME_MISMATCH
+    });
+    const result = await reprocessPaymentEvent(store, 12);
+    assert.equal(result.outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal(windows[0].matched_payment_event_id, 12);
+    console.log('ok reprocess uses surname-initial matching logic');
+  }
+
+  // A claimed window cannot be claimed by a second payment.
+  {
+    const windows = [makeWindow({ id: 113, flow_type: 'registration', payment_display_name: 'Amy Field', first_deposit_amount: 5 })];
+    const store = createRouterStore({ windows });
+    store.payments.set(13, {
+      id: 13,
+      message_text: paymentText('Amy F.', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 13,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    store.payments.set(14, {
+      id: 14,
+      message_text: paymentText('Amy F.', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 14,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    assert.equal((await routePaymentEvent(store, 13)).outcome, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED);
+    assert.equal((await routePaymentEvent(store, 14)).outcome, ROUTING_STATUS.SEARCHING);
+    assert.equal(windows[0].matched_payment_event_id, 13);
+    console.log('ok claimed payment window cannot be claimed twice');
   }
 
   // Router: active deposit match
@@ -344,6 +491,29 @@ async function run() {
     assert.equal(result.outcome, ROUTING_STATUS.MANUAL_REVIEW);
     assert.equal(result.unmatchedReason, UNMATCHED_REASON.AMBIGUOUS_MATCH);
     console.log('ok multiple active windows go to manual review');
+  }
+
+  // Ambiguous surname-initial active windows -> manual review with explicit reason.
+  {
+    const windows = [
+      makeWindow({ id: 801, payment_display_name: 'Amy Field', first_deposit_amount: 5 }),
+      makeWindow({ id: 802, payment_display_name: 'Amy Foster', first_deposit_amount: 5 })
+    ];
+    const store = createRouterStore({ windows });
+    store.payments.set(8, {
+      id: 8,
+      message_text: paymentText('Amy F.', 5),
+      telegram_group_id: 'g1',
+      telegram_message_id: 8,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    const result = await routePaymentEvent(store, 8);
+    assert.equal(result.outcome, ROUTING_STATUS.MANUAL_REVIEW);
+    assert.equal(result.unmatchedReason, UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME);
+    assert.equal(store.payments.get(8).unmatched_reason, UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME);
+    console.log('ok ambiguous surname-initial windows go to manual review');
   }
 
   console.log('ALL ACTIVE-WINDOW MATCHER CHECKS PASSED');

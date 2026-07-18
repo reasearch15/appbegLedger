@@ -1,4 +1,4 @@
-import { amountsMatch, paymentAppsMatch, paymentNamesMatch } from './matchUtils.js';
+import { amountsMatch, normalizePaymentName, paymentAppsMatch, paymentNameMatchMethod, paymentNamesMatch } from './matchUtils.js';
 import { PAYMENT_WINDOW_FLOW, UNMATCHED_REASON } from './constants.js';
 
 const ELIGIBLE_FLOW_TYPES = new Set([
@@ -35,7 +35,7 @@ export function isEligibleActivePaymentWindow(window, { now = new Date() } = {})
  * Callers must pass only eligible active windows (or use findMatchingActivePaymentWindow).
  */
 export function windowMatchesParsed(window, parsed, { requireMethod = false } = {}) {
-  if (!paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name)) return false;
+  if (!paymentNameMatchMethod(window.payment_display_name, parsed.payment_sender_name)) return false;
   if (!amountsMatch(window.first_deposit_amount, parsed.amount)) return false;
 
   const expectedApp = window.payment_method_key || window.payment_method_name || window.expected_payment_app;
@@ -48,20 +48,59 @@ export function windowMatchesParsed(window, parsed, { requireMethod = false } = 
   return true;
 }
 
+export function windowMatchDetails(window, parsed, { requireMethod = false } = {}) {
+  const nameMethod = paymentNameMatchMethod(window.payment_display_name, parsed.payment_sender_name);
+  if (!nameMethod) return null;
+  if (!amountsMatch(window.first_deposit_amount, parsed.amount)) return null;
+
+  const expectedApp = window.payment_method_key || window.payment_method_name || window.expected_payment_app;
+  const parsedApp = parsed.payment_app;
+  if (expectedApp && parsedApp) {
+    if (!paymentAppsMatch(expectedApp, parsedApp)) return null;
+  } else if (requireMethod && expectedApp && !parsedApp) {
+    return null;
+  }
+
+  return {
+    window,
+    method: nameMethod,
+    normalizedExpectedName: normalizePaymentName(window.payment_display_name),
+    normalizedParsedName: normalizePaymentName(parsed.payment_sender_name)
+  };
+}
+
 /**
  * Filters to eligible active windows, then matches by name + amount.
  * @returns {{ result: 'exact_match'|'no_match'|'ambiguous_match', window?: object, windows?: object[], eligibleWindows?: object[] }}
  */
 export function findMatchingActivePaymentWindow(windows = [], parsed, { now = new Date() } = {}) {
   const eligibleWindows = (windows || []).filter((window) => isEligibleActivePaymentWindow(window, { now }));
-  const matches = eligibleWindows.filter((window) => windowMatchesParsed(window, parsed));
-  if (matches.length === 1) {
-    return { result: 'exact_match', window: matches[0], windows: matches, eligibleWindows };
+  const matchDetails = eligibleWindows
+    .map((window) => windowMatchDetails(window, parsed))
+    .filter(Boolean);
+  const exactMatches = matchDetails.filter((match) => match.method === 'exact_name');
+  if (exactMatches.length === 1) {
+    return { result: 'exact_match', window: exactMatches[0].window, windows: exactMatches.map((match) => match.window), eligibleWindows, matchMethod: 'exact_name', match: exactMatches[0] };
   }
-  if (matches.length > 1) {
-    return { result: 'ambiguous_match', window: null, windows: matches, eligibleWindows };
+  if (exactMatches.length > 1) {
+    return { result: 'ambiguous_match', window: null, windows: exactMatches.map((match) => match.window), eligibleWindows, matchMethod: 'ambiguous', unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH };
   }
-  return { result: 'no_match', window: null, windows: [], eligibleWindows };
+
+  const initialMatches = matchDetails.filter((match) => match.method === 'surname_initial');
+  if (initialMatches.length === 1) {
+    return { result: 'exact_match', window: initialMatches[0].window, windows: initialMatches.map((match) => match.window), eligibleWindows, matchMethod: 'surname_initial', match: initialMatches[0] };
+  }
+  if (initialMatches.length > 1) {
+    return {
+      result: 'ambiguous_match',
+      window: null,
+      windows: initialMatches.map((match) => match.window),
+      eligibleWindows,
+      matchMethod: 'ambiguous',
+      unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME
+    };
+  }
+  return { result: 'no_match', window: null, windows: [], eligibleWindows, matchMethod: 'no_match' };
 }
 
 export function classifyUnmatchedReason({

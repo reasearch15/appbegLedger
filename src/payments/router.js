@@ -1,4 +1,5 @@
 import { parsePaymentMessage } from './parser.js';
+import { normalizePaymentName } from './matchUtils.js';
 import {
   buildIdempotencyKey,
   computePaymentFreezeAt,
@@ -36,7 +37,8 @@ async function freezePayment(store, payment, {
   windowId = null,
   metadata = {}
 }) {
-  const isAmbiguous = unmatchedReason === UNMATCHED_REASON.AMBIGUOUS_MATCH;
+  const isAmbiguous = unmatchedReason === UNMATCHED_REASON.AMBIGUOUS_MATCH
+    || unmatchedReason === UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME;
   const routingStatus = isAmbiguous ? ROUTING_STATUS.MANUAL_REVIEW : ROUTING_STATUS.FROZEN;
   console.log(
     `[payment-router] payment_${routingStatus} payment=${payment.id} reason=${unmatchedReason || routingStatus}`
@@ -211,14 +213,32 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   const activeWindows = await store.listActiveRegistrationPaymentWindows();
   const match = findMatchingActivePaymentWindow(activeWindows, parsed, { now });
 
+  const baseMatchLog = {
+    paymentEventId: payment.id,
+    paymentSenderName: parsed.payment_sender_name,
+    normalizedSenderName: match.match?.normalizedParsedName || normalizePaymentName(parsed.payment_sender_name),
+    amount: parsed.amount,
+    matchingMethod: match.matchMethod || 'no_match'
+  };
+
   if (match.result === 'ambiguous_match') {
+    const unmatchedReason = match.unmatchedReason || UNMATCHED_REASON.AMBIGUOUS_MATCH;
+    console.log('[payment-router] payment_window_match_ambiguous', JSON.stringify({
+      ...baseMatchLog,
+      matchingMethod: match.matchMethod || 'ambiguous',
+      unmatchedReason,
+      candidateWindowIds: match.windows.map((item) => item.id),
+      expectedPaymentTags: match.windows.map((item) => item.payment_display_name)
+    }));
     return freezePayment(store, payment, {
       reason: ROUTING_REASON.AMBIGUOUS_MATCH,
-      unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+      unmatchedReason,
       metadata: {
         amount: parsed.amount,
         paymentApp: parsed.payment_app,
         senderName: parsed.payment_sender_name,
+        normalizedSenderName: baseMatchLog.normalizedSenderName,
+        matchingMethod: match.matchMethod || 'ambiguous',
         matchCount: match.windows.length,
         windowIds: match.windows.map((item) => item.id),
         flowTypes: match.windows.map((item) => item.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION)
@@ -228,6 +248,14 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 
   if (match.result === 'exact_match') {
     const activeWindow = match.window;
+    console.log('[payment-router] payment_window_match_candidate', JSON.stringify({
+      ...baseMatchLog,
+      candidateWindowId: activeWindow.id,
+      expectedPaymentTag: activeWindow.payment_display_name,
+      normalizedExpectedName: match.match?.normalizedExpectedName || null,
+      matchingMethod: match.matchMethod || 'exact_name',
+      result: 'candidate'
+    }));
     const claim = typeof store.claimPaymentWindowMatch === 'function'
       ? await store.claimPaymentWindowMatch(activeWindow.id, payment.id)
       : { ok: true, reason: 'matched', window: activeWindow };
@@ -270,13 +298,20 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       registration_payment_window_id: activeWindow.id,
       routed_at: new Date().toISOString(),
       matched_at: new Date().toISOString(),
-      handled_by: HANDLED_BY_APPBEG_BOT
+      handled_by: HANDLED_BY_APPBEG_BOT,
+      unmatched_reason: null
     });
     await store.logPaymentRouting(payment.id, 'payment_window_matched', `Payment matched an active ${flowType} payment window.`, {
       contactId: activeWindow.contact_id,
       windowId: activeWindow.id,
       flowType,
-      claimReason: claim.reason
+      claimReason: claim.reason,
+      matchingMethod: match.matchMethod || 'exact_name',
+      senderName: parsed.payment_sender_name,
+      normalizedSenderName: match.match?.normalizedParsedName || null,
+      expectedPaymentTag: activeWindow.payment_display_name,
+      normalizedExpectedName: match.match?.normalizedExpectedName || null,
+      amount: parsed.amount
     });
 
     if (isDeposit) {
@@ -319,6 +354,12 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     activeWindows: match.eligibleWindows || activeWindows,
     parsed
   });
+  console.log('[payment-router] payment_window_no_match', JSON.stringify({
+    ...baseMatchLog,
+    matchingMethod: 'no_match',
+    unmatchedReason,
+    eligibleWindowCount: (match.eligibleWindows || activeWindows || []).length
+  }));
 
   if (hasSearchExpired({ freeze_at: freezeAt }, now)) {
     return freezePayment(store, payment, {

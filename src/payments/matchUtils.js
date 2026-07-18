@@ -6,6 +6,10 @@ export function normalizePaymentName(value = '') {
     .replace(/[^a-z0-9 ]/g, '');
 }
 
+function nameTokens(value = '') {
+  return normalizePaymentName(value).split(' ').filter(Boolean);
+}
+
 export function amountsMatch(expected, parsed) {
   const left = Number(expected);
   const right = Number(parsed);
@@ -23,8 +27,23 @@ export function paymentAppsMatch(expectedApp, parsedApp) {
 }
 
 export function paymentNamesMatch(expectedName, parsedName) {
+  return paymentNameMatchMethod(expectedName, parsedName) !== null;
+}
+
+export function paymentNameMatchMethod(expectedName, parsedName) {
   const expected = normalizePaymentName(expectedName);
   const parsed = normalizePaymentName(parsedName);
-  if (!expected || !parsed) return false;
-  return expected === parsed;
+  if (!expected || !parsed) return null;
+  if (expected === parsed) return 'exact_name';
+
+  const expectedTokens = nameTokens(expectedName);
+  const parsedTokens = nameTokens(parsedName);
+  if (expectedTokens.length < 2 || parsedTokens.length !== 2) return null;
+
+  const [expectedFirst, expectedSurname] = expectedTokens;
+  const [parsedFirst, parsedSurname] = parsedTokens;
+  if (expectedFirst !== parsedFirst) return null;
+  if (parsedSurname.length !== 1) return null;
+  if (!expectedSurname || expectedSurname[0] !== parsedSurname) return null;
+  return 'surname_initial';
 }

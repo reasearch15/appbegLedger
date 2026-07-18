@@ -59,6 +59,7 @@ export const UNMATCHED_REASON = {
   AMOUNT_MISMATCH: 'amount_mismatch',
   NAME_MISMATCH: 'name_mismatch',
   AMBIGUOUS_MATCH: 'ambiguous_match',
+  AMBIGUOUS_ABBREVIATED_NAME: 'ambiguous_abbreviated_name',
   UNSUPPORTED_PAYMENT_METHOD: 'unsupported_payment_method',
   MALFORMED_PAYMENT_MESSAGE: 'malformed_payment_message',
   UNSUPPORTED_PAYMENT_FORMAT: 'unsupported_payment_format',
@@ -75,6 +76,7 @@ export const UNMATCHED_REASON = {
 /** Reasons that belong on the Manual Review panel (not Payments). */
 export const MANUAL_REVIEW_UNMATCHED_REASONS = [
   UNMATCHED_REASON.AMBIGUOUS_MATCH,
+  UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME,
   UNMATCHED_REASON.MALFORMED_PAYMENT_MESSAGE,
   UNMATCHED_REASON.UNSUPPORTED_PAYMENT_FORMAT,
   UNMATCHED_REASON.MISSING_AMOUNT,
