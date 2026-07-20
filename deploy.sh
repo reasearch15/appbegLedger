@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 APP_DIR="/opt/appbegLedger"
 SERVICE_NAME="appbeg-ledger.service"
+READY_LOG="Royal VIP Coadmin foundation running at http://localhost:4300"
+READY_TIMEOUT_SECONDS=30
 
 cd "$APP_DIR"
 
@@ -38,8 +40,39 @@ fi
 echo "== Restarting service =="
 systemctl restart "$SERVICE_NAME"
 
+service_started_at="$(systemctl show "$SERVICE_NAME" --property=ActiveEnterTimestamp --value)"
+if [[ -z "$service_started_at" || "$service_started_at" == "n/a" ]]; then
+  service_started_at="now"
+fi
+
+echo "== Waiting for startup readiness =="
+deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+ready=false
+while (( SECONDS < deadline )); do
+  if systemctl is-active --quiet "$SERVICE_NAME" \
+    && journalctl -u "$SERVICE_NAME" --since "$service_started_at" --no-pager | grep -Fq "$READY_LOG"; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$ready" != true ]]; then
+  echo "Deployment timed out waiting for application readiness." >&2
+  echo "== Service status =="
+  systemctl status "$SERVICE_NAME" --no-pager -l || true
+  echo "== Last 200 logs =="
+  journalctl -u "$SERVICE_NAME" -n 200 --no-pager || true
+  exit 1
+fi
+
 echo "== Service status =="
 systemctl status "$SERVICE_NAME" --no-pager -l
 
-echo "== Recent logs =="
-journalctl -u "$SERVICE_NAME" -n 80 --no-pager
+echo "== Process tree =="
+systemctl status "$SERVICE_NAME" --no-pager -l | sed -n '/CGroup:/,$p'
+
+echo "== Startup logs =="
+journalctl -u "$SERVICE_NAME" --since "$service_started_at" --no-pager
+
+echo "Deployment successful."
