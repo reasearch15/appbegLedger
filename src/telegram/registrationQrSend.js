@@ -121,7 +121,8 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     paymentMethodName: sendPaymentQr.paymentMethodName,
     firstDepositAmount: amount,
     paymentDisplayName: sendPaymentQr.paymentDisplayName,
-    flowType
+    flowType,
+    creditedDepositAmount: sendPaymentQr.creditedDepositAmount
   });
 
   console.log(
@@ -168,6 +169,7 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       paymentQrCodeId: qr.id,
       paymentDisplayName: sendPaymentQr.paymentDisplayName,
       firstDepositAmount: amount,
+      creditedDepositAmount: sendPaymentQr.creditedDepositAmount,
       flowType,
       windowMinutes: paymentWindowMinutes()
     });

@@ -103,7 +103,7 @@ export function startTelegramListener({ token, store, io }) {
       }
 
       // Staff override / handoff: do not auto-reply while bot is paused.
-      if (fresh?.bot_paused || fresh?.needs_staff_review) {
+      if (fresh?.bot_paused) {
         return;
       }
 

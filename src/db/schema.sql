@@ -420,7 +420,10 @@ CREATE TABLE IF NOT EXISTS coadmin_settings (
   staff_ai_apprentice_mode_updated_by TEXT,
   customer_support_ai_mode TEXT NOT NULL DEFAULT 'train',
   customer_support_ai_mode_updated_at TEXT,
-  customer_support_ai_mode_updated_by TEXT
+  customer_support_ai_mode_updated_by TEXT,
+  customer_support_prompt TEXT,
+  customer_support_prompt_updated_at TEXT,
+  customer_support_prompt_updated_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS staff_ai_training_examples (
@@ -508,6 +511,11 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   payment_qr_code_id INTEGER,
   payment_display_name TEXT,
   first_deposit_amount REAL NOT NULL,
+  expected_payment_cents INTEGER,
+  received_payment_amount REAL,
+  received_payment_cents INTEGER,
+  credited_deposit_amount REAL,
+  credited_deposit_cents INTEGER,
   flow_type TEXT NOT NULL DEFAULT 'registration',
   matched_payment_event_id INTEGER,
   status TEXT NOT NULL DEFAULT 'active'

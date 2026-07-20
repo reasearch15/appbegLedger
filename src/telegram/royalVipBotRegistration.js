@@ -9,6 +9,7 @@
 import {
   MIN_REGISTRATION_DEPOSIT,
   parseFirstDepositAmount,
+  parseRegistrationPaymentAmount,
   chatbotWelcomeCooldownMs,
   isReferralSkipInput
 } from '../registration/utils.js';
@@ -43,10 +44,15 @@ export const PAYMENT_NAME_PROMPT = [
 ].join('\n');
 
 export const DEPOSIT_AMOUNT_PROMPT = [
-  'How much would you like to deposit today?',
+  'Enter the exact amount you will send, including cents.',
+  'The cents help us identify your payment. Don\'t worry - we will round your balance up to the next full dollar.',
   '',
   'Minimum deposit:',
-  `$${MIN_REGISTRATION_DEPOSIT}`
+  `$${MIN_REGISTRATION_DEPOSIT}`,
+  '',
+  'Examples:',
+  'Send $10.01 -> receive $11',
+  'Send $20.35 -> receive $21'
 ].join('\n');
 
 export const USERNAME_PROMPT = [
@@ -113,12 +119,13 @@ export async function resolveRegistrationDefaultQr(store) {
   return null;
 }
 
-function buildSendPaymentQrPayload(info, qrSource, amount) {
+function buildSendPaymentQrPayload(info, qrSource, amount, creditAmount = null) {
   return {
     paymentMethodId: qrSource.paymentMethodId,
     paymentMethodName: qrSource.paymentMethodName,
     paymentDisplayName: info.payment_display_name || info.payment_name,
-    firstDepositAmount: amount
+    firstDepositAmount: amount,
+    creditedDepositAmount: creditAmount
   };
 }
 
@@ -538,15 +545,15 @@ export async function continueRoyalVipRegistration({
     const offTopic = offTopicGuard(text, amountPrompt, info, 'first_deposit_amount');
     if (offTopic) return offTopic;
 
-    const amount = parseFirstDepositAmount(text);
-    if (amount == null) {
+    const registrationAmount = parseRegistrationPaymentAmount(text);
+    if (registrationAmount == null) {
       return {
         kind: 'registration_ask_first_deposit_amount',
         replies: [{
           text: [
-            `Please enter a valid deposit amount of at least $${MIN_REGISTRATION_DEPOSIT}.`,
+            `Please enter a valid registration payment of at least $${MIN_REGISTRATION_DEPOSIT} with non-zero cents.`,
             '',
-            'Numbers only. Example: 10'
+            'Numbers only. Example: 10.01'
           ].join('\n'),
           buttons: registrationNavButtons()
         }],
@@ -569,13 +576,16 @@ export async function continueRoyalVipRegistration({
           currentStep: 'first_deposit_amount',
           registrationInfo: {
             ...info,
-            first_deposit_amount: amount,
-            requested_deposit_amount: amount,
+            first_deposit_amount: registrationAmount.paymentAmount,
+            requested_deposit_amount: registrationAmount.paymentAmount,
+            registration_payment_cents: registrationAmount.paymentCents,
+            registration_credit_cents: registrationAmount.creditCents,
+            registration_credit_amount: registrationAmount.creditAmount,
             payment_confirmed: false
           }
         },
         escalate: false,
-        logEvent: { event: 'registration_qr_missing', amount }
+        logEvent: { event: 'registration_qr_missing', amount: registrationAmount.paymentAmount }
       };
     }
 
@@ -585,15 +595,18 @@ export async function continueRoyalVipRegistration({
       payment_method_name: qrSource.paymentMethodName,
       payment_method_key: qrSource.paymentMethodKey,
       payment_app: qrSource.paymentMethodName,
-      first_deposit_amount: amount,
-      requested_deposit_amount: amount,
+      first_deposit_amount: registrationAmount.paymentAmount,
+      requested_deposit_amount: registrationAmount.paymentAmount,
+      registration_payment_cents: registrationAmount.paymentCents,
+      registration_credit_cents: registrationAmount.creditCents,
+      registration_credit_amount: registrationAmount.creditAmount,
       payment_confirmed: false
     };
 
     return {
       kind: 'registration_send_payment_qr',
       replies: [],
-      sendPaymentQr: buildSendPaymentQrPayload(nextInfo, qrSource, amount),
+      sendPaymentQr: buildSendPaymentQrPayload(nextInfo, qrSource, registrationAmount.paymentAmount, registrationAmount.creditAmount),
       statePatch: {
         currentFlow: BOT_REGISTRATION_FLOW,
         // Stay on amount step until QR send succeeds — handler advances to await_payment.
@@ -603,7 +616,8 @@ export async function continueRoyalVipRegistration({
       escalate: false,
       logEvent: {
         event: 'registration_amount_accepted',
-        amount,
+        amount: registrationAmount.paymentAmount,
+        creditAmount: registrationAmount.creditAmount,
         paymentMethodId: qrSource.paymentMethodId,
         qrId: qrSource.qr?.id
       }

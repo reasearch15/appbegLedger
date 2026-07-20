@@ -9,7 +9,7 @@ import {
   maskPaymentIdentifier,
   redactRegistrationInfoForApi
 } from '../src/telegram/botRegistrationState.js';
-import { parseFirstDepositAmount, MIN_REGISTRATION_DEPOSIT } from '../src/registration/utils.js';
+import { parseFirstDepositAmount, parseRegistrationPaymentAmount, MIN_REGISTRATION_DEPOSIT } from '../src/registration/utils.js';
 import { validateAppBegPassword } from '../src/registration/appbegValidation.js';
 import { amountsMatch, paymentNamesMatch } from '../src/payments/matchUtils.js';
 import { REGISTRATION_PAYMENT_EXPIRY_MESSAGE } from '../src/telegram/paymentWindowExpiryWorker.js';
@@ -82,6 +82,18 @@ async function run() {
   assert.equal(parseFirstDepositAmount('abc'), null);
   console.log('ok deposit min $5 validation');
 
+  assert.deepEqual(parseRegistrationPaymentAmount('10.01'), {
+    paymentCents: 1001,
+    creditCents: 1100,
+    paymentAmount: 10.01,
+    creditAmount: 11
+  });
+  assert.equal(parseRegistrationPaymentAmount('10.37').creditAmount, 11);
+  assert.equal(parseRegistrationPaymentAmount('10.99').creditAmount, 11);
+  assert.equal(parseRegistrationPaymentAmount('20.01').creditAmount, 21);
+  assert.equal(parseRegistrationPaymentAmount('10.00'), null);
+  console.log('ok registration cents payment credits upward');
+
   // Password min 6, never log raw value in review
   assert.equal(validateAppBegPassword('12345').ok, false);
   assert.equal(validateAppBegPassword('secret1').ok, true);
@@ -138,20 +150,23 @@ async function run() {
   const badAmount = await decideBotReply({
     store: fresh,
     contact: { ...guest, registration_status: 'Collecting Info' },
-    messageText: '3'
+    messageText: '10.00'
   });
   assert.equal(badAmount.kind, 'registration_ask_first_deposit_amount');
   assert.equal(badAmount.statePatch.currentStep, 'first_deposit_amount');
-  console.log('ok invalid deposit rejected');
+  console.log('ok whole-dollar registration amount rejected');
 
   // Valid amount queues QR
   const amountOk = await decideBotReply({
     store: fresh,
     contact: { ...guest, registration_status: 'Collecting Info' },
-    messageText: '10'
+    messageText: '10.37'
   });
   assert.equal(amountOk.kind, 'registration_send_payment_qr');
-  assert.equal(amountOk.sendPaymentQr.firstDepositAmount, 10);
+  assert.equal(amountOk.sendPaymentQr.firstDepositAmount, 10.37);
+  assert.equal(amountOk.sendPaymentQr.creditedDepositAmount, 11);
+  assert.equal(amountOk.statePatch.registrationInfo.registration_payment_cents, 1037);
+  assert.equal(amountOk.statePatch.registrationInfo.registration_credit_cents, 1100);
   assert.equal(amountOk.sendPaymentQr.paymentDisplayName, 'John Smith');
   assert.equal(amountOk.setStatus, undefined);
   assert.equal(amountOk.statePatch.currentStep, 'first_deposit_amount');

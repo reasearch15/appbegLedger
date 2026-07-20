@@ -169,10 +169,11 @@ async function run() {
       telegram_sync_source: 'bot_api',
       active_messaging_source: 'bot_api'
     },
-    messageText: '9'
+    messageText: '9.01'
   });
   assert.equal(decision.kind, 'registration_send_payment_qr');
-  assert.equal(decision.sendPaymentQr.firstDepositAmount, 9);
+  assert.equal(decision.sendPaymentQr.firstDepositAmount, 9.01);
+  assert.equal(decision.sendPaymentQr.creditedDepositAmount, 10);
   assert.equal(decision.sendPaymentQr.paymentMethodId, 1);
   assert.equal(decision.sendPaymentQr.paymentDisplayName, 'Amy fei');
   assert.equal(decision.setStatus, undefined);
@@ -264,7 +265,8 @@ async function run() {
       paymentMethodId: 1,
       paymentMethodName: 'Chime',
       paymentDisplayName: 'Amy fei',
-      firstDepositAmount: 9
+      firstDepositAmount: 9.01,
+      creditedDepositAmount: 10
     },
     bot: sendBot
   });
@@ -284,7 +286,8 @@ async function run() {
       paymentMethodId: 1,
       paymentMethodName: 'Chime',
       paymentDisplayName: 'Amy fei',
-      firstDepositAmount: 9
+      firstDepositAmount: 9.01,
+      creditedDepositAmount: 10
     },
     bot: sendBot
   });
@@ -304,7 +307,8 @@ async function run() {
       paymentMethodId: 1,
       paymentMethodName: 'Chime',
       paymentDisplayName: 'Amy fei',
-      firstDepositAmount: 9
+      firstDepositAmount: 9.01,
+      creditedDepositAmount: 10
     },
     bot: sendBot
   });

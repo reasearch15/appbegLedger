@@ -61,6 +61,16 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS flow_type TEXT NOT NULL DEFAULT 'registration';
     ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS matched_payment_event_id BIGINT;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS expected_payment_cents BIGINT;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS received_payment_amount NUMERIC(12, 2);
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS received_payment_cents BIGINT;
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS credited_deposit_amount NUMERIC(12, 2);
+    ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS credited_deposit_cents BIGINT;
   `);
   await driver.exec(`
     CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
@@ -319,6 +329,12 @@ export async function migratePostgres(driver) {
       ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_at TEXT;
     ALTER TABLE coadmin_settings
       ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_by TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_prompt TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_prompt_updated_at TEXT;
+    ALTER TABLE coadmin_settings
+      ADD COLUMN IF NOT EXISTS customer_support_prompt_updated_by TEXT;
     ALTER TABLE telegram_users
       ADD COLUMN IF NOT EXISTS ai_mode TEXT NOT NULL DEFAULT 'train';
     ALTER TABLE telegram_users

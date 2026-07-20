@@ -219,13 +219,6 @@ h1 {
   color: var(--text);
 }
 
-.customer-support-ai-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .sync-log-preview {
   margin-top: 4px;
   font-size: 12px;

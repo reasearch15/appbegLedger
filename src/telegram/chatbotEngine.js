@@ -150,7 +150,6 @@ export function isBotActiveForContact(contact) {
   if (!contact) return false;
   if (contact.bot_enabled === false || contact.bot_enabled === 0) return false;
   if (contact.bot_paused === true || contact.bot_paused === 1) return false;
-  if (contact.needs_staff_review === true || contact.needs_staff_review === 1) return false;
   return true;
 }
 
@@ -341,14 +340,13 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
   if (!registrationInProgress && detectStaffEscalation(text) && !action) {
     return {
-      kind: 'escalate',
+      kind: 'support_sensitive',
       replies: [{
         text: 'That one might need a human pair of eyes. I’m looping in staff now so nothing risky slips through. Hang tight!'
       }],
       statePatch: null,
-      escalate: true,
-      escalateReason: 'risky_or_financial_request',
-      logEvent: { event: 'handoff_required', reason: 'risky_or_financial_request' }
+      escalate: false,
+      logEvent: { event: 'support_sensitive_reply', reason: 'risky_or_financial_request' }
     };
   }
 
@@ -558,16 +556,15 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
 function talkToStaffDecision() {
   return {
-    kind: 'talk_to_staff',
+    kind: 'contact_support',
     replies: [{
-      text: 'No problem. A staff member will assist you shortly.'
+      text: 'No problem. Send your question here and our support team can follow the conversation.'
     }],
     statePatch: {
       currentFlow: null,
       currentStep: null
     },
-    escalate: true,
-    escalateReason: 'manual_support',
+    escalate: false,
     logEvent: { event: 'button_clicked', action: 'staff:takeover' }
   };
 }
@@ -841,7 +838,6 @@ export {
 };
 
 export function registrationStatusLabel(contact) {
-  if (contact?.needs_staff_review) return 'Needs staff review';
   if (contact?.bot_paused) return 'Bot paused';
   if (contact?.bot_enabled === false || contact?.bot_enabled === 0) return 'Bot off';
   return 'Bot active';

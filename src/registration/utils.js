@@ -79,3 +79,41 @@ export function parseFirstDepositAmount(text, { minAmount = MIN_REGISTRATION_DEP
   if (minAmount != null && rounded < minAmount) return null;
   return rounded;
 }
+
+export function parseMoneyToCents(text) {
+  const raw = String(text || '').trim();
+  const match = raw.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!match) return null;
+  const dollars = Number.parseInt(match[1], 10);
+  const centsText = (match[2] || '').padEnd(2, '0');
+  const cents = centsText ? Number.parseInt(centsText, 10) : 0;
+  if (!Number.isSafeInteger(dollars) || !Number.isInteger(cents)) return null;
+  return dollars * 100 + cents;
+}
+
+export function centsToDollars(cents) {
+  const value = Number(cents);
+  if (!Number.isSafeInteger(value)) return null;
+  return value / 100;
+}
+
+export function registrationCreditCents(paymentCents) {
+  const cents = Number(paymentCents);
+  if (!Number.isSafeInteger(cents) || cents <= 0) return null;
+  return Math.floor((cents + 99) / 100) * 100;
+}
+
+export function parseRegistrationPaymentAmount(text, { minAmount = MIN_REGISTRATION_DEPOSIT } = {}) {
+  const paymentCents = parseMoneyToCents(text);
+  const minCents = minAmount == null ? null : Number(minAmount) * 100;
+  if (!Number.isSafeInteger(paymentCents) || paymentCents <= 0) return null;
+  if (minCents != null && paymentCents < minCents) return null;
+  if (paymentCents % 100 === 0) return null;
+  const creditCents = registrationCreditCents(paymentCents);
+  return {
+    paymentCents,
+    creditCents,
+    paymentAmount: centsToDollars(paymentCents),
+    creditAmount: centsToDollars(creditCents)
+  };
+}

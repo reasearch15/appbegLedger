@@ -78,7 +78,7 @@ export async function executeSupportAiRecommendedAction({
     };
   }
 
-  if (!staffApproved && (contact.bot_paused || contact.needs_staff_review)) {
+  if (!staffApproved && contact.bot_paused) {
     console.log(`[support-ai] support_ai_registration_action_blocked contact=${contact.id} action=${recommended} reason=manual_staff_takeover`);
     return {
       executed: false,
@@ -90,18 +90,13 @@ export async function executeSupportAiRecommendedAction({
   }
 
   if (recommended === 'handoff_to_staff') {
-    await store.markBotNeedsStaffReview(contact.id, 'support_ai_handoff', 'Support AI');
-    if (staffApproved) {
-      console.log(`[support-ai] support_ai_approved_action_executed contact=${contact.id} action=handoff_to_staff`);
-    } else {
-      console.log(`[support-ai] support_ai_registration_action_executed contact=${contact.id} action=handoff_to_staff`);
-    }
+    console.log(`[support-ai] support_ai_handoff_action_ignored contact=${contact.id}`);
     return {
-      executed: true,
-      blocked: false,
-      reason: null,
-      action_executed: true,
-      action_blocked_reason: null
+      executed: false,
+      blocked: true,
+      reason: 'handoff_removed',
+      action_executed: false,
+      action_blocked_reason: 'handoff_removed'
     };
   }
 
@@ -283,7 +278,7 @@ async function applyRegistrationDecision({ store, contact, decision, job, io, bo
   }
 
   if (decision.escalate) {
-    await store.markBotNeedsStaffReview(contact.id, decision.escalateReason || 'handoff', 'Chatbot');
+    console.log(`[support-ai] support_ai_escalation_suppressed contact=${contact.id} reason=${decision.escalateReason || 'handoff'}`);
   }
 
   await store.logAutomationDecision({

@@ -68,23 +68,31 @@ export function parsePaymentMethodSelection(text, methods = []) {
   return null;
 }
 
-export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName, flowType = 'registration' }) {
+export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName, flowType = 'registration', creditedDepositAmount = null }) {
   const amount = formatDepositAmount(firstDepositAmount);
   const money = amount.startsWith('$') ? amount : `$${amount}`;
+  const credited = creditedDepositAmount == null ? null : formatDepositAmount(creditedDepositAmount);
+  const creditedMoney = credited ? (credited.startsWith('$') ? credited : `$${credited}`) : null;
   const closing = flowType === 'deposit'
     ? 'We will automatically verify your payment and credit your deposit.'
     : 'We will automatically verify your payment and continue your registration.';
+  const registrationCreditLines = flowType === 'deposit' || !creditedMoney
+    ? []
+    : [
+      `Balance credit after verification: ${creditedMoney}`,
+      'The cents identify your payment; your balance is rounded up.'
+    ];
   return [
     `Please send ${money} using the QR code above.`,
     '',
-    `Payment Name: ${paymentDisplayName || '—'}`,
+    `Payment Name: ${paymentDisplayName || '-'}`,
     `Amount: ${money}`,
+    ...registrationCreditLines,
     '',
     'You have 7 minutes to complete your payment.',
     closing
   ].join('\n');
 }
-
 
 export function formatDepositAmount(amount) {
   const value = Math.round(Number(amount) * 100) / 100;

@@ -23,6 +23,10 @@ import {
 } from './paymentWindowMatcher.js';
 import { continueBotRegistrationAfterPayment } from './registrationPaymentFlow.js';
 import { continueRegisteredDepositAfterPayment } from './depositPaymentFlow.js';
+import { queueBotReply } from '../telegram/chatbotProcessorDelivery.js';
+
+const DEPOSIT_AMBIGUITY_MESSAGE = 'We found another active deposit request with the same payment details. Your payment is safe, but it needs staff verification before we can credit it. Please wait while our team confirms ownership.';
+const DEPOSIT_AMBIGUITY_NOT_SELECTED_MESSAGE = 'We reviewed the payment and it did not match your deposit request. No funds were credited to your account from that payment. You may start a new deposit request if needed.';
 
 function isTerminalRouted(payment) {
   if (!payment?.routed_at) return false;
@@ -70,6 +74,66 @@ async function freezePayment(store, payment, {
     outcome: routingStatus,
     unmatchedReason
   };
+}
+
+async function notifyAmbiguousDepositCandidates(store, payment, windows = [], { bot = null } = {}) {
+  const depositWindows = (windows || []).filter((window) => isDepositWindow(window));
+  if (!depositWindows.length) return;
+  const logs = typeof store.listPaymentRoutingLogs === 'function'
+    ? await store.listPaymentRoutingLogs(payment.id, 200)
+    : [];
+  const notified = new Set(
+    logs
+      .filter((log) => log.step === 'deposit_ambiguity_candidate_notified')
+      .map((log) => Number(log.metadata?.windowId))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  );
+  for (const window of depositWindows) {
+    const windowId = Number(window.id);
+    if (notified.has(windowId)) continue;
+    const contact = await store.getUserProfile(window.contact_id).catch?.(() => null) || null;
+    if (!contact) continue;
+    await queueBotReply({
+      store,
+      user: contact,
+      text: DEPOSIT_AMBIGUITY_MESSAGE,
+      buttons: [],
+      bot: bot || globalThis.telegramBot || null
+    });
+    await store.logPaymentRouting(payment.id, 'deposit_ambiguity_candidate_notified', 'Candidate deposit user notified about manual verification hold.', {
+      windowId,
+      contactId: window.contact_id
+    });
+  }
+}
+
+async function notifyUnselectedDepositCandidates(store, payment, windows = [], { bot = null } = {}) {
+  const logs = typeof store.listPaymentRoutingLogs === 'function'
+    ? await store.listPaymentRoutingLogs(payment.id, 200)
+    : [];
+  const notified = new Set(
+    logs
+      .filter((log) => log.step === 'deposit_ambiguity_candidate_rejected_notified')
+      .map((log) => Number(log.metadata?.windowId))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  );
+  for (const window of windows || []) {
+    const windowId = Number(window.id);
+    if (!windowId || notified.has(windowId)) continue;
+    const contact = await store.getUserProfile(window.contact_id).catch?.(() => null) || null;
+    if (!contact) continue;
+    await queueBotReply({
+      store,
+      user: contact,
+      text: DEPOSIT_AMBIGUITY_NOT_SELECTED_MESSAGE,
+      buttons: [],
+      bot: bot || globalThis.telegramBot || null
+    });
+    await store.logPaymentRouting(payment.id, 'deposit_ambiguity_candidate_rejected_notified', 'Unselected deposit candidate notified after manual review resolution.', {
+      windowId,
+      contactId: window.contact_id
+    });
+  }
 }
 
 async function keepSearching(store, payment, { freezeAt, unmatchedReason, metadata = {} }) {
@@ -223,6 +287,7 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 
   if (match.result === 'ambiguous_match') {
     const unmatchedReason = match.unmatchedReason || UNMATCHED_REASON.AMBIGUOUS_MATCH;
+    const depositCandidateWindows = match.windows.filter((item) => isDepositWindow(item));
     console.log('[payment-router] payment_window_match_ambiguous', JSON.stringify({
       ...baseMatchLog,
       matchingMethod: match.matchMethod || 'ambiguous',
@@ -230,6 +295,13 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
       candidateWindowIds: match.windows.map((item) => item.id),
       expectedPaymentTags: match.windows.map((item) => item.payment_display_name)
     }));
+    if (depositCandidateWindows.length > 1 && typeof store.holdPaymentWindowsForManualReview === 'function') {
+      await store.holdPaymentWindowsForManualReview(payment.id, {
+        windowIds: depositCandidateWindows.map((item) => item.id),
+        reason: unmatchedReason
+      });
+      await notifyAmbiguousDepositCandidates(store, payment, depositCandidateWindows, { bot });
+    }
     return freezePayment(store, payment, {
       reason: ROUTING_REASON.AMBIGUOUS_MATCH,
       unmatchedReason,
@@ -241,6 +313,8 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
         matchingMethod: match.matchMethod || 'ambiguous',
         matchCount: match.windows.length,
         windowIds: match.windows.map((item) => item.id),
+        candidateWindowIds: match.windows.map((item) => item.id),
+        depositCandidateWindowIds: depositCandidateWindows.map((item) => item.id),
         flowTypes: match.windows.map((item) => item.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION)
       }
     });
@@ -433,7 +507,24 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
     throw new Error('contactId and registrationPaymentWindowId are required.');
   }
 
+  const currentPayment = await store.getPaymentEvent(paymentId);
+  if (
+    currentPayment
+    && Number(currentPayment.registration_payment_window_id) === Number(registrationPaymentWindowId)
+    && currentPayment.processing_status === 'Completed'
+    && [ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED, ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED, ROUTING_STATUS.APPBEG_OWNED].includes(currentPayment.routing_status)
+  ) {
+    return { ok: true, payment: currentPayment, alreadyResolved: true };
+  }
+
   const window = await store.getRegistrationPaymentWindow(registrationPaymentWindowId);
+  const candidates = typeof store.getPaymentManualReviewCandidateWindows === 'function'
+    ? await store.getPaymentManualReviewCandidateWindows(paymentId)
+    : [];
+  const candidateWindowIds = candidates.map((candidate) => Number(candidate.id));
+  if (candidateWindowIds.length && !candidateWindowIds.includes(Number(registrationPaymentWindowId))) {
+    throw new Error('Selected payment window is not one of the manual review candidates.');
+  }
   await store.manuallyLinkPaymentEvent(paymentId, {
     contactId,
     registrationPaymentWindowId,
@@ -455,6 +546,14 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
       bot,
       io
     });
+    if (candidates.length && typeof store.releaseUnselectedManualReviewWindows === 'function') {
+      const released = await store.releaseUnselectedManualReviewWindows(paymentId, {
+        selectedWindowId: registrationPaymentWindowId,
+        candidateWindowIds,
+        staffName
+      });
+      await notifyUnselectedDepositCandidates(store, await store.getPaymentEvent(paymentId), released.filter((item) => isDepositWindow(item)), { bot });
+    }
   } else {
     await continueBotRegistrationAfterPayment(store, {
       contactId,
@@ -468,6 +567,28 @@ export async function markPaymentAppBegOwned(store, paymentId, { contactId, regi
   }
 
   return { ok: true, payment: await store.getPaymentEvent(paymentId) };
+}
+
+export async function rejectAmbiguousPaymentCandidates(store, paymentId, { staffName = 'Staff', bot = null } = {}) {
+  const payment = await store.getPaymentEvent(paymentId);
+  if (!payment) throw new Error('Payment event not found.');
+  const candidates = typeof store.getPaymentManualReviewCandidateWindows === 'function'
+    ? await store.getPaymentManualReviewCandidateWindows(paymentId)
+    : [];
+  if (!candidates.length || typeof store.releaseUnselectedManualReviewWindows !== 'function') {
+    return { ok: true, payment, released: [] };
+  }
+  const released = await store.releaseUnselectedManualReviewWindows(paymentId, {
+    selectedWindowId: null,
+    candidateWindowIds: candidates.map((candidate) => candidate.id),
+    staffName
+  });
+  await notifyUnselectedDepositCandidates(store, payment, released.filter((item) => isDepositWindow(item)), { bot });
+  await store.logPaymentRouting(paymentId, 'deposit_ambiguity_all_candidates_rejected', 'Staff rejected all ambiguous deposit candidates.', {
+    staffName,
+    candidateWindowIds: candidates.map((candidate) => candidate.id)
+  });
+  return { ok: true, payment: await store.getPaymentEvent(paymentId), released };
 }
 
 export async function startDepositEventForContact(store, { contactId, startedBy = 'Staff', notes = '' }) {

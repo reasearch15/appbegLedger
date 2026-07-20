@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createAppBegPlayerForContact } from '../src/appbeg/createPlayerService.js';
 import { buildPaymentEventIdempotencyKey, creditAppBegDepositViaApi } from '../src/appbeg/depositCreditClient.js';
+import { createDataStore } from '../src/db/index.js';
 import { continueRegisteredDepositAfterPayment } from '../src/payments/depositPaymentFlow.js';
 import { PAYMENT_WINDOW_FLOW } from '../src/payments/constants.js';
 
@@ -64,7 +68,12 @@ function makeCreateStore({ creditFails = false, markFails = false, registrationI
         flow_type: PAYMENT_WINDOW_FLOW.REGISTRATION,
         status: 'matched',
         status_raw: 'completed',
-        first_deposit_amount: 25,
+        first_deposit_amount: 10.37,
+        expected_payment_cents: 1037,
+        received_payment_amount: 10.37,
+        received_payment_cents: 1037,
+        credited_deposit_amount: 11,
+        credited_deposit_cents: 1100,
         matched_payment_event_id: 123
       };
     },
@@ -108,7 +117,7 @@ async function testRegistrationCreditBeforeRegistered() {
   assert.equal(store.calls.findIndex(([name]) => name === 'credit') < store.calls.findIndex(([name]) => name === 'markRegistered'), true);
   assert.equal(store.calls.some(([name]) => name === 'markRegistered'), true);
   assert.equal(store.calls.find(([name]) => name === 'credit')[1].paymentEventId, 123);
-  assert.equal(store.calls.find(([name]) => name === 'credit')[1].amount, 25);
+  assert.equal(store.calls.find(([name]) => name === 'credit')[1].amount, 11);
 }
 
 async function testReferralCodeReachesCreatePlayerApi() {
@@ -151,12 +160,12 @@ async function testLocalFailureRetriesAsAlreadyCredited() {
         ? makeResponse(200, { ok: true, playerUid: 'player_1', username: 'JohnVIP01' })
         : makeResponse(409, { error: 'username already exists' });
     }
-    return makeResponse(200, {
-      status: 'already_credited',
-      amount: 25,
-      externalReference: buildPaymentEventIdempotencyKey(123),
-      playerUid: 'player_1'
-    });
+      return makeResponse(200, {
+        status: 'already_credited',
+        amount: 11,
+        externalReference: buildPaymentEventIdempotencyKey(123),
+        playerUid: 'player_1'
+      });
   };
   globalThis.appbegStore = {
     configured: true,
@@ -251,6 +260,69 @@ async function testNormalDepositUsesSharedCredit() {
   assert.equal(calls[0].amount, 15);
 }
 
+async function testRegistrationPaymentWindowPreservesExactAndCreditedAmounts() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'appbeg-registration-credit-'));
+  const store = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dir, 'test.sqlite') });
+  try {
+    const contact = await store.upsertTelegramUser({
+      id: 99001,
+      first_name: 'Credit',
+      last_name: 'Check',
+      username: 'credit_check',
+      is_bot: false
+    });
+    const window = await store.createRegistrationPaymentWindow({
+      contactId: contact.id,
+      telegramUserId: contact.telegram_id,
+      paymentMethodId: null,
+      paymentDisplayName: 'Credit Check',
+      firstDepositAmount: 10.37,
+      creditedDepositAmount: 11,
+      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
+      windowMinutes: 7
+    });
+    assert.equal(Number(window.first_deposit_amount), 10.37);
+    assert.equal(Number(window.expected_payment_cents), 1037);
+    assert.equal(Number(window.credited_deposit_amount), 11);
+    assert.equal(Number(window.credited_deposit_cents), 1100);
+
+    const now = new Date().toISOString();
+    const paymentResult = await store.db.prepare(`
+      INSERT INTO payment_events (
+        telegram_message_id, telegram_group_id, sender_name, message_text, raw_payload_json,
+        processing_status, parsed_amount, parsed_sender_name, parsed_payment_app,
+        routing_status, contact_id, message_date, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, 'Parsed', ?, ?, ?, 'searching', ?, ?, ?, ?)
+    `).run(
+      501,
+      -1001,
+      'Credit Check',
+      'You received $10.37 from Credit Check',
+      '{}',
+      10.37,
+      'Credit Check',
+      'Chime',
+      contact.id,
+      now,
+      now,
+      now
+    );
+    const paymentId = Number(paymentResult.lastInsertRowid);
+    const claim = await store.claimPaymentWindowMatch(window.id, paymentId);
+    assert.equal(claim.ok, true);
+    const matched = await store.getRegistrationPaymentWindow(window.id);
+    assert.equal(Number(matched.first_deposit_amount), 10.37);
+    assert.equal(Number(matched.received_payment_amount), 10.37);
+    assert.equal(Number(matched.received_payment_cents), 1037);
+    assert.equal(Number(matched.credited_deposit_amount), 11);
+    assert.equal(Number(matched.credited_deposit_cents), 1100);
+  } finally {
+    store.db?.close?.();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
 try {
   await testRegistrationCreditBeforeRegistered();
   await testReferralCodeReachesCreatePlayerApi();
@@ -258,6 +330,7 @@ try {
   await testLocalFailureRetriesAsAlreadyCredited();
   await testCreditClientIdempotencyAndConflict();
   await testNormalDepositUsesSharedCredit();
+  await testRegistrationPaymentWindowPreservesExactAndCreditedAmounts();
   console.log('ok registration initial deposit credit');
 } finally {
   restoreGlobals();

@@ -14,3 +14,7 @@ export function isCustomerSupportAiConfigured(env = process.env) {
 
   return Boolean(String(env.CUSTOMER_SUPPORT_AI_API_KEY || '').trim());
 }
+
+export function getCustomerSupportAiProvider(env = process.env) {
+  return String(env.CUSTOMER_SUPPORT_AI_PROVIDER || 'template').trim().toLowerCase() || 'template';
+}

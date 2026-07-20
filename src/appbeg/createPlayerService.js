@@ -1,6 +1,7 @@
 import { createAppBegPlayerViaApi } from '../appbeg/createPlayerClient.js';
 import { createReplySender } from '../telegram/messageDelivery.js';
 import { validateAppBegPassword, validateAppBegUsername } from '../registration/appbegValidation.js';
+import { centsToDollars, parseMoneyToCents, registrationCreditCents } from '../registration/utils.js';
 import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 
@@ -179,7 +180,12 @@ export async function createAppBegPlayerForContact(store, {
     if (!window.matched_payment_event_id) {
       throw new Error('Registration payment window does not have a matched payment event.');
     }
-    const creditAmount = Number(window.first_deposit_amount);
+    const creditCents = window.credited_deposit_cents != null
+      ? Number(window.credited_deposit_cents)
+      : registrationCreditCents(parseMoneyToCents(String(window.first_deposit_amount)));
+    const creditAmount = window.credited_deposit_amount != null
+      ? Number(window.credited_deposit_amount)
+      : Number(centsToDollars(creditCents));
     if (!Number.isFinite(creditAmount) || creditAmount <= 0) {
       throw new Error('Matched registration payment amount must be positive.');
     }

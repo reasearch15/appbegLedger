@@ -33,7 +33,7 @@ const app = document.querySelector('#app');
 const socket = io({ withCredentials: true });
 
 const registrationFilters = ['All', 'New', 'Collecting Info', 'Pending', 'Pending Verification', 'Registered', 'Suspended', 'Archived'];
-const conversationFilters = ['All', 'Open', 'Waiting', 'Closed'];
+const conversationFilters = ['All', 'Open', 'Closed'];
 const paymentStatusFilters = PAYMENT_STATUS_FILTERS;
 const manualReviewFilters = MANUAL_REVIEW_FILTERS;
 
@@ -54,6 +54,7 @@ let state = {
   payment: null,
   paymentLogs: [],
   paymentRoutingLogs: [],
+  manualReviewCandidateWindows: [],
   paymentQuery: '',
   paymentStatusFilter: 'All',
   paymentExceptionsOnly: false,
@@ -71,11 +72,8 @@ let state = {
   timeline: [],
   automationState: null,
   automationLogs: [],
-  staffAiDraft: null,
-  staffAiActiveGenerationId: null,
-  staffAiBadDraftId: null,
-  staffAiDraftLoading: false,
-  staffAiDraftGenerationError: null,
+  customerSupportPrompt: null,
+  customerSupportPromptSaving: false,
   allTags: [],
   quickReplies: [],
   query: '',
@@ -196,8 +194,6 @@ const SYNC_STATUS_REFRESH_DEBOUNCE_MS = 5000;
 const REFRESH_DEDUPE_MS = 1000;
 const CONTACTS_POLL_MS = 30000;
 const PAYMENT_PAGE_LIMIT = 15;
-let staffAiDraftPollTimer = null;
-let staffAiDraftPollStartedAt = 0;
 const CONTACT_DETAIL_CACHE_MS = 5000;
 
 function escapeHtml(value) {
@@ -270,7 +266,6 @@ function cacheContactDetail(contactId, detail) {
       timeline: detail.timeline || [],
       automationState: detail.automationState,
       automationLogs: detail.automationLogs || [],
-      staffAiDraft: detail.staffAiDraft || null,
       tags: detail.tags || [],
       quickReplies: detail.quickReplies || []
     }
@@ -296,194 +291,6 @@ function getLatestIncomingMessage() {
   return null;
 }
 
-function normalizeStaffAiDraft(draft) {
-  if (!draft) return null;
-  const aiReply = String(draft.ai_draft_reply || draft.ai_reply || '').trim();
-  return {
-    ...draft,
-    id: draft.id != null ? Number(draft.id) : draft.id,
-    contact_id: draft.contact_id != null ? Number(draft.contact_id) : draft.contact_id,
-    incoming_message_id: draft.incoming_message_id != null ? Number(draft.incoming_message_id) : null,
-    ai_draft_reply: aiReply || draft.ai_draft_reply || null,
-    draft_status: draft.draft_status || draft.status || (aiReply ? 'ready' : 'generating'),
-    generation_id: draft.generation_id || null
-  };
-}
-
-function isDraftOlderThanLatest(draft) {
-  const latest = getLatestIncomingMessage();
-  if (!draft?.incoming_message_id || !latest?.id) return false;
-  return Number(draft.incoming_message_id) < Number(latest.id);
-}
-
-function stopStaffAiDraftPolling() {
-  if (staffAiDraftPollTimer) {
-    clearInterval(staffAiDraftPollTimer);
-    staffAiDraftPollTimer = null;
-  }
-  staffAiDraftPollStartedAt = 0;
-}
-
-function startStaffAiDraftPolling(contactId) {
-  stopStaffAiDraftPolling();
-  staffAiDraftPollStartedAt = Date.now();
-  console.log('[support-ai] support_ai_ui_generating_started contact=%s', contactId);
-  staffAiDraftPollTimer = setInterval(() => {
-    void pollStaffAiDraftReady(contactId);
-  }, 1000);
-}
-
-async function pollStaffAiDraftReady(contactId) {
-  if (Number(state.selectedContactId) !== Number(contactId)) {
-    stopStaffAiDraftPolling();
-    return;
-  }
-  if (staffAiDraftPollStartedAt && Date.now() - staffAiDraftPollStartedAt > 15000) {
-    stopStaffAiDraftPolling();
-    state.staffAiDraftGenerationError = 'Draft generation timed out. Retry.';
-    state.staffAiDraftLoading = false;
-    console.log('[support-ai] support_ai_ui_generation_timeout contact=%s', contactId);
-    render();
-    return;
-  }
-  try {
-    const draft = await fetchLatestStaffAiDraft(contactId);
-    if (draft?.draft_status === 'ready' && draft.ai_draft_reply) {
-      applyReadyStaffAiDraft(draft);
-      stopStaffAiDraftPolling();
-      render();
-    }
-  } catch (error) {
-    console.warn('[support-ai] draft poll failed:', error);
-  }
-}
-
-async function fetchLatestStaffAiDraft(contactId) {
-  console.log('[support-ai] support_ai_ui_fetch_latest_started contact=%s', contactId);
-  const data = await api(`/api/contacts/${contactId}?_=${Date.now()}`, { cache: 'no-store' });
-  return normalizeStaffAiDraft(data.staffAiDraft || null);
-}
-
-function applyReadyStaffAiDraft(draft, { generationId = null } = {}) {
-  const normalized = normalizeStaffAiDraft(draft);
-  if (!normalized?.ai_draft_reply) return false;
-  if (isDraftOlderThanLatest(normalized)) {
-    console.log('[support-ai] support_ai_ui_stale_draft_rejected contact=%s draft_id=%s message_id=%s', normalized.contact_id, normalized.id, normalized.incoming_message_id);
-    return false;
-  }
-  state.staffAiDraft = {
-    ...normalized,
-    draft_status: 'ready'
-  };
-  state.staffAiActiveGenerationId = generationId || normalized.generation_id || null;
-  state.staffAiBadDraftId = null;
-  state.staffAiDraftLoading = false;
-  state.staffAiDraftGenerationError = null;
-  console.log('[support-ai] support_ai_ui_ready_draft_loaded contact=%s draft_id=%s message_id=%s', normalized.contact_id, normalized.id, normalized.incoming_message_id);
-  return true;
-}
-
-async function loadReadyStaffAiDraft(contactId, { socketDraft = null, generationId = null } = {}) {
-  stopStaffAiDraftPolling();
-  state.staffAiDraftLoading = true;
-  state.staffAiDraftGenerationError = null;
-  let draft = null;
-  try {
-    draft = await fetchLatestStaffAiDraft(contactId);
-  } catch (error) {
-    console.warn('[support-ai] ready draft fetch failed:', error);
-  }
-  if (!draft?.ai_draft_reply && socketDraft) {
-    draft = normalizeStaffAiDraft(socketDraft);
-  }
-  const applied = draft ? applyReadyStaffAiDraft(draft, { generationId }) : false;
-  if (!applied) {
-    state.staffAiDraftLoading = false;
-  }
-  return applied;
-}
-
-function isStaffAiDraftActionable(draft = state.staffAiDraft) {
-  const normalized = normalizeStaffAiDraft(draft);
-  if (!normalized || normalized.draft_status !== 'ready' || !normalized.ai_draft_reply) return false;
-  if (isDraftOlderThanLatest(normalized)) return false;
-  return true;
-}
-
-function applyStaffAiDraftFromServer(draft) {
-  const normalized = normalizeStaffAiDraft(draft);
-  if (!normalized?.ai_draft_reply) {
-    if (state.staffAiDraft?.draft_status === 'generating' && staffAiDraftPollTimer) return;
-    if (state.staffAiDraft?.draft_status !== 'generating') {
-      state.staffAiDraft = null;
-      state.staffAiActiveGenerationId = null;
-    }
-    return;
-  }
-  if (isDraftOlderThanLatest(normalized)) {
-    console.log('[support-ai] support_ai_ui_stale_draft_rejected contact=%s draft_id=%s', normalized.contact_id, normalized.id);
-    return;
-  }
-  applyReadyStaffAiDraft(normalized);
-}
-
-function setStaffAiDraftGenerating({ customerMessage, incomingMessageId, generationId = null } = {}) {
-  state.staffAiDraft = {
-    draft_status: 'generating',
-    customer_message: customerMessage || '',
-    incoming_message_id: incomingMessageId != null ? Number(incomingMessageId) : null,
-    ai_draft_reply: null,
-    generation_id: generationId || null
-  };
-  state.staffAiDraftLoading = true;
-  state.staffAiDraftGenerationError = null;
-  if (generationId) state.staffAiActiveGenerationId = generationId;
-  state.staffAiBadDraftId = null;
-}
-
-async function handleStaffAiDraftSocketEvent(eventName, payload = {}) {
-  const id = normalizeContactId(payload.contactId || payload.contact_id);
-  console.log('[support-ai] support_ai_ui_socket_event_received event=%s contact=%s draft_id=%s status=%s', eventName, id, payload.draft_id || payload.draft?.id || 'n/a', payload.status || payload.draft?.draft_status || 'n/a');
-  if (!id || state.selectedContactId !== id) return;
-  contactDetailCache.delete(id);
-
-  if (eventName === 'cleared') {
-    stopStaffAiDraftPolling();
-    state.staffAiDraft = null;
-    state.staffAiActiveGenerationId = null;
-    state.staffAiBadDraftId = null;
-    state.staffAiDraftLoading = false;
-    state.staffAiDraftGenerationError = null;
-    stopStaffAiDraftPolling();
-    state.staffAiDraftLoading = false;
-    state.staffAiDraftGenerationError = null;
-    render();
-    return;
-  }
-
-  if (eventName === 'generating') {
-    const latest = getLatestIncomingMessage();
-    setStaffAiDraftGenerating({
-      customerMessage: payload.customerMessage || payload.draft?.customer_message || latest?.text || '',
-      incomingMessageId: payload.customer_message_id || payload.draft?.incoming_message_id || latest?.id || null,
-      generationId: payload.generation_id || payload.generationId || payload.draft?.generation_id || null
-    });
-    startStaffAiDraftPolling(id);
-    render();
-    return;
-  }
-
-  if (eventName === 'ready' || eventName === 'changed') {
-    const generationId = payload.generation_id || payload.generationId || payload.draft?.generation_id || null;
-    const socketDraft = payload.draft || null;
-    const status = payload.status || socketDraft?.draft_status;
-    if (status === 'ready' || socketDraft?.ai_draft_reply || socketDraft?.ai_reply) {
-      await loadReadyStaffAiDraft(id, { socketDraft, generationId });
-      render();
-    }
-  }
-}
-
 function applyContactDetail(detail) {
   if (!detail?.contact) return;
   state.contact = normalizeContact(detail.contact);
@@ -492,7 +299,6 @@ function applyContactDetail(detail) {
   state.timeline = detail.timeline || [];
   state.automationState = detail.automationState;
   state.automationLogs = detail.automationLogs || [];
-  applyStaffAiDraftFromServer(detail.staffAiDraft || null);
   state.allTags = detail.tags || [];
   state.quickReplies = detail.quickReplies || [];
   state.contactLoading = false;
@@ -656,12 +462,6 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
   if (changed) {
     state.registrationWizard = null;
     state.appbegCreateState = null;
-    stopStaffAiDraftPolling();
-    state.staffAiDraft = null;
-    state.staffAiActiveGenerationId = null;
-    state.staffAiBadDraftId = null;
-    state.staffAiDraftLoading = false;
-    state.staffAiDraftGenerationError = null;
   }
   if (!changed && state.contact?.id === id) {
     render();
@@ -1199,6 +999,11 @@ async function refreshCoadminSettings() {
   state.settingsAuditLog = payload.audit_log || payload.auditLog || [];
 }
 
+async function refreshCustomerSupportPrompt() {
+  const payload = await api('/api/settings/customer-support-prompt');
+  state.customerSupportPrompt = payload.customerSupportPrompt || null;
+}
+
 function readCoadminFormValues() {
   return {
     coadmin_name: document.querySelector('#coadminName')?.value?.trim() ?? state.coadminSettings.coadmin_name ?? '',
@@ -1469,11 +1274,13 @@ async function refreshSelectedPayment() {
   if (!state.selectedPaymentId) {
     state.payment = null;
     state.paymentLogs = [];
+    state.manualReviewCandidateWindows = [];
     return;
   }
   const data = await api(`/api/payments/${state.selectedPaymentId}`);
   state.payment = data.payment;
   state.registrationWindow = data.registrationWindow || null;
+  state.manualReviewCandidateWindows = data.manualReviewCandidateWindows || [];
   state.paymentSync = data.sync;
   state.paymentLogs = data.logs || [];
   state.paymentRoutingLogs = data.routingLogs || [];
@@ -1519,12 +1326,10 @@ function filteredContacts() {
 function statCards() {
   const unreadTotal = state.contacts.reduce((sum, contact) => sum + Number(contact.unread_count || 0), 0);
   const openCount = state.contacts.filter((contact) => contact.conversation_status === 'Open').length;
-  const waitingCount = state.contacts.filter((contact) => contact.conversation_status === 'Waiting').length;
   const cards = [
     ['Contacts', state.stats.totalTelegramUsers || 0],
     ['Unread', unreadTotal],
     ['Open', openCount],
-    ['Waiting', waitingCount],
     ['Registered', state.stats.registeredUsers || 0],
     ['Active Today', state.stats.activeToday || 0]
   ];
@@ -1571,28 +1376,6 @@ function syncStatus() {
             </label>
           ` : ''}
         </div>
-        <div class="customer-support-ai-status">
-          <div class="customer-support-ai-copy">
-            <div class="customer-support-ai-title">Customer Support AI</div>
-          </div>
-          <div class="customer-support-ai-mode">
-            <span class="ai-mode-label">AI Mode:</span>
-            <div class="ai-mode-selector" role="group" aria-label="Customer Support AI Mode">
-              <button
-                type="button"
-                class="ai-mode-btn ${supportMode === 'train' ? 'is-active' : ''}"
-                data-global-ai-mode="train"
-                ${state.customerSupportAiSaving ? 'disabled' : ''}
-              >Train</button>
-              <button
-                type="button"
-                class="ai-mode-btn ${supportMode === 'auto' ? 'is-active' : ''}"
-                data-global-ai-mode="auto"
-                ${state.customerSupportAiSaving ? 'disabled' : ''}
-              >Auto</button>
-            </div>
-          </div>
-        </div>
       </div>
       ${latestLog ? `<div class="sync-log-preview subtle">${escapeHtml(latestLog.message)}</div>` : ''}
     </div>
@@ -1632,7 +1415,7 @@ function contactRows() {
           <div class="contact-preview truncate">${escapeHtml(previewPrefix + (contact.last_message || 'No messages yet'))}</div>
           <div class="contact-meta">
             <span class="badge-wrap">${statusBadge(contact.registration_status)}</span>
-            <span class="bot-status-chip ${contact.needs_staff_review ? 'review' : contact.bot_paused ? 'paused' : 'active'}">${chatbotStatusLabel(contact)}</span>
+            <span class="bot-status-chip active">${chatbotStatusLabel(contact)}</span>
             <span>${escapeHtml(contact.assigned_staff_name || 'Unassigned')}</span>
           </div>
         </div>
@@ -1678,7 +1461,7 @@ function conversationHeader() {
       </div>
       <div class="chat-tools">
         <select id="conversationStatus">
-          ${['Open', 'Waiting', 'Closed'].map((status) => `<option value="${status}" ${contact.conversation_status === status ? 'selected' : ''}>${status}</option>`).join('')}
+          ${['Open', 'Closed'].map((status) => `<option value="${status}" ${contact.conversation_status === status ? 'selected' : ''}>${status}</option>`).join('')}
         </select>
         <input id="assignmentInput" value="${escapeHtml(contact.assigned_staff_name || '')}" placeholder="Assign staff" />
         <button class="button secondary" id="assignConversation">Assign</button>
@@ -1745,129 +1528,15 @@ function staffAiUserStateDebugLabel(draft) {
   return `User state: Unregistered\nRegistration step: ${step}`;
 }
 
-function staffAiSuggestedReplyPanel() {
-  if (!state.contact) return '';
-  const mode = state.customerSupportAi?.mode === 'auto' ? 'auto' : 'train';
-  const configured = state.customerSupportAi?.configured !== false;
-  const paused = state.contact.ai_auto_paused === true;
-  if (!configured) {
-    return `
-      <section class="ai-suggested-reply-panel is-muted">
-        <div class="ai-suggested-header">
-          <div>
-            <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">AI is not configured</div>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-  if (mode !== 'train') {
-    return `
-      <section class="ai-suggested-reply-panel is-muted">
-        <div class="ai-suggested-header">
-          <div>
-            <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">${paused
-              ? 'Auto mode is on, but paused for this contact after a staff reply.'
-              : 'Auto mode is on. Replies send automatically using saved training.'}</div>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-  const draft = state.staffAiDraft;
-  const latestIncoming = getLatestIncomingMessage();
-  const customerMessage = draft?.customer_message || latestIncoming?.text || '';
-
-  if (state.staffAiDraftGenerationError) {
-    return `
-      <section class="ai-suggested-reply-panel is-empty">
-        <div class="ai-suggested-header">
-          <div>
-            <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">${escapeHtml(state.staffAiDraftGenerationError)}</div>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-
-  const isGenerating = draft?.draft_status === 'generating' || state.staffAiDraftLoading;
-
-  if (isGenerating) {
-    return `
-      <section class="ai-suggested-reply-panel is-generating">
-        <div class="ai-suggested-header">
-          <div>
-            <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">Generating draft...</div>
-          </div>
-        </div>
-        <div class="ai-context-block">
-          <span>Customer message</span>
-          <p>${escapeHtml(customerMessage || '—')}</p>
-        </div>
-        <div class="ai-context-block">
-          <span>AI suggested reply</span>
-          <div class="ai-generating-row">
-            <span class="ai-spinner" aria-hidden="true"></span>
-            <span>Generating draft...</span>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-
-  if (!draft?.ai_draft_reply || draft.draft_status !== 'ready' || !isStaffAiDraftActionable(draft)) {
-    return `
-      <section class="ai-suggested-reply-panel is-empty">
-        <div class="ai-suggested-header">
-          <div>
-            <div class="card-title">AI Suggested Reply</div>
-            <div class="subtle">No draft yet.</div>
-          </div>
-        </div>
-      </section>
-    `;
-  }
-  const badOpen = Number(state.staffAiBadDraftId) === Number(draft.id);
-  const debugLabel = staffAiUserStateDebugLabel(draft);
+function customerSupportPromptMiniPanel() {
   return `
-    <section class="ai-suggested-reply-panel">
+    <section class="ai-suggested-reply-panel is-muted">
       <div class="ai-suggested-header">
         <div>
-          <div class="card-title">AI Suggested Reply</div>
-          <div class="subtle">
-            ${draft.detected_intent ? `Intent: ${escapeHtml(draft.detected_intent)} · ` : ''}
-            ${draft.created_at ? fmtDateTime(draft.created_at) : 'Private draft'}
-          </div>
+          <div class="card-title">Customer Support Prompt</div>
+          <div class="subtle">Automatic replies use the saved master prompt plus verified live context.</div>
         </div>
       </div>
-      <div class="ai-debug-context" aria-label="Staff-only AI context">${escapeHtml(debugLabel)}</div>
-      ${draft.customer_message ? `
-        <div class="ai-context-block">
-          <span>Customer message</span>
-          <p>${escapeHtml(draft.customer_message)}</p>
-        </div>
-      ` : ''}
-      <div class="ai-context-block">
-        <span>AI suggested reply</span>
-        <p>${escapeHtml(draft.ai_draft_reply)}</p>
-      </div>
-      <div class="ai-suggested-actions">
-        <button type="button" class="button small" data-ai-draft-action="good">GOOD</button>
-        <button type="button" class="button secondary small" data-ai-draft-action="bad">BAD</button>
-      </div>
-      ${badOpen ? `
-        <div class="ai-bad-reply-form">
-          <label class="field-label">
-            <span>Correct reply</span>
-            <textarea id="aiCorrectReplyText" class="ai-suggested-text" placeholder="Write the correct reply"></textarea>
-          </label>
-          <button type="button" class="button small" data-ai-draft-action="send-bad">SEND</button>
-        </div>
-      ` : ''}
     </section>
   `;
 }
@@ -1877,7 +1546,7 @@ function composer() {
   const disabled = sendingMessage ? 'disabled' : '';
   return `
     <form class="composer" id="sendForm">
-      ${staffAiSuggestedReplyPanel()}
+      ${customerSupportPromptMiniPanel()}
       ${quickReplyBar()}
       <div class="composer-row">
         <textarea id="messageText" placeholder="Write a Telegram message" ${disabled}>${escapeHtml(state.draft)}</textarea>
@@ -1940,15 +1609,12 @@ function detailsPanel() {
       </section>
 
       <section class="card">
-        <div class="card-title">AI Chatbot</div>
+        <div class="card-title">Support Bot</div>
         ${infoRow('Status', chatbotStatusLabel(contact))}
-        ${infoRow('Paused', contact.bot_paused ? 'Yes' : 'No')}
-        ${infoRow('Needs staff review', contact.needs_staff_review ? 'Yes' : 'No')}
-        ${contact.staff_review_reason ? infoRow('Review reason', contact.staff_review_reason) : ''}
         <div class="control-grid">
           <button class="button secondary" data-bot-control="pause" ${contact.bot_paused ? 'disabled' : ''}>Pause Bot</button>
-          <button class="button secondary" data-bot-control="resume" ${!contact.bot_paused && !contact.needs_staff_review ? 'disabled' : ''}>Resume Bot</button>
-          <button class="button" data-bot-control="takeover">Take Over Manually</button>
+          <button class="button secondary" data-bot-control="resume" ${!contact.bot_paused ? 'disabled' : ''}>Resume Bot</button>
+          <button class="button" data-bot-control="takeover" ${contact.bot_paused ? 'disabled' : ''}>Take Over</button>
         </div>
       </section>
 
@@ -2112,7 +1778,6 @@ function automationPanel() {
     </div>
     <div class="control-grid two">
       <button class="button secondary" data-automation-action="save-info">Save Info</button>
-      <button class="button secondary" data-automation-action="reviewed">Mark Reviewed</button>
     </div>
   `;
 }
@@ -2132,10 +1797,9 @@ function infoRow(label, value) {
 
 function chatbotStatusLabel(contact) {
   if (!contact) return '—';
-  if (contact.needs_staff_review) return 'Needs staff review';
-  if (contact.bot_paused) return 'Paused';
   if (contact.bot_enabled === false) return 'Disabled';
-  return 'Active';
+  if (contact.bot_paused) return 'Paused by staff';
+  return 'Automatic';
 }
 
 function noteItems() {
@@ -2559,6 +2223,42 @@ function manualReviewRows() {
   }).join('');
 }
 
+function manualReviewCandidateWindowsPanel() {
+  const candidates = state.manualReviewCandidateWindows || [];
+  if (!candidates.length) return '';
+  return `
+    <section class="card">
+      <div class="card-title">Candidate Deposit Windows</div>
+      <div class="timeline">
+        ${candidates.map((candidate) => {
+    const recent = candidate.recent_messages || [];
+    return `
+          <div class="timeline-item">
+            <div class="timeline-time">Window #${escapeHtml(String(candidate.id || candidate.window_id || ''))}</div>
+            <div>
+              <strong>${escapeHtml(candidate.display_name || 'Unknown contact')}</strong>
+              ${candidate.telegram_username ? `<span class="subtle">@${escapeHtml(candidate.telegram_username)}</span>` : ''}
+              <div class="subtle">
+                Contact #${escapeHtml(String(candidate.contact_id || ''))}
+                · Amount $${escapeHtml(String(candidate.first_deposit_amount ?? ''))}
+                · ${escapeHtml(candidate.status || candidate.status_raw || 'manual_review')}
+              </div>
+              <div class="subtle">Started ${fmtDateTime(candidate.created_at)} · Expires ${fmtDateTime(candidate.expires_at)}</div>
+              ${recent.length ? `<div class="payload-box">${recent.map((message) => (
+        `<div><strong>${escapeHtml(message.direction || '')}</strong> ${escapeHtml(message.text || '')}</div>`
+      )).join('')}</div>` : ''}
+              <div class="status-card-actions payment-detail-actions">
+                <button type="button" class="button secondary" data-fill-payment-link-contact="${escapeHtml(String(candidate.contact_id || ''))}" data-fill-payment-link-window="${escapeHtml(String(candidate.id || candidate.window_id || ''))}">Use This Window</button>
+              </div>
+            </div>
+          </div>
+        `;
+  }).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function manualReviewWorkspace() {
   const pane = state.mobileManualReviewPane || 'list';
   const unresolved = Number(state.manualReviewStats?.unresolved || 0);
@@ -2655,6 +2355,8 @@ function manualReviewDetailPanel() {
         ${infoRow('Parse Error', payment.parse_error || '—')}
       </section>
 
+      ${manualReviewCandidateWindowsPanel()}
+
       <section class="card">
         <div class="card-title">Match / Link</div>
         <div class="payment-link-form">
@@ -2748,6 +2450,23 @@ function settingsWorkspace() {
         <section class="card settings-audit-card">
           <div class="card-title">Settings Audit Log</div>
           <div class="settings-audit-list">${settingsAuditRows()}</div>
+        </section>
+        <section class="card settings-form-card">
+          <div class="card-title">Customer Support Prompt</div>
+          <form id="customerSupportPromptForm" class="settings-form">
+            <label class="field-label">
+              <span>Master prompt</span>
+              <textarea id="customerSupportPromptText" rows="14" ${state.customerSupportPromptSaving ? 'disabled' : ''}>${escapeHtml(state.customerSupportPrompt?.prompt || '')}</textarea>
+            </label>
+            <div class="settings-meta subtle">
+              Last updated ${state.customerSupportPrompt?.updated_at ? fmtDateTime(state.customerSupportPrompt.updated_at) : 'never'}
+              ${state.customerSupportPrompt?.updated_by ? ` by ${escapeHtml(state.customerSupportPrompt.updated_by)}` : ''}
+            </div>
+            <div class="settings-actions">
+              <button class="button" type="submit" ${state.customerSupportPromptSaving ? 'disabled' : ''}>${state.customerSupportPromptSaving ? 'Saving...' : 'Save Prompt'}</button>
+              <button class="button secondary" type="button" id="restoreDefaultSupportPrompt" ${state.customerSupportPromptSaving ? 'disabled' : ''}>Restore Default</button>
+            </div>
+          </form>
         </section>
         <section class="card settings-form-card">
           <div class="card-title">Staff Users</div>
@@ -3160,11 +2879,27 @@ function bindPersistentEvents() {
     void saveCoadminSettings();
   });
 
+  app.addEventListener('submit', (event) => {
+    const form = event.target.closest('#customerSupportPromptForm');
+    if (!form) return;
+    event.preventDefault();
+    void saveCustomerSupportPrompt();
+  });
+
   app.addEventListener('click', (event) => {
     const button = event.target.closest('#applyCoadminToContacts');
     if (!button || button.disabled) return;
     event.preventDefault();
     void applyCoadminToExistingContacts();
+  });
+
+  app.addEventListener('click', (event) => {
+    const button = event.target.closest('#restoreDefaultSupportPrompt');
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    if (confirm('Restore the default Customer Support Prompt?')) {
+      void restoreDefaultCustomerSupportPrompt();
+    }
   });
 
   app.addEventListener('click', (event) => {
@@ -3521,6 +3256,16 @@ function bindEvents() {
       void handlePaymentAction(button.dataset.paymentAction, button);
     });
   });
+  document.querySelectorAll('[data-fill-payment-link-window]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const contactInput = document.querySelector('#paymentLinkContactId');
+      const windowInput = document.querySelector('#paymentLinkWindowId');
+      if (contactInput) contactInput.value = button.dataset.fillPaymentLinkContact || '';
+      if (windowInput) windowInput.value = button.dataset.fillPaymentLinkWindow || '';
+    });
+  });
 
   document.querySelector('#conversationStatus')?.addEventListener('change', changeConversationStatus);
   document.querySelector('#assignConversation')?.addEventListener('click', assignConversation);
@@ -3540,20 +3285,6 @@ function bindEvents() {
   document.querySelectorAll('[data-reply-id]').forEach((button) => {
     button.addEventListener('click', () => insertQuickReply(Number(button.dataset.replyId)));
   });
-  document.querySelectorAll('[data-ai-draft-action]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.disabled) return;
-      void handleAiDraftAction(button.dataset.aiDraftAction);
-    });
-  });
-  document.querySelectorAll('[data-global-ai-mode]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.disabled || state.customerSupportAiSaving) return;
-      const mode = button.dataset.globalAiMode;
-      if (!mode || mode === state.customerSupportAi?.mode) return;
-      void setCustomerSupportAiMode(mode);
-    });
-  });
 }
 
 async function selectVisibleIfNeeded() {
@@ -3566,12 +3297,6 @@ async function selectVisibleIfNeeded() {
     state.timeline = [];
     state.automationState = null;
     state.automationLogs = [];
-    state.staffAiDraft = null;
-    state.staffAiActiveGenerationId = null;
-    state.staffAiBadDraftId = null;
-    state.staffAiDraftLoading = false;
-    state.staffAiDraftGenerationError = null;
-    stopStaffAiDraftPolling();
   }
   render();
 }
@@ -3692,6 +3417,49 @@ async function applyCoadminToExistingContacts() {
     state.coadminSettings = { ...state.coadminSettings, ...formValues };
   } finally {
     state.coadminApplying = false;
+    render();
+  }
+}
+
+async function saveCustomerSupportPrompt() {
+  const textarea = document.querySelector('#customerSupportPromptText');
+  const prompt = textarea?.value?.trim() || '';
+  if (!prompt) {
+    alert('Customer Support Prompt cannot be empty.');
+    textarea?.focus();
+    return;
+  }
+  state.customerSupportPromptSaving = true;
+  render();
+  try {
+    const payload = await api('/api/settings/customer-support-prompt', {
+      method: 'PATCH',
+      body: JSON.stringify({ prompt, staffName: state.staffName })
+    });
+    state.customerSupportPrompt = payload.customerSupportPrompt || state.customerSupportPrompt;
+    state.settingsSuccess = 'Customer Support Prompt saved.';
+  } catch (error) {
+    state.settingsError = error.message || 'Failed to save Customer Support Prompt.';
+  } finally {
+    state.customerSupportPromptSaving = false;
+    render();
+  }
+}
+
+async function restoreDefaultCustomerSupportPrompt() {
+  state.customerSupportPromptSaving = true;
+  render();
+  try {
+    const payload = await api('/api/settings/customer-support-prompt/reset', {
+      method: 'POST',
+      body: JSON.stringify({ staffName: state.staffName })
+    });
+    state.customerSupportPrompt = payload.customerSupportPrompt || state.customerSupportPrompt;
+    state.settingsSuccess = 'Default Customer Support Prompt restored.';
+  } catch (error) {
+    state.settingsError = error.message || 'Failed to restore default Customer Support Prompt.';
+  } finally {
+    state.customerSupportPromptSaving = false;
     render();
   }
 }
@@ -3817,105 +3585,6 @@ function setComposerDraft(text) {
   }
 }
 
-async function handleAiDraftAction(action) {
-  const draft = state.staffAiDraft;
-  if (!isStaffAiDraftActionable(draft)) return;
-  if (action === 'good') {
-    await sendStaffAiTrainingReply(draft.ai_draft_reply, 'good');
-    return;
-  }
-  if (action === 'bad') {
-    state.staffAiBadDraftId = draft.id;
-    render();
-    return;
-  }
-  if (action === 'send-bad') {
-    const text = document.querySelector('#aiCorrectReplyText')?.value?.trim() || '';
-    if (!text) {
-      document.querySelector('#aiCorrectReplyText')?.focus();
-      return;
-    }
-    await sendStaffAiTrainingReply(text, 'bad');
-  }
-}
-
-async function sendStaffAiTrainingReply(text, replyUsed) {
-  if (sendingMessage || !state.selectedContactId) return;
-  if ((replyUsed === 'good' || replyUsed === 'bad') && !isStaffAiDraftActionable(state.staffAiDraft)) return;
-  const finalText = String(text || '').trim();
-  if (!finalText) return;
-
-  const clientRequestId = crypto.randomUUID();
-  sendingMessage = true;
-  setComposerSending(true);
-  try {
-    await api(`/api/contacts/${state.selectedContactId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({
-        text: finalText,
-        staffName: state.staffName,
-        client_request_id: clientRequestId,
-        trainingExampleId: state.staffAiDraft?.id || null,
-        replyUsed,
-        staffFeedbackReason: replyUsed
-      })
-    });
-    state.draft = '';
-    stopStaffAiDraftPolling();
-    state.staffAiDraft = null;
-    state.staffAiActiveGenerationId = null;
-    state.staffAiBadDraftId = null;
-    state.staffAiDraftLoading = false;
-    state.staffAiDraftGenerationError = null;
-    stopStaffAiDraftPolling();
-    contactDetailCache.delete(Number(state.selectedContactId));
-    await refreshContacts({ force: true, reason: 'ai training reply sent' });
-    await refreshSelectedContact({ force: true, reason: 'ai training reply sent' });
-    render();
-  } catch (error) {
-    alert(error.message);
-    setComposerSending(false);
-  } finally {
-    sendingMessage = false;
-    state.sendingMessage = false;
-    setComposerSending(false);
-  }
-}
-
-async function setCustomerSupportAiMode(mode) {
-  if (state.customerSupportAiSaving) return;
-  const nextMode = mode === 'auto' ? 'auto' : 'train';
-  state.customerSupportAiSaving = true;
-  state.customerSupportAi = {
-    ...state.customerSupportAi,
-    mode: nextMode
-  };
-  if (nextMode === 'train') {
-    state.staffAiBadDraftId = null;
-  }
-  render();
-  try {
-    const payload = await api('/api/customer-support-ai-mode', {
-      method: 'PATCH',
-      body: JSON.stringify({
-        mode: nextMode,
-        staffName: state.staffName
-      })
-    });
-    state.customerSupportAi = payload.customerSupportAi || state.customerSupportAi;
-    contactDetailCache.clear();
-    if (state.selectedContactId) {
-      await refreshSelectedContact({ force: true, reason: 'customer support ai mode changed' });
-    }
-  } catch (error) {
-    alert(error.message || 'Could not update Customer Support AI mode.');
-    await refreshSyncStatus({ force: true, reason: 'customer support ai mode change failed' });
-  } finally {
-    state.customerSupportAiSaving = false;
-    render();
-  }
-}
-
 async function submitOutgoingMessage() {
   if (sendingMessage) return;
   if (!state.selectedContactId) return;
@@ -3934,10 +3603,7 @@ async function submitOutgoingMessage() {
       body: JSON.stringify({
         text,
         staffName: state.staffName,
-        client_request_id: clientRequestId,
-        trainingExampleId: state.staffAiDraft?.id || null,
-        replyUsed: state.staffAiDraft?.id ? 'bad' : null,
-        staffFeedbackReason: state.staffAiDraft?.id ? 'manual_override' : null
+        client_request_id: clientRequestId
       })
     });
     state.draft = '';
@@ -4123,6 +3789,7 @@ async function boot() {
       refreshStats({ force: true, reason: 'startup' }),
       refreshSyncStatus({ force: true, reason: 'startup' }),
       refreshCoadminSettings(),
+      refreshCustomerSupportPrompt(),
       api('/api/manual-review/stats').then((payload) => {
         state.manualReviewStats = normalizeManualReviewStats(payload?.stats || {});
       }).catch(() => {}),
@@ -4157,52 +3824,6 @@ socket.on('auto-registration-bot:changed', (payload = {}) => {
   if (state.section === 'contacts') render();
 });
 
-socket.on('staff-ai-draft-cleared', (payload = {}) => {
-  void handleStaffAiDraftSocketEvent('cleared', payload);
-});
-
-socket.on('staff-ai-draft-generating', (payload = {}) => {
-  void handleStaffAiDraftSocketEvent('generating', payload);
-});
-
-socket.on('staff-ai-draft-ready', (payload = {}) => {
-  void handleStaffAiDraftSocketEvent('ready', payload);
-});
-
-socket.on('staff-ai-draft-stale', () => {});
-
-socket.on('staff-ai-draft:changed', (payload = {}) => {
-  void handleStaffAiDraftSocketEvent('changed', payload);
-});
-
-socket.on('customer-support-ai-mode:changed', async (payload = {}) => {
-  state.customerSupportAi = payload;
-  contactDetailCache.clear();
-  if (state.selectedContactId) {
-    try {
-      await refreshSelectedContact({ force: true, reason: 'customer support ai mode changed' });
-    } catch (error) {
-      console.warn('[customer-support-ai] selected contact refresh failed:', error);
-    }
-  }
-  if (state.section === 'contacts') render();
-});
-
-socket.on('contact:ai-auto-paused:changed', async ({ contactId } = {}) => {
-  const id = normalizeContactId(contactId);
-  if (id) contactDetailCache.delete(id);
-  if (state.selectedContactId === id) {
-    try {
-      await refreshSelectedContact({ force: true, reason: 'contact ai auto paused' });
-      render();
-    } catch (error) {
-      console.warn('[customer-support-ai] contact pause refresh failed:', error);
-    }
-  }
-});
-
-socket.on('staff-ai-apprentice-mode:changed', () => {});
-
 socket.on('telegram-sync:changed', (payload = {}) => {
   if (payload.contactId) contactDetailCache.delete(Number(payload.contactId));
   scheduleTelegramSyncRefresh(payload);
@@ -4227,21 +3848,6 @@ socket.on('message:new', async ({ contactId, userId } = {}) => {
   if (state.selectedContactId !== id) return;
   try {
     await refreshSelectedContact({ force: true, reason: 'message:new selected contact' });
-    const latest = getLatestIncomingMessage();
-    if (latest?.text) {
-      setStaffAiDraftGenerating({
-        customerMessage: latest.text,
-        incomingMessageId: latest.id
-      });
-      startStaffAiDraftPolling(id);
-    } else {
-      stopStaffAiDraftPolling();
-      state.staffAiDraft = null;
-      state.staffAiActiveGenerationId = null;
-      state.staffAiBadDraftId = null;
-      state.staffAiDraftLoading = false;
-      state.staffAiDraftGenerationError = null;
-    }
     render();
   } catch (error) {
     console.warn('[contacts] selected message refresh failed:', error);

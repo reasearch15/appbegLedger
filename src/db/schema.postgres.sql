@@ -413,6 +413,12 @@ ALTER TABLE coadmin_settings
   ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_at TEXT;
 ALTER TABLE coadmin_settings
   ADD COLUMN IF NOT EXISTS customer_support_ai_mode_updated_by TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS customer_support_prompt TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS customer_support_prompt_updated_at TEXT;
+ALTER TABLE coadmin_settings
+  ADD COLUMN IF NOT EXISTS customer_support_prompt_updated_by TEXT;
 ALTER TABLE telegram_users
   ADD COLUMN IF NOT EXISTS active_messaging_source TEXT NOT NULL DEFAULT 'bot_api';
 ALTER TABLE telegram_users
@@ -489,6 +495,11 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   payment_qr_code_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL,
   payment_display_name TEXT,
   first_deposit_amount NUMERIC(12, 2) NOT NULL,
+  expected_payment_cents BIGINT,
+  received_payment_amount NUMERIC(12, 2),
+  received_payment_cents BIGINT,
+  credited_deposit_amount NUMERIC(12, 2),
+  credited_deposit_cents BIGINT,
   flow_type TEXT NOT NULL DEFAULT 'registration',
   matched_payment_event_id BIGINT,
   status TEXT NOT NULL DEFAULT 'active'

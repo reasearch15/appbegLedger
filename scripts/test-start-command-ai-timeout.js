@@ -74,15 +74,6 @@ function createProcessorStore(contact, { automationState = {}, aiMode = 'train' 
       calls.staffReview.push({ contactId, reason });
       throw new Error('markBotNeedsStaffReview should not be called');
     },
-    async beginStaffAiDraftGeneration({ generationId }) {
-      return { id: 1, generation_id: generationId, draft_status: 'generating' };
-    },
-    async failStaffAiDraftGeneration({ generationId, contactId }) {
-      calls.draftFailures.push({ generationId, contactId });
-    },
-    async createStaffAiTrainingDraft(draft) {
-      return { id: calls.logs.length + 1, draft_status: 'ready', ...draft };
-    },
     async createBotJob(params) {
       return {
         id: calls.nudge.length + 1,
@@ -153,7 +144,7 @@ async function assertStartSendsMenu(contact, expectedButtons, expectedTextPatter
     bot: createFakeBot(),
     supportAiGenerator: async () => {
       aiCalled = true;
-      throw new Error('Draft generation timed out. Retry.');
+      throw new Error('AI provider timed out.');
     }
   });
 
@@ -197,19 +188,22 @@ const supportContact = {
   registration_status: 'Registered'
 };
 const supportStore = createProcessorStore(supportContact, { aiMode: 'train' });
+let failureAttempts = 0;
 const timeoutResult = await processBotJob(supportStore, startJob(supportContact, 'I need help', 701), {
   bot: createFakeBot(),
   supportAiGenerator: async () => {
-    throw new Error('Draft generation timed out. Retry.');
+    failureAttempts += 1;
+    throw new Error('AI provider timed out.');
   }
 });
-assert.equal(timeoutResult.ok, false);
-assert.equal(supportStore.calls.outbound.length, 0);
+assert.equal(timeoutResult.ok, true);
+assert.equal(failureAttempts, 2);
+assert.equal(supportStore.calls.outbound.length, 1);
+assert.match(supportStore.calls.outbound[0].text, /having trouble accessing support/i);
 assert.equal(supportStore.calls.staffReview.length, 0);
-assert.equal(supportStore.calls.draftFailures.length, 1);
 assert.equal(supportStore.calls.completedJobs.at(-1).status, 'completed');
 assert.match(supportStore.calls.completedJobs.at(-1).errorText, /timed out/);
-console.log('ok AI timeout records draft failure without staff takeover');
+console.log('ok AI failure sends fallback without staff takeover');
 
 const takeoverContact = {
   ...guest,
@@ -235,9 +229,11 @@ const takeoverResult = await processBotJob(takeoverStore, startJob(takeoverConta
   })
 });
 assert.equal(takeoverResult.ok, true);
+assert.equal(takeoverResult.skipped, true);
+assert.equal(takeoverResult.reason, 'manual_pause');
 assert.equal(takeoverStore.calls.outbound.length, 0);
 assert.equal(takeoverStore.calls.staffReview.length, 0);
-console.log('ok manual staff takeover suppresses automatic AI replies');
+console.log('ok explicit manual takeover suppresses automatic AI replies');
 
 const enqueueStore = createProcessorStore(guest);
 const first = await enqueueChatbotJob(enqueueStore, {
@@ -259,4 +255,4 @@ assert.equal(duplicate.duplicate, true);
 assert.equal(enqueueStore.calls.nudge.length, 1);
 console.log('ok duplicate /start enqueue uses existing idempotency');
 
-console.log('ALL START COMMAND AI TIMEOUT CHECKS PASSED');
+console.log('ALL IMMEDIATE SUPPORT BOT CHECKS PASSED');

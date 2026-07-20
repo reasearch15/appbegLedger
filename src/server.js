@@ -26,6 +26,7 @@ import {
   routeUnprocessedPayments,
   reprocessPaymentEvent,
   markPaymentAppBegOwned,
+  rejectAmbiguousPaymentCandidates,
   startDepositEventForContact
 } from './payments/router.js';
 import { requestLogger } from './middleware/requestLogger.js';
@@ -222,8 +223,7 @@ app.get('/api/contacts/:id', async (req, res) => {
     tags: await store.listTags(),
     quickReplies: await store.listQuickReplies(),
     automationState: redactRegistrationSecrets(await store.getAutomationState(user.id)),
-    automationLogs: await store.listAutomationLogsForUser(user.id),
-    staffAiDraft: await store.getLatestStaffAiTrainingDraftForContact(user.id)
+    automationLogs: await store.listAutomationLogsForUser(user.id)
   });
 });
 
@@ -500,36 +500,6 @@ app.patch('/api/auto-registration-bot', requireAdmin, async (req, res) => {
   }
 });
 
-app.patch('/api/settings/staff-ai-apprentice-mode', requireAdmin, async (req, res) => {
-  try {
-    const enabled = req.body?.enabled === true || req.body?.enabled === 'true' || req.body?.enabled === 1;
-    const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
-    const staffAiApprenticeMode = await store.setStaffAiApprenticeModeEnabled(enabled, actorName);
-    io.emit('settings:changed');
-    io.emit('staff-ai-apprentice-mode:changed', staffAiApprenticeMode);
-    io.emit('contacts:changed');
-    res.json({ staffAiApprenticeMode });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.patch('/api/customer-support-ai-mode', async (req, res) => {
-  try {
-    const mode = String(req.body?.mode || req.body?.aiMode || '').trim().toLowerCase();
-    if (mode !== 'train' && mode !== 'auto') {
-      return res.status(400).json({ error: 'mode must be train or auto.' });
-    }
-    const actorName = req.ledgerUser?.username || req.body?.staffName || 'Staff';
-    const customerSupportAi = await store.setCustomerSupportAiMode(mode, actorName);
-    io.emit('customer-support-ai-mode:changed', customerSupportAi);
-    io.emit('contacts:changed');
-    res.json({ customerSupportAi });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
 app.get('/api/payment-sync/status', async (req, res) => {
   res.json({ sync: await store.getPaymentSyncState() });
 });
@@ -614,6 +584,7 @@ app.get('/api/payments/:id', async (req, res) => {
     registrationWindow = await store.getRegistrationPaymentWindow(payment.registration_payment_window_id);
   }
   const routingLogs = await store.listPaymentRoutingLogs(payment.id, 100);
+  const manualReviewCandidateWindows = await store.getPaymentManualReviewCandidateWindows?.(payment.id) || [];
   const unmatchedReason = routingLogs.find((log) => log?.metadata?.unmatchedReason)?.metadata?.unmatchedReason || null;
   res.json({
     payment: {
@@ -623,6 +594,7 @@ app.get('/api/payments/:id', async (req, res) => {
       window_expires_at: registrationWindow?.expires_at || null
     },
     registrationWindow,
+    manualReviewCandidateWindows,
     sync: await store.getPaymentSyncState(),
     logs: await store.listPaymentListenerLogs(50),
     routingLogs
@@ -653,6 +625,10 @@ app.post('/api/payments/:id/reprocess', async (req, res) => {
 
 app.post('/api/payments/:id/ignore', async (req, res) => {
   try {
+    await rejectAmbiguousPaymentCandidates(store, Number(req.params.id), {
+      staffName: req.body.staffName || req.ledgerUser?.username || 'Staff',
+      bot: globalThis.telegramBot || null
+    });
     const payment = await store.markPaymentIgnored(Number(req.params.id), {
       staffName: req.body.staffName || req.ledgerUser?.username || 'Staff',
       unmatchedReason: req.body.unmatchedReason || null
@@ -986,9 +962,11 @@ app.post('/api/contacts/:id/bot-control', async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Contact not found.' });
 
     let contact;
-    if (action === 'pause') {
+    if (action === 'pause' || action === 'takeover') {
       contact = await store.setBotControl(contactId, {
         botPaused: true,
+        needsStaffReview: false,
+        staffReviewReason: action === 'takeover' ? 'manual_takeover' : 'manual_pause',
         actorName: staffName
       });
     } else if (action === 'resume') {
@@ -997,16 +975,8 @@ app.post('/api/contacts/:id/bot-control', async (req, res) => {
         needsStaffReview: false,
         actorName: staffName
       });
-    } else if (action === 'takeover') {
-      contact = await store.setBotControl(contactId, {
-        botPaused: true,
-        needsStaffReview: true,
-        staffReviewReason: 'staff_takeover',
-        actorName: staffName
-      });
-      await store.cancelAutomationFlow(contactId, staffName).catch(() => null);
     } else {
-      return res.status(400).json({ error: 'Invalid action. Use pause, resume, or takeover.' });
+      return res.status(400).json({ error: 'Invalid action. Use pause, takeover, or resume.' });
     }
 
     io.emit('contacts:changed');
@@ -1234,22 +1204,34 @@ app.patch('/api/contacts/:id/tags', async (req, res) => {
   res.json({ contact });
 });
 
-app.post('/api/contacts/:id/staff-ai-draft/feedback', async (req, res) => {
+app.get('/api/settings/customer-support-prompt', requireAdmin, async (req, res) => {
   try {
-    const contactId = Number(req.params.id);
-    const contact = await store.getUserProfile(contactId);
-    if (!contact) return res.status(404).json({ error: 'Contact not found.' });
-    const draftId = Number(req.body.trainingExampleId || req.body.draftId || 0);
-    if (!draftId) return res.status(400).json({ error: 'trainingExampleId is required.' });
-    const reason = String(req.body.reason || '').trim();
-    const draft = await store.markStaffAiTrainingFeedback(draftId, {
-      contactId,
-      reason,
-      outcome: req.body.outcome || 'feedback'
-    });
-    if (!draft) return res.status(404).json({ error: 'AI draft not found.' });
-    io.emit('contact:changed', { contactId, userId: contactId });
-    res.json({ draft });
+    res.json({ customerSupportPrompt: await store.getCustomerSupportPrompt() });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.patch('/api/settings/customer-support-prompt', requireAdmin, async (req, res) => {
+  try {
+    const prompt = await store.updateCustomerSupportPrompt(
+      req.body.prompt,
+      req.ledgerUser?.username || req.body.staffName || 'Staff'
+    );
+    io.emit('settings:changed');
+    res.json({ customerSupportPrompt: prompt });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/settings/customer-support-prompt/reset', requireAdmin, async (req, res) => {
+  try {
+    const prompt = await store.resetCustomerSupportPrompt(
+      req.ledgerUser?.username || req.body.staffName || 'Staff'
+    );
+    io.emit('settings:changed');
+    res.json({ customerSupportPrompt: prompt });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -1261,34 +1243,6 @@ async function sendTelegramMessage(req, res) {
 
   const text = String(req.body.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Message text is required.' });
-
-  const replyUsed = String(req.body.replyUsed || '').trim().toLowerCase();
-  const isTrainingSend = replyUsed === 'good' || replyUsed === 'bad';
-
-  // Staff override: pause bot for this contact so automations don't collide.
-  if (!user.bot_paused) {
-    try {
-      await store.setBotControl(user.id, {
-        botPaused: true,
-        actorName: req.body.staffName || 'Staff'
-      });
-    } catch (error) {
-      console.warn('[chatbot] auto-pause on staff send failed:', error.message);
-    }
-  }
-
-  if (!isTrainingSend) {
-    try {
-      const globalAi = await store.getCustomerSupportAiSettings();
-      if (globalAi.mode === 'auto' && !user.ai_auto_paused) {
-        const aiMode = await store.pauseContactAiAuto(user.id, req.body.staffName || 'Staff');
-        console.log(`[support-ai] auto_paused_on_manual_send contact=${user.id} mode=${aiMode.mode}`);
-        io.emit('contact:ai-auto-paused:changed', { contactId: user.id, aiMode });
-      }
-    } catch (error) {
-      console.warn('[support-ai] auto-pause on manual send failed:', error.message);
-    }
-  }
 
   const clientRequestId = String(req.body.client_request_id || req.body.clientRequestId || '').trim();
   const claim = await store.claimOutgoingMessageRequest({
@@ -1338,71 +1292,6 @@ async function sendTelegramMessage(req, res) {
       response,
       messageId: storedMessageId
     });
-
-    const trainingExampleId = req.body.trainingExampleId || req.body.staffAiTrainingExampleId || null;
-    const trainingExample = await store.completeStaffAiTrainingExampleOnSend({
-      trainingExampleId,
-      contactId: user.id,
-      telegramUserId: user.telegram_id,
-      finalStaffReply: text,
-      staffUserId: req.ledgerUser?.id || null,
-      staffUsername: req.ledgerUser?.username || req.body.staffName || 'Staff',
-      replyUsed: req.body.replyUsed || null,
-      staffFeedbackReason: req.body.staffFeedbackReason || null
-    });
-    if (trainingExample) {
-      response.trainingExample = trainingExample;
-      if (replyUsed === 'good') {
-        const recommendedAction = trainingExample.recommended_action
-          || trainingExample.detected_entities?.recommended_action;
-        if (recommendedAction && recommendedAction !== 'send_support_reply') {
-          try {
-            const { executeSupportAiRecommendedAction } = await import('./telegram/supportAiActionExecutor.js');
-            const freshUser = await store.getUserProfile(user.id);
-            const actionResult = await executeSupportAiRecommendedAction({
-              store,
-              contact: freshUser,
-              job: {
-                input_text: trainingExample.customer_message || '',
-                message_id: trainingExample.incoming_message_id || null
-              },
-              decision: {
-                recommended_action: recommendedAction,
-                intent: trainingExample.detected_intent || null
-              },
-              io,
-              bot: globalThis.telegramBot || null,
-              executeActions: true,
-              staffApproved: true
-            });
-            if (trainingExample.id) {
-              await store.db.prepare(`
-                UPDATE staff_ai_training_examples
-                SET action_executed = ?,
-                    action_blocked_reason = ?
-                WHERE id = ?
-              `).run(
-                Boolean(actionResult.action_executed),
-                actionResult.action_blocked_reason || actionResult.reason || null,
-                trainingExample.id
-              );
-            }
-            response.approvedAction = {
-              recommended_action: recommendedAction,
-              executed: Boolean(actionResult.action_executed),
-              blocked_reason: actionResult.action_blocked_reason || actionResult.reason || null
-            };
-          } catch (actionError) {
-            console.error(`[support-ai] support_ai_approved_action_failed contact=${user.id} action=${recommendedAction} error=${actionError.message}`);
-            response.approvedAction = {
-              recommended_action: recommendedAction,
-              executed: false,
-              error: actionError.message
-            };
-          }
-        }
-      }
-    }
 
     io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
     io.emit('contacts:changed');

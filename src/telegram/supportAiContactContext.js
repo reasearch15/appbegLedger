@@ -50,8 +50,7 @@ export async function loadSupportAiContactContext({ store, contact }) {
   const paymentWindow = activePaymentWindow || latestPaymentWindow;
   const flow = automationState?.current_flow || null;
   const step = automationState?.current_step || null;
-  const manualStaffTakeover = Boolean(contact.bot_paused)
-    || Boolean(contact.needs_staff_review);
+  const manualStaffTakeover = Boolean(contact.bot_paused);
 
   const registrationState = await resolveSupportAiRegistrationState({
     contact,

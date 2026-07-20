@@ -4,7 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { resolveDatabaseConfig } from './config.js';
 import { createDriver } from './drivers/index.js';
 import { migratePostgres } from './migrate-postgres.js';
-import { normalizeAppBegUsername, normalizePaymentTag, parseJsonField } from '../registration/utils.js';
+import {
+  centsToDollars,
+  normalizeAppBegUsername,
+  normalizePaymentTag,
+  parseJsonField,
+  parseMoneyToCents,
+  registrationCreditCents
+} from '../registration/utils.js';
 import {
   buildDuplicateIndex,
   enrichPlayer,
@@ -33,6 +40,7 @@ import { normalizeBool, previewUrlFromFilePath, slugifyPaymentMethodKey } from '
 import { normalizeAutoRegistrationBotSettings, isMessageAfterBotResumeCheckpoint } from '../telegram/autoRegistrationBot.js';
 import { isCustomerSupportAiConfigured } from '../telegram/customerSupportAiConfig.js';
 import { buildPaymentEventIdempotencyKey, creditAppBegDepositViaApi } from '../appbeg/depositCreditClient.js';
+import { DEFAULT_CUSTOMER_SUPPORT_PROMPT } from '../telegram/supportPrompt.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -1022,13 +1030,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     sentiment = null,
     confidence = null,
     outcome = 'drafted',
-    wasRegistered = null,
+    wasRegistered = false,
     registrationStatus = null,
     registrationStep = null,
     paymentWindowStatus = null,
     appbegPlayerUid = null,
     recommendedAction = null,
-    actionExecuted = null,
+    actionExecuted = false,
     actionBlockedReason = null
   }) {
     const contact = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(contactId);
@@ -1084,13 +1092,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         confidence == null ? null : Number(confidence),
         language || contact.language_code || null,
         sentiment || null,
-        wasRegistered == null ? null : sql.boolParam(wasRegistered),
+        sql.boolParam(Boolean(wasRegistered)),
         registrationStatus || null,
         registrationStep || null,
         paymentWindowStatus || null,
         appbegPlayerUid || null,
         recommendedAction || null,
-        actionExecuted == null ? null : sql.boolParam(actionExecuted),
+        sql.boolParam(Boolean(actionExecuted)),
         actionBlockedReason || null,
         now,
         existing.id
@@ -1122,13 +1130,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       confidence == null ? null : Number(confidence),
       language || contact.language_code || null,
       sentiment || null,
-      wasRegistered == null ? null : sql.boolParam(wasRegistered),
+      sql.boolParam(Boolean(wasRegistered)),
       registrationStatus || null,
       registrationStep || null,
       paymentWindowStatus || null,
       appbegPlayerUid || null,
       recommendedAction || null,
-      actionExecuted == null ? null : sql.boolParam(actionExecuted),
+      sql.boolParam(Boolean(actionExecuted)),
       actionBlockedReason || null,
       now
     );
@@ -3128,6 +3136,109 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     }));
   }
 
+  async function holdPaymentWindowsForManualReview(paymentEventId, { windowIds = [], reason = 'ambiguous_match' } = {}) {
+    const ids = [...new Set((windowIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
+    if (!ids.length) return [];
+    const now = nowIso();
+    const held = [];
+    for (const id of ids) {
+      const result = await db.prepare(`
+        UPDATE registration_payment_windows
+        SET status = 'manual_review',
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'active'
+          AND matched_payment_event_id IS NULL
+      `).run(now, id);
+      const window = await getRegistrationPaymentWindow(id);
+      if (window) held.push(window);
+      if (result.changes) {
+        await logPaymentRouting(paymentEventId, 'payment_window_manual_review_hold', 'Payment window held for manual review.', {
+          windowId: id,
+          contactId: window?.contact_id ?? null,
+          reason
+        });
+      }
+    }
+    return held;
+  }
+
+  async function releaseUnselectedManualReviewWindows(paymentEventId, {
+    selectedWindowId,
+    candidateWindowIds = [],
+    staffName = 'Staff'
+  } = {}) {
+    const selected = Number(selectedWindowId);
+    const ids = [...new Set((candidateWindowIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0 && id !== selected))];
+    if (!ids.length) return [];
+    const now = nowIso();
+    const released = [];
+    for (const id of ids) {
+      const result = await db.prepare(`
+        UPDATE registration_payment_windows
+        SET status = 'cancelled',
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'manual_review'
+          AND matched_payment_event_id IS NULL
+      `).run(now, id);
+      const window = await getRegistrationPaymentWindow(id);
+      if (window) released.push(window);
+      if (result.changes) {
+        await logPaymentRouting(paymentEventId, 'payment_window_manual_review_released', 'Unselected payment window closed after manual review resolution.', {
+          windowId: id,
+          contactId: window?.contact_id ?? null,
+          selectedWindowId: selected,
+          staffName
+        });
+      }
+    }
+    return released;
+  }
+
+  async function getPaymentManualReviewCandidateWindows(paymentEventId) {
+    const logs = await listPaymentRoutingLogs(paymentEventId, 200);
+    const ids = [];
+    for (const log of logs) {
+      const metadata = log.metadata || {};
+      const values = metadata.windowIds || metadata.candidateWindowIds;
+      if (Array.isArray(values)) ids.push(...values);
+    }
+    const uniqueIds = [...new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
+    const candidates = [];
+    for (const id of uniqueIds) {
+      const row = await db.prepare(`
+        SELECT
+          w.*,
+          u.display_name,
+          u.username AS telegram_username,
+          u.first_name,
+          u.last_name,
+          u.registration_status,
+          u.appbeg_account_id
+        FROM registration_payment_windows w
+        INNER JOIN telegram_users u ON u.id = w.contact_id
+        WHERE w.id = ?
+      `).get(id);
+      if (!row) continue;
+      const messages = await listMessagesForUser(row.contact_id);
+      candidates.push({
+        ...hydratePaymentWindow(row),
+        display_name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown',
+        telegram_username: row.telegram_username || null,
+        registration_status: row.registration_status || null,
+        appbeg_account_id: row.appbeg_account_id || null,
+        recent_messages: messages.slice(-5).map((message) => ({
+          id: message.id,
+          direction: message.direction,
+          text: message.text || '',
+          sent_at: message.sent_at
+        }))
+      });
+    }
+    return candidates;
+  }
+
   async function resetPaymentRoutingForReprocess(paymentEventId) {
     await db.prepare(`
       UPDATE payment_events
@@ -3210,6 +3321,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     routingStatus = null,
     routingReason = null
   } = {}) {
+    const current = await getPaymentEvent(paymentEventId);
+    if (!current) throw new Error('Payment event not found.');
+    const terminalMatched = [
+      'registration_payment_matched',
+      'appbeg_owned',
+      'deposit_window_matched',
+      'registered_player_deposit'
+    ].includes(current.routing_status);
+    if (
+      terminalMatched
+      && current.registration_payment_window_id != null
+      && registrationPaymentWindowId != null
+      && Number(current.registration_payment_window_id) !== Number(registrationPaymentWindowId)
+    ) {
+      throw new Error('Payment is already consumed by another payment window.');
+    }
     const patch = {
       contact_id: contactId,
       registration_payment_window_id: registrationPaymentWindowId,
@@ -3377,7 +3504,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       throw new Error('Payment event is not linked to the requested payment window.');
     }
 
-    const authoritativeAmount = Number(window.first_deposit_amount);
+    const registrationCreditAmount = window.credited_deposit_cents != null
+      ? centsToDollars(Number(window.credited_deposit_cents))
+      : Number(window.credited_deposit_amount);
+    const authoritativeAmount = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? Number(registrationCreditAmount)
+      : Number(window.first_deposit_amount);
     const requestedAmount = amount == null ? authoritativeAmount : Number(amount);
     if (!Number.isFinite(authoritativeAmount) || authoritativeAmount <= 0) {
       throw new Error('Matched payment window amount must be positive.');
@@ -3923,9 +4055,51 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         : Boolean(row.staff_ai_apprentice_mode_enabled),
       staff_ai_apprentice_mode_updated_at: row.staff_ai_apprentice_mode_updated_at || null,
       staff_ai_apprentice_mode_updated_by: row.staff_ai_apprentice_mode_updated_by || '',
+      customer_support_prompt: row.customer_support_prompt || DEFAULT_CUSTOMER_SUPPORT_PROMPT,
+      customer_support_prompt_updated_at: row.customer_support_prompt_updated_at || null,
+      customer_support_prompt_updated_by: row.customer_support_prompt_updated_by || '',
       updated_at: row.updated_at,
       updated_by: row.updated_by || ''
     };
+  }
+
+  async function getCustomerSupportPrompt() {
+    const settings = await getCoadminSettings();
+    return {
+      prompt: settings.customer_support_prompt || DEFAULT_CUSTOMER_SUPPORT_PROMPT,
+      defaultPrompt: DEFAULT_CUSTOMER_SUPPORT_PROMPT,
+      updated_at: settings.customer_support_prompt_updated_at,
+      updated_by: settings.customer_support_prompt_updated_by
+    };
+  }
+
+  async function updateCustomerSupportPrompt(prompt, actorName = 'Staff') {
+    const value = String(prompt || '').trim();
+    if (!value) throw new Error('Customer Support Prompt cannot be empty.');
+    const current = await getCustomerSupportPrompt();
+    const updatedAt = nowIso();
+    await db.prepare(`
+      INSERT INTO coadmin_settings (id, customer_support_prompt, customer_support_prompt_updated_at, customer_support_prompt_updated_by, updated_at, updated_by)
+      VALUES (1, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        customer_support_prompt = excluded.customer_support_prompt,
+        customer_support_prompt_updated_at = excluded.customer_support_prompt_updated_at,
+        customer_support_prompt_updated_by = excluded.customer_support_prompt_updated_by,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    `).run(value, updatedAt, actorName, updatedAt, actorName);
+    await logSettingsAudit({
+      settingsKey: 'customer_support_prompt',
+      fieldName: 'prompt',
+      oldValue: current.prompt,
+      newValue: value,
+      actorName
+    });
+    return await getCustomerSupportPrompt();
+  }
+
+  async function resetCustomerSupportPrompt(actorName = 'Staff') {
+    return updateCustomerSupportPrompt(DEFAULT_CUSTOMER_SUPPORT_PROMPT, actorName);
   }
 
   async function logSettingsAudit({ settingsKey, fieldName, oldValue, newValue, actorName = 'Staff' }) {
@@ -4596,6 +4770,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     paymentQrCodeId = null,
     paymentDisplayName,
     firstDepositAmount,
+    creditedDepositAmount = null,
     flowType = 'registration',
     windowMinutes = null
   }) {
@@ -4603,15 +4778,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
       ? PAYMENT_WINDOW_FLOW.DEPOSIT
       : PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const expectedPaymentCents = parseMoneyToCents(String(firstDepositAmount));
+    const creditedDepositCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? registrationCreditCents(expectedPaymentCents)
+      : null;
+    const resolvedCreditAmount = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? (creditedDepositAmount ?? centsToDollars(creditedDepositCents))
+      : null;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
     const nowText = nowIso();
     const result = await db.prepare(`
       INSERT INTO registration_payment_windows (
         contact_id, telegram_user_id, payment_method_id, payment_qr_code_id,
-        payment_display_name, first_deposit_amount, flow_type, status, expires_at, created_at, updated_at
+        payment_display_name, first_deposit_amount, expected_payment_cents,
+        credited_deposit_amount, credited_deposit_cents,
+        flow_type, status, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       contactId,
       String(telegramUserId),
@@ -4619,6 +4803,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       paymentQrCodeId,
       paymentDisplayName || null,
       firstDepositAmount,
+      expectedPaymentCents,
+      resolvedCreditAmount,
+      creditedDepositCents,
       normalizedFlow,
       expiresAt,
       nowText,
@@ -4725,19 +4912,44 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       && Number(payment.registration_payment_window_id) !== Number(windowId)) {
       return { ok: false, reason: 'payment_already_linked_other_window', window: null };
     }
+    const receivedPaymentCents = payment?.parsed_amount == null
+      ? null
+      : parseMoneyToCents(String(payment.parsed_amount));
+    const currentWindow = await getRegistrationPaymentWindow(windowId);
+    const windowFlow = currentWindow?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const receivedPaymentAmount = receivedPaymentCents == null ? null : centsToDollars(receivedPaymentCents);
+    const creditedDepositCents = windowFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? registrationCreditCents(receivedPaymentCents)
+      : null;
+    const creditedDepositAmount = creditedDepositCents == null ? null : centsToDollars(creditedDepositCents);
 
     const result = await db.prepare(`
       UPDATE registration_payment_windows
       SET status = 'completed',
           matched_payment_event_id = ?,
+          received_payment_amount = COALESCE(received_payment_amount, ?),
+          received_payment_cents = COALESCE(received_payment_cents, ?),
+          credited_deposit_amount = COALESCE(credited_deposit_amount, ?),
+          credited_deposit_cents = COALESCE(credited_deposit_cents, ?),
           completed_at = ?,
           updated_at = ?
       WHERE id = ?
-        AND status = 'active'
-        AND expires_at > ?
+        AND status IN ('active', 'manual_review')
+        AND (status = 'manual_review' OR expires_at > ?)
         AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
         AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
-    `).run(paymentEventId, now, now, windowId, now, paymentEventId);
+    `).run(
+      paymentEventId,
+      receivedPaymentAmount,
+      receivedPaymentCents,
+      creditedDepositAmount,
+      creditedDepositCents,
+      now,
+      now,
+      windowId,
+      now,
+      paymentEventId
+    );
 
     if (!result.changes) {
       const current = await getRegistrationPaymentWindow(windowId);
@@ -5174,6 +5386,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listAccountSyncLogs,
     getContactPreferredMessageSource,
     getCoadminSettings,
+    getCustomerSupportPrompt,
     getStaffAiApprenticeSettings,
     setStaffAiApprenticeModeEnabled,
     getCustomerSupportAiSettings,
@@ -5195,6 +5408,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     isIncomingMessageEligibleForAutoBot,
     getIncomingMessageSentAt,
     updateCoadminSettings,
+    updateCustomerSupportPrompt,
+    resetCustomerSupportPrompt,
     buildCoadminSnapshot,
     assignCoadminToUser,
     applyCoadminToExistingContacts,
@@ -5223,6 +5438,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     freezeOverdueSearchingPayments,
     ensurePaymentSearchDeadline,
     listPaymentRoutingLogs,
+    holdPaymentWindowsForManualReview,
+    releaseUnselectedManualReviewWindows,
+    getPaymentManualReviewCandidateWindows,
     createDepositEvent,
     getDepositEvent,
     listDepositEvents,
@@ -5721,6 +5939,11 @@ async function migrate(db) {
       payment_qr_code_id INTEGER,
       payment_display_name TEXT,
       first_deposit_amount REAL NOT NULL,
+      expected_payment_cents INTEGER,
+      received_payment_amount REAL,
+      received_payment_cents INTEGER,
+      credited_deposit_amount REAL,
+      credited_deposit_cents INTEGER,
       status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'completed', 'expired', 'cancelled')),
       expires_at TEXT NOT NULL,
@@ -5740,6 +5963,11 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'registration_payment_windows', 'expiry_notified_at', 'TEXT');
   await addColumnIfMissing(db, 'registration_payment_windows', 'flow_type', "TEXT NOT NULL DEFAULT 'registration'");
   await addColumnIfMissing(db, 'registration_payment_windows', 'matched_payment_event_id', 'INTEGER');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'expected_payment_cents', 'INTEGER');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'received_payment_amount', 'REAL');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'received_payment_cents', 'INTEGER');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'credited_deposit_amount', 'REAL');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'credited_deposit_cents', 'INTEGER');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_flow_status ON registration_payment_windows(flow_type, status, expires_at DESC)');
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_payment_windows_matched_event ON registration_payment_windows(matched_payment_event_id) WHERE matched_payment_event_id IS NOT NULL');
 
@@ -5798,6 +6026,9 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode', "TEXT NOT NULL DEFAULT 'train'");
   await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode_updated_at', 'TEXT');
   await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_ai_mode_updated_by', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_prompt', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_prompt_updated_at', 'TEXT');
+  await addColumnIfMissing(db, 'coadmin_settings', 'customer_support_prompt_updated_by', 'TEXT');
   await db.prepare('INSERT OR IGNORE INTO coadmin_settings (id, updated_at) VALUES (1, CURRENT_TIMESTAMP)').run();
 
   await db.exec(`

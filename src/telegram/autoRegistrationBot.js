@@ -1,4 +1,4 @@
-import { isBotActiveForContact, isChatbotButtonAction } from './chatbotEngine.js';
+import { isChatbotButtonAction } from './chatbotEngine.js';
 import { parseBotCommand } from './botRegistrationState.js';
 
 export function normalizeAutoRegistrationBotSettings(row = {}) {
@@ -69,10 +69,6 @@ export async function tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
   if (!autoBot.enabled) {
     console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${contact.id}`);
     return { enqueued: false, reason: 'bot_disabled' };
-  }
-
-  if (!isBotActiveForContact(contact)) {
-    return { enqueued: false, reason: 'contact_inactive' };
   }
 
   const eligibility = await store.isIncomingMessageEligibleForAutoBot(contact.id, {
