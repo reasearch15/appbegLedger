@@ -44,15 +44,11 @@ export const PAYMENT_NAME_PROMPT = [
 ].join('\n');
 
 export const DEPOSIT_AMOUNT_PROMPT = [
-  'Enter the exact amount you will send, including cents.',
-  'The cents help us identify your payment. Don\'t worry - we will round your balance up to the next full dollar.',
+  'Enter the exact amount you will deposit.',
   '',
-  'Minimum deposit:',
-  `$${MIN_REGISTRATION_DEPOSIT}`,
+  `Minimum deposit: $${MIN_REGISTRATION_DEPOSIT}`,
   '',
-  'Examples:',
-  'Send $10.01 -> receive $11',
-  'Send $20.35 -> receive $21'
+  'Please include cents (do not use .00). Your full deposit will be credited after registration.'
 ].join('\n');
 
 export const USERNAME_PROMPT = [
@@ -553,7 +549,7 @@ export async function continueRoyalVipRegistration({
           text: [
             `Please enter a valid registration payment of at least $${MIN_REGISTRATION_DEPOSIT} with non-zero cents.`,
             '',
-            'Numbers only. Example: 10.01'
+            'Please include cents and do not use .00.'
           ].join('\n'),
           buttons: registrationNavButtons()
         }],
