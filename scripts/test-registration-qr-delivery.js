@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { decideBotReply } from '../src/telegram/chatbotEngine.js';
-import { handlePaymentRegistrationQr } from '../src/telegram/registrationQrSend.js';
+import {
+  handlePaymentRegistrationQr,
+  REGISTRATION_PAYMENT_COOLDOWN_MESSAGE
+} from '../src/telegram/registrationQrSend.js';
 import {
   paymentQrCaption,
   resolvePaymentQrTelegramInput
@@ -25,7 +28,8 @@ function createQrStore({
   qrsByMethod = {
     1: [{ id: 10, file_path: null, is_active: true, is_default: true, updated_at: '2026-01-02T00:00:00.000Z' }]
   },
-  activeWindow = null
+  activeWindow = null,
+  cooldown = null
 } = {}) {
   let window = activeWindow;
   let windowsCreated = 0;
@@ -78,6 +82,9 @@ function createQrStore({
     },
     async getActiveRegistrationPaymentWindow() {
       return window;
+    },
+    async getActiveRegistrationPaymentCooldown() {
+      return cooldown || { active: false, cooldown_until: null };
     },
     async createRegistrationPaymentWindow(payload) {
       windowsCreated += 1;
@@ -317,6 +324,46 @@ async function run() {
   assert.equal(missingStore.state.current_step, 'first_deposit_amount');
   assert.notEqual(missingStore.status, 'Waiting For Payment');
   console.log('ok payment window is not created when QR lookup fails');
+
+  // Registration cooldown blocks QR send + window creation
+  let cooldownMessage = null;
+  let cooldownPhotoSent = false;
+  const cooldownStore = createQrStore({
+    cooldown: { active: true, cooldown_until: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
+    qrsByMethod: {
+      1: [{ id: 10, file_path: filePath, is_active: true, is_default: true, updated_at: '2026-01-02' }]
+    }
+  });
+  const cooldownBot = {
+    telegram: {
+      async sendMessage(_chatId, text, options = {}) {
+        cooldownMessage = text;
+        return { message_id: 779, reply_markup: options?.reply_markup || null };
+      },
+      async sendPhoto() {
+        cooldownPhotoSent = true;
+        throw new Error('cooldown should not send QR photo');
+      }
+    }
+  };
+  const cooldownResult = await handlePaymentRegistrationQr({
+    store: cooldownStore,
+    contact: { id: 3, telegram_id: 1003, registration_status: 'Collecting Info' },
+    sendPaymentQr: {
+      paymentMethodId: 1,
+      paymentMethodName: 'Chime',
+      paymentDisplayName: 'Amy fei',
+      firstDepositAmount: 9.01,
+      creditedDepositAmount: 10
+    },
+    bot: cooldownBot
+  });
+  assert.equal(cooldownResult.ok, false);
+  assert.equal(cooldownResult.reason, 'registration_cooldown');
+  assert.equal(cooldownStore.windowsCreated, 0);
+  assert.equal(cooldownPhotoSent, false);
+  assert.equal(cooldownMessage, REGISTRATION_PAYMENT_COOLDOWN_MESSAGE);
+  console.log('ok registration cooldown sends pause message without creating a window');
 
   // 7-minute expiry still set on created window
   const expiresAt = new Date(ok.paymentWindow.expires_at).getTime();

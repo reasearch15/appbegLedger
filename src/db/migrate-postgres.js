@@ -47,14 +47,16 @@ export async function migratePostgres(driver) {
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
-      ON payment_qr_codes(payment_method_id, is_active, is_default, archived_at, updated_at DESC);
   `);
   await driver.exec(`
     ALTER TABLE payment_qr_codes
       ADD COLUMN IF NOT EXISTS archived_at TEXT;
     ALTER TABLE payment_qr_codes
       ADD COLUMN IF NOT EXISTS replaced_by_qr_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL;
+  `);
+  await driver.exec(`
+    CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
+      ON payment_qr_codes(payment_method_id, is_active, is_default, archived_at, updated_at DESC);
   `);
   await driver.exec(`
     ALTER TABLE registration_payment_windows
@@ -148,6 +150,7 @@ export async function migratePostgres(driver) {
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS bot_paused_by TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_reason TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_at TEXT;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS registration_payment_cooldown_until TEXT;
   `);
   await driver.exec(`
     CREATE TABLE IF NOT EXISTS bot_jobs (

@@ -7,6 +7,8 @@ import { PAYMENT_WINDOW_FLOW, paymentWindowMinutes } from '../payments/constants
 import { paymentQrRetryButtons, registeredMenuButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
 import { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
 
+export const REGISTRATION_PAYMENT_COOLDOWN_MESSAGE = 'You have missed the payment window multiple times. Registration has been temporarily paused for 12 hours. Please try again later.';
+
 async function recoverQrFailure({
   store,
   contact,
@@ -75,6 +77,21 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `[chatbot] registration_qr_lookup_started contact=${contactId} ` +
     `payment_method_id=${paymentMethodId || 'n/a'} amount=${amount ?? 'n/a'} flow=${flowType}`
   );
+
+  if (!isDeposit && typeof store.getActiveRegistrationPaymentCooldown === 'function') {
+    const cooldown = await store.getActiveRegistrationPaymentCooldown(contactId).catch(() => null);
+    if (cooldown?.active) {
+      console.log(`[chatbot] registration_cooldown_blocked contact=${contactId} until=${cooldown.cooldown_until || 'n/a'}`);
+      await queueBotReply({
+        store,
+        user: contact,
+        text: REGISTRATION_PAYMENT_COOLDOWN_MESSAGE,
+        buttons: [],
+        bot: bot || globalThis.telegramBot || null
+      });
+      return { ok: false, reason: 'registration_cooldown', cooldownUntil: cooldown.cooldown_until || null };
+    }
+  }
 
   const qr = typeof store.getActivePaymentQrForRegistration === 'function'
     ? await store.getActivePaymentQrForRegistration(paymentMethodId)

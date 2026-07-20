@@ -47,6 +47,10 @@ const schemaPath = path.join(__dirname, 'schema.sql');
 
 export { REGISTRATION_STATUSES, CONVERSATION_STATUSES, DEFAULT_TAGS, DEFAULT_QUICK_REPLIES, DEFAULT_AUTOMATION_RULES } from './defaults.js';
 
+const REGISTRATION_PAYMENT_COOLDOWN_MISSES = 3;
+const REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const REGISTRATION_PAYMENT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+
 function pickRowValue(row, key) {
   if (!row) return undefined;
   if (row[key] !== undefined) return row[key];
@@ -4938,6 +4942,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
       ? PAYMENT_WINDOW_FLOW.DEPOSIT
       : PAYMENT_WINDOW_FLOW.REGISTRATION;
+    if (normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION) {
+      const cooldown = await getActiveRegistrationPaymentCooldown(contactId);
+      if (cooldown?.active) {
+        const err = new Error('Registration has been temporarily paused for this contact.');
+        err.code = 'REGISTRATION_PAYMENT_COOLDOWN';
+        err.cooldownUntil = cooldown.cooldown_until;
+        throw err;
+      }
+    }
     const expectedPaymentCents = parseMoneyToCents(String(firstDepositAmount));
     const creditedDepositCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
       ? registrationCreditCents(expectedPaymentCents)
@@ -4974,6 +4987,67 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return hydratePaymentWindow(
       await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid)
     );
+  }
+
+  async function getActiveRegistrationPaymentCooldown(contactId, nowText = nowIso()) {
+    const row = await db.prepare(`
+      SELECT registration_payment_cooldown_until
+      FROM telegram_users
+      WHERE id = ?
+    `).get(contactId);
+    const cooldownUntil = row?.registration_payment_cooldown_until || null;
+    return {
+      active: Boolean(cooldownUntil && cooldownUntil > nowText),
+      cooldown_until: cooldownUntil
+    };
+  }
+
+  async function countRecentExpiredRegistrationPaymentWindows(contactId, now = new Date()) {
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const safeNow = Number.isNaN(nowDate.getTime()) ? new Date() : nowDate;
+    const since = new Date(safeNow.getTime() - REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS).toISOString();
+    const row = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM registration_payment_windows
+      WHERE contact_id = ?
+        AND status = 'expired'
+        AND COALESCE(flow_type, 'registration') = ?
+        AND expires_at >= ?
+        AND expires_at <= ?
+    `).get(contactId, PAYMENT_WINDOW_FLOW.REGISTRATION, since, safeNow.toISOString());
+    return Number(row?.count || 0);
+  }
+
+  async function refreshRegistrationPaymentCooldown(contactId, now = new Date()) {
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const safeNow = Number.isNaN(nowDate.getTime()) ? new Date() : nowDate;
+    const nowText = safeNow.toISOString();
+    const existing = await getActiveRegistrationPaymentCooldown(contactId, nowText);
+    if (existing.active) return { ...existing, missed_count: null, created: false };
+
+    const missedCount = await countRecentExpiredRegistrationPaymentWindows(contactId, safeNow);
+    if (missedCount < REGISTRATION_PAYMENT_COOLDOWN_MISSES) {
+      return {
+        active: false,
+        cooldown_until: existing.cooldown_until,
+        missed_count: missedCount,
+        created: false
+      };
+    }
+
+    const cooldownUntil = new Date(safeNow.getTime() + REGISTRATION_PAYMENT_COOLDOWN_MS).toISOString();
+    await db.prepare(`
+      UPDATE telegram_users
+      SET registration_payment_cooldown_until = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(cooldownUntil, nowText, contactId);
+    return {
+      active: true,
+      cooldown_until: cooldownUntil,
+      missed_count: missedCount,
+      created: true
+    };
   }
 
   function hydratePaymentWindow(row) {
@@ -5146,10 +5220,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           expiry_notified_at = CASE WHEN ? THEN COALESCE(expiry_notified_at, ?) ELSE expiry_notified_at END
       WHERE id = ? AND status = 'active'
     `).run(now, suppressNotification ? 1 : 0, now, windowId);
-    if (!result.changes) {
-      return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    const window = await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    const expiredByDeadline = window?.expires_at && window.expires_at <= now;
+    if (result.changes
+      && expiredByDeadline
+      && (window?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION) === PAYMENT_WINDOW_FLOW.REGISTRATION) {
+      await refreshRegistrationPaymentCooldown(window.contact_id, new Date(now));
     }
-    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    if (!result.changes) {
+      return window;
+    }
+    return window;
   }
 
   async function listRegistrationPaymentWindowsForExpiryWorker(limit = 100) {
@@ -5180,7 +5261,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         AND expires_at <= ?
     `).run(now, windowId, now);
     if (!result.changes) return null;
-    return await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    const window = await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(windowId);
+    if ((window?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION) === PAYMENT_WINDOW_FLOW.REGISTRATION) {
+      await refreshRegistrationPaymentCooldown(window.contact_id, new Date(now));
+    }
+    return window;
   }
 
   async function claimRegistrationPaymentWindowExpiryNotification(windowId) {
@@ -5646,6 +5731,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     updatePaymentQrCode,
     setDefaultPaymentQr,
     deletePaymentQrCode,
+    getActiveRegistrationPaymentCooldown,
+    countRecentExpiredRegistrationPaymentWindows,
+    refreshRegistrationPaymentCooldown,
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
     getRegistrationPaymentWindow,
@@ -5924,6 +6012,7 @@ async function migrate(db) {
     ['telegram_source_account_username', 'TEXT'],
     ['active_messaging_source', "TEXT NOT NULL DEFAULT 'bot_api'"],
     ['registration_method', 'TEXT'],
+    ['registration_payment_cooldown_until', 'TEXT'],
     ['bot_enabled', 'INTEGER NOT NULL DEFAULT 1'],
     ['bot_paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['needs_staff_review', 'INTEGER NOT NULL DEFAULT 0'],
