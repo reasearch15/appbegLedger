@@ -8,20 +8,19 @@ from pathlib import Path
 from urllib import request
 
 from telethon import TelegramClient, events
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env")
+
 SESSION_PATH = Path(os.getenv("PAYMENT_TELEGRAM_SESSION", "./data/appbeg-payment.session"))
 if not SESSION_PATH.is_absolute():
     SESSION_PATH = ROOT / SESSION_PATH
-PAYMENT_GROUP = os.getenv("PAYMENT_TELEGRAM_GROUP") or os.getenv("PAYMENT_GROUP_CHAT_ID")
 IMPORT_LIMIT = int(os.getenv("PAYMENT_TELEGRAM_IMPORT_LIMIT", "500"))
 NODE_NOTIFY_URL = os.getenv("PAYMENT_SYNC_NOTIFY_URL", "http://localhost:4300/api/internal/payment-sync/notify")
 SYNC_NOTIFY_TOKEN = os.getenv("SYNC_NOTIFY_TOKEN", "change_this_local_sync_token")
 
-from dotenv import load_dotenv
 from db import connect_db, payment_event_upsert_sql, sql_greatest, as_db_bool  # noqa: E402
-
-load_dotenv(ROOT / ".env")
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -154,6 +153,15 @@ def group_title(entity):
     return getattr(entity, "title", None) or getattr(entity, "username", None) or str(getattr(entity, "id", "unknown"))
 
 
+def normalize_group_id(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def message_payload(message, sender, group):
     payload = message.to_dict()
     payload["_sync"] = {
@@ -168,6 +176,28 @@ def message_payload(message, sender, group):
 def get_checkpoint(db):
     row = db.execute("SELECT last_synced_message_id FROM payment_sync_state WHERE id = 1").fetchone()
     return int(row["last_synced_message_id"]) if row else 0
+
+
+def get_sync_state(db):
+    return db.execute(
+        """
+        SELECT telegram_group_id, telegram_group_title, last_synced_message_id
+        FROM payment_sync_state
+        WHERE id = 1
+        """
+    ).fetchone()
+
+
+def resolve_checkpoint_for_group(db, group_id):
+    row = get_sync_state(db)
+    if not row:
+        return 0, None, False
+    checkpoint = int(row["last_synced_message_id"] or 0)
+    previous_group_id = normalize_group_id(row["telegram_group_id"])
+    current_group_id = normalize_group_id(group_id)
+    if previous_group_id is not None and current_group_id is not None and previous_group_id != current_group_id:
+        return 0, row, True
+    return checkpoint, row, False
 
 
 def set_checkpoint(db, message_id):
@@ -227,8 +257,9 @@ def store_payment_message(db, message, sender, group, edited=False):
     return not existing
 
 
-async def sync_history(client, db, group):
-    checkpoint = get_checkpoint(db)
+async def sync_history(client, db, group, checkpoint=None):
+    if checkpoint is None:
+        checkpoint = get_checkpoint(db)
     imported = 0
     update_sync_state(
         db,
@@ -238,7 +269,16 @@ async def sync_history(client, db, group):
         telegram_group_id=getattr(group, "id", None),
         telegram_group_title=group_title(group),
     )
-    log_listener(db, "sync_started", "Payment synchronization started.", metadata={"checkpoint": checkpoint})
+    log_listener(
+        db,
+        "sync_started",
+        "Payment synchronization started.",
+        metadata={
+            "checkpoint": checkpoint,
+            "telegramGroupId": getattr(group, "id", None),
+            "telegramGroupTitle": group_title(group),
+        },
+    )
     messages = []
     async for message in client.iter_messages(group, min_id=checkpoint, limit=IMPORT_LIMIT, reverse=True):
         messages.append(message)
@@ -294,14 +334,31 @@ async def sync_forever():
 
         me = await client.get_me()
         group = await client.get_entity(group_ref())
+        group_id = int(getattr(group, "id"))
+        checkpoint, previous_state, group_changed = resolve_checkpoint_for_group(db, group_id)
+        if group_changed:
+            log_listener(
+                db,
+                "payment_group_peer_changed",
+                "Configured payment group resolved to a different Telegram peer; resetting history checkpoint for the new peer.",
+                level="warning",
+                metadata={
+                    "previousGroupId": previous_state["telegram_group_id"],
+                    "previousGroupTitle": previous_state["telegram_group_title"],
+                    "previousCheckpoint": previous_state["last_synced_message_id"],
+                    "currentGroupId": group_id,
+                    "currentGroupTitle": group_title(group),
+                },
+            )
         update_sync_state(
             db,
             status="connected",
             last_connected_at=now_iso(),
             account_user_id=me.id,
             account_username=me.username,
-            telegram_group_id=getattr(group, "id", None),
+            telegram_group_id=group_id,
             telegram_group_title=group_title(group),
+            last_synced_message_id=checkpoint,
             last_error=None,
         )
         log_listener(db, "payment_group_connected", "Payment group listener connected.", metadata={"accountUserId": me.id, "group": group_title(group)})
@@ -338,7 +395,7 @@ async def sync_forever():
                 log_listener(db, "error", str(exc), level="error")
                 notify_node("error", {"error": str(exc)})
 
-        await sync_history(client, db, group)
+        await sync_history(client, db, group, checkpoint=checkpoint)
 
         print("Payment Telegram sync connected and listening.")
         await client.run_until_disconnected()
