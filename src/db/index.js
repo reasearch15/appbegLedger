@@ -81,6 +81,23 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   const nowIso = () => new Date().toISOString();
 
+  function normalizeOptionalTimestamp(value) {
+    if (value === undefined) return undefined;
+    if (value == null) return null;
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value.toISOString();
+    }
+    const raw = String(value).trim();
+    return raw ? value : null;
+  }
+
+  const freezeAtMissingPredicate = sql.isPostgres
+    ? "NULLIF(freeze_at::text, '') IS NULL"
+    : "(freeze_at IS NULL OR freeze_at = '')";
+  const freezeAtPresentPredicate = sql.isPostgres
+    ? "NULLIF(freeze_at::text, '') IS NOT NULL"
+    : "freeze_at IS NOT NULL AND freeze_at != ''";
+
   function calculateEditDistancePercent(original = '', final = '') {
     const a = String(original || '').trim();
     const b = String(final || '').trim();
@@ -2975,12 +2992,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         : patch.registration_payment_window_id,
       teleledger_payment_id: patch.teleledger_payment_id ?? current.teleledger_payment_id,
       teleledger_sync_status: patch.teleledger_sync_status ?? current.teleledger_sync_status,
-      routed_at: patch.routed_at === undefined ? current.routed_at : patch.routed_at,
+      routed_at: patch.routed_at === undefined ? current.routed_at : normalizeOptionalTimestamp(patch.routed_at),
       handled_by: patch.handled_by === undefined ? current.handled_by : patch.handled_by,
-      freeze_at: patch.freeze_at === undefined ? current.freeze_at : patch.freeze_at,
+      freeze_at: patch.freeze_at === undefined ? current.freeze_at : normalizeOptionalTimestamp(patch.freeze_at),
       unmatched_reason: patch.unmatched_reason === undefined ? current.unmatched_reason : patch.unmatched_reason,
-      frozen_at: patch.frozen_at === undefined ? current.frozen_at : patch.frozen_at,
-      matched_at: patch.matched_at === undefined ? current.matched_at : patch.matched_at
+      frozen_at: patch.frozen_at === undefined ? current.frozen_at : normalizeOptionalTimestamp(patch.frozen_at),
+      matched_at: patch.matched_at === undefined ? current.matched_at : normalizeOptionalTimestamp(patch.matched_at)
     };
     let processingStatus = current.processing_status;
     if (patch.processing_status) processingStatus = patch.processing_status;
@@ -3051,7 +3068,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT id, message_date, created_at
       FROM payment_events
       WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
-        AND (freeze_at IS NULL OR freeze_at = '')
+        AND ${freezeAtMissingPredicate}
     `).all();
     let backfilled = 0;
     for (const row of rows) {
@@ -3060,7 +3077,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         UPDATE payment_events
         SET freeze_at = ?, updated_at = ?
         WHERE id = ?
-          AND (freeze_at IS NULL OR freeze_at = '')
+          AND ${freezeAtMissingPredicate}
           AND routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
       `).run(freezeAt, nowIso(), row.id);
       if (result.changes) backfilled += 1;
@@ -3079,8 +3096,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT id, freeze_at, unmatched_reason, routing_status, registration_payment_window_id
       FROM payment_events
       WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
-        AND freeze_at IS NOT NULL
-        AND freeze_at != ''
+        AND ${freezeAtPresentPredicate}
         AND freeze_at <= ?
         AND registration_payment_window_id IS NULL
     `).all(nowIsoStr);
@@ -5539,8 +5555,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         UPDATE payment_events
         SET routing_status = 'searching', updated_at = ?
         WHERE routing_status IN ('unrouted', 'waiting', 'parsed')
-          AND freeze_at IS NOT NULL
-          AND freeze_at != ''
+          AND ${freezeAtPresentPredicate}
           AND freeze_at > ?
           AND registration_payment_window_id IS NULL
           AND routed_at IS NULL

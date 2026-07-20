@@ -100,6 +100,30 @@ async function run() {
     console.log('✓ old searching payment with null freeze_at is backfilled and frozen');
   }
 
+  // Empty-string freeze_at is treated as missing and healed to a real timestamp
+  {
+    const received = new Date('2026-07-08T11:00:00.000Z').toISOString();
+    await insertPayment(store, { id: 44, routingStatus: 'searching', messageDate: received, freezeAt: '' });
+    const result = await store.freezeOverdueSearchingPayments({ now });
+    const payment = await store.getPaymentEvent(44);
+    assert.equal(payment.freeze_at, computePaymentFreezeAt(received));
+    assert.equal(payment.routing_status, ROUTING_STATUS.FROZEN);
+    assert.ok(result.backfilled >= 1);
+    console.log('ok empty freeze_at is stored/healed as a missing timestamp');
+  }
+
+  // Routing updates normalize empty timestamp strings to NULL
+  {
+    await insertPayment(store, { id: 45, routingStatus: 'searching', freezeAt: computePaymentFreezeAt(now) });
+    await store.updatePaymentRouting(45, { freeze_at: '', frozen_at: '', matched_at: '', routed_at: '' });
+    const payment = await store.getPaymentEvent(45);
+    assert.equal(payment.freeze_at, null);
+    assert.equal(payment.frozen_at, null);
+    assert.equal(payment.matched_at, null);
+    assert.equal(payment.routed_at, null);
+    console.log('ok empty routing timestamp updates are normalized to NULL');
+  }
+
   // Matched never freezes
   {
     const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
@@ -175,7 +199,7 @@ async function run() {
 
   // API list includes freeze_at for searching
   {
-    const received = new Date(now.getTime() - 60 * 1000).toISOString();
+    const received = new Date(Date.now() - 60 * 1000).toISOString();
     const freezeAt = computePaymentFreezeAt(received);
     await insertPayment(store, { id: 9, routingStatus: 'searching', messageDate: received, freezeAt });
     const payments = await store.listPaymentEvents({ matchingStatus: 'searching', limit: 50 });
