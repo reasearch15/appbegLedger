@@ -135,12 +135,107 @@ try {
         updated_at = ?
     WHERE id = ?
   `).run(new Date().toISOString(), new Date().toISOString(), historicalWindow.id);
-  const blockedResponse = await fetch(`${baseUrl}/api/payment-qrs/${historical.id}`, { method: 'DELETE' });
-  const blockedPayload = await blockedResponse.json();
-  assert.equal(blockedResponse.status, 409);
-  assert.equal(blockedPayload.code, 'QR_IN_USE');
-  assert.match(blockedPayload.error, /referenced by existing records/);
+  const archivedResponse = await fetch(`${baseUrl}/api/payment-qrs/${historical.id}`, { method: 'DELETE' });
+  const archivedPayload = await archivedResponse.json();
+  assert.equal(archivedResponse.status, 200);
+  assert.equal(archivedPayload.action, 'archived');
+  assert.ok((await store.getPaymentQrCode(historical.id)).archived_at);
+  assert.equal(
+    Number((await store.getRegistrationPaymentWindow(historicalWindow.id)).payment_qr_code_id),
+    Number(historical.id)
+  );
   assert.equal(sentPhotos.length, 1);
+
+  const mixed = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: 'https://cdn.example.com/mixed.png',
+    label: 'Mixed',
+    isActive: true,
+    isDefault: false
+  });
+  const mixedActiveWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: mixed.id,
+    paymentDisplayName: 'QR Endpoint',
+    firstDepositAmount: 13.01,
+    creditedDepositAmount: 14,
+    flowType: 'deposit',
+    windowMinutes: 7
+  });
+  const mixedHistoricalWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: mixed.id,
+    paymentDisplayName: 'QR Endpoint',
+    firstDepositAmount: 14.01,
+    creditedDepositAmount: 15,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  await store.db.prepare(`
+    UPDATE registration_payment_windows
+    SET status = 'completed',
+        matched_payment_event_id = 654,
+        completed_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), new Date().toISOString(), mixedHistoricalWindow.id);
+  const mixedResponse = await fetch(`${baseUrl}/api/payment-qrs/${mixed.id}`, { method: 'DELETE' });
+  const mixedPayload = await mixedResponse.json();
+  assert.equal(mixedResponse.status, 200);
+  assert.equal(mixedPayload.action, 'replaced_archived');
+  assert.equal(sentPhotos.length, 2);
+  assert.equal(
+    Number((await store.getRegistrationPaymentWindow(mixedActiveWindow.id)).payment_qr_code_id),
+    Number(replacementDefault.id)
+  );
+  assert.equal(
+    Number((await store.getRegistrationPaymentWindow(mixedHistoricalWindow.id)).payment_qr_code_id),
+    Number(mixed.id)
+  );
+  assert.ok((await store.getPaymentQrCode(mixed.id)).archived_at);
+  const retryResponse = await fetch(`${baseUrl}/api/payment-qrs/${mixed.id}`, { method: 'DELETE' });
+  const retryPayload = await retryResponse.json();
+  assert.equal(retryResponse.status, 200);
+  assert.equal(retryPayload.action, 'archived');
+  assert.equal(sentPhotos.length, 2);
+
+  const noReplacementMethod = await store.createPaymentMethod({ name: 'No Replacement Endpoint', key: `noreplendpoint${Date.now()}` });
+  const lonelyDefault = await store.createPaymentQrCode({
+    paymentMethodId: noReplacementMethod.id,
+    filePath: 'https://cdn.example.com/lonely-default.png',
+    label: 'Lonely Default',
+    isActive: true,
+    isDefault: true
+  });
+  const lonelyOld = await store.createPaymentQrCode({
+    paymentMethodId: noReplacementMethod.id,
+    filePath: 'https://cdn.example.com/lonely-old.png',
+    label: 'Lonely Old',
+    isActive: true,
+    isDefault: false
+  });
+  await store.updatePaymentQrCode(lonelyDefault.id, { is_active: false, force: true });
+  await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: noReplacementMethod.id,
+    paymentQrCodeId: lonelyOld.id,
+    paymentDisplayName: 'QR Endpoint',
+    firstDepositAmount: 15.01,
+    creditedDepositAmount: 16,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  const missingReplacementResponse = await fetch(`${baseUrl}/api/payment-qrs/${lonelyOld.id}`, { method: 'DELETE' });
+  const missingReplacementPayload = await missingReplacementResponse.json();
+  assert.equal(missingReplacementResponse.status, 409);
+  assert.equal(missingReplacementPayload.code, 'QR_REPLACEMENT_REQUIRED');
+  assert.equal(missingReplacementPayload.error, 'Set another active QR as default before replacing this QR.');
+  assert.equal(sentPhotos.length, 2);
 
   console.log('ok payment QR delete endpoint');
 } finally {

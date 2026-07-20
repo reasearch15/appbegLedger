@@ -4389,6 +4389,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       label: row.label || '',
       is_active: normalizeBool(row.is_active),
       is_default: normalizeBool(row.is_default),
+      archived_at: row.archived_at || null,
+      replaced_by_qr_id: row.replaced_by_qr_id || null,
+      is_archived: Boolean(row.archived_at),
       created_at: row.created_at,
       updated_at: row.updated_at,
       preview_url: previewUrlFromFilePath(row.file_path),
@@ -4404,6 +4407,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           SELECT COUNT(*)
           FROM payment_qr_codes q
           WHERE q.payment_method_id = m.id
+            AND q.archived_at IS NULL
         ) AS qr_count,
         (
           SELECT q.label
@@ -4411,6 +4415,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE q.payment_method_id = m.id
             AND q.is_active = ${sql.boolTrue}
             AND q.is_default = ${sql.boolTrue}
+            AND q.archived_at IS NULL
           ORDER BY q.updated_at DESC, q.id DESC
           LIMIT 1
         ) AS default_qr_label,
@@ -4420,6 +4425,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE q.payment_method_id = m.id
             AND q.is_active = ${sql.boolTrue}
             AND q.is_default = ${sql.boolTrue}
+            AND q.archived_at IS NULL
         ) AS has_active_default
       FROM payment_methods m
       ORDER BY m.display_order ASC, m.id ASC
@@ -4449,6 +4455,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           SELECT COUNT(*)
           FROM payment_qr_codes q
           WHERE q.payment_method_id = m.id
+            AND q.archived_at IS NULL
         ) AS qr_count,
         (
           SELECT q.label
@@ -4456,6 +4463,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE q.payment_method_id = m.id
             AND q.is_active = ${sql.boolTrue}
             AND q.is_default = ${sql.boolTrue}
+            AND q.archived_at IS NULL
           ORDER BY q.updated_at DESC, q.id DESC
           LIMIT 1
         ) AS default_qr_label,
@@ -4465,6 +4473,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE q.payment_method_id = m.id
             AND q.is_active = ${sql.boolTrue}
             AND q.is_default = ${sql.boolTrue}
+            AND q.archived_at IS NULL
         ) AS has_active_default
       FROM payment_methods m
       WHERE m.id = ?
@@ -4555,6 +4564,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         ) AS usage_count
       FROM payment_qr_codes q
       WHERE q.payment_method_id = ?
+        AND q.archived_at IS NULL
       ORDER BY q.is_default DESC, q.is_active DESC, q.created_at DESC, q.id DESC
     `).all(paymentMethodId);
     return rows.map(hydratePaymentQrRow);
@@ -4586,6 +4596,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE q.payment_method_id = ?
         AND q.is_active = ${sql.boolTrue}
         AND q.is_default = ${sql.boolTrue}
+        AND q.archived_at IS NULL
       ORDER BY q.updated_at DESC, q.id DESC
       LIMIT 1
     `).get(paymentMethodId);
@@ -4602,6 +4613,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM payment_qr_codes q
       WHERE q.payment_method_id = ?
         AND q.is_active = ${sql.boolTrue}
+        AND q.archived_at IS NULL
       ORDER BY q.updated_at DESC, q.id DESC
       LIMIT 1
     `).get(paymentMethodId);
@@ -4727,13 +4739,19 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     await db.prepare(`
       UPDATE payment_qr_codes
       SET is_default = ${sql.boolFalse}, updated_at = ?
-      WHERE payment_method_id = ? AND id != ?
+        WHERE payment_method_id = ? AND id != ?
+          AND archived_at IS NULL
     `).run(now, paymentMethodId, keepId);
   }
 
   async function updatePaymentQrCode(id, patch = {}) {
     const current = await getPaymentQrCode(id);
     if (!current) return null;
+    if (current.is_archived) {
+      const err = new Error('Archived QR codes cannot be changed.');
+      err.code = 'ARCHIVED_QR';
+      throw err;
+    }
 
     const nextLabel = patch.label !== undefined ? patch.label : current.label;
     let nextActive = patch.is_active !== undefined ? Boolean(patch.is_active) : current.is_active;
@@ -4750,6 +4768,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           AND id != ?
           AND is_active = ${sql.boolTrue}
           AND is_default = ${sql.boolTrue}
+          AND archived_at IS NULL
         LIMIT 1
       `).get(current.payment_method_id, id);
       if (!otherDefault) {
@@ -4784,6 +4803,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function setDefaultPaymentQr(id) {
     const current = await getPaymentQrCode(id);
     if (!current) return null;
+    if (current.is_archived) {
+      const err = new Error('Archived QR codes cannot be set as default.');
+      err.code = 'ARCHIVED_QR';
+      throw err;
+    }
     if (!current.is_active) {
       const err = new Error('Only an active QR can be set as default.');
       err.code = 'INACTIVE_QR';
@@ -4802,6 +4826,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function deletePaymentQrCode(id) {
     const current = await getPaymentQrCode(id);
     if (!current) return null;
+    if (current.is_archived) {
+      return {
+        action: 'archived',
+        qr: current,
+        affectedWindows: [],
+        remainingUsageCount: await countPaymentQrUsage(id)
+      };
+    }
 
     if (current.is_default) {
       const err = new Error('Set another QR as default before deleting the current default.');
@@ -4812,47 +4844,77 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const usageCount = await countPaymentQrUsage(id);
     if (usageCount > 0) {
       const activeReferences = await listActivePaymentQrReferences(id);
-      const replacementQr = await getActiveDefaultPaymentQr(current.payment_method_id);
-      const canReplaceActiveReferences = activeReferences.length > 0
-        && replacementQr
-        && Number(replacementQr.id) !== Number(id);
-
-      if (!canReplaceActiveReferences) {
-        const err = new Error('This QR cannot be deleted because it is referenced by existing records. Deactivate it instead.');
-        err.code = 'QR_IN_USE';
-        throw err;
-      }
-
       const now = nowIso();
-      await db.prepare(`
-        UPDATE registration_payment_windows
-        SET payment_qr_code_id = ?,
-            updated_at = ?
-        WHERE payment_qr_code_id = ?
-          AND status IN ('active', 'manual_review')
-          AND matched_payment_event_id IS NULL
-      `).run(replacementQr.id, now, id);
 
-      const remainingUsageCount = await countPaymentQrUsage(id);
-      if (remainingUsageCount === 0) {
-        const filePath = await getPaymentQrCodeFilePath(id);
-        await db.prepare('DELETE FROM payment_qr_codes WHERE id = ?').run(id);
+      if (!activeReferences.length) {
+        await db.prepare(`
+          UPDATE payment_qr_codes
+          SET is_active = ${sql.boolFalse},
+              is_default = ${sql.boolFalse},
+              archived_at = ?,
+              updated_at = ?
+          WHERE id = ?
+        `).run(now, now, id);
+        const archivedQr = await getPaymentQrCode(id);
         return {
-          action: 'replaced_deleted',
-          qr: current,
-          replacementQr,
-          affectedWindows: activeReferences,
-          file_path: filePath || null
+          action: 'archived',
+          qr: archivedQr,
+          affectedWindows: [],
+          remainingUsageCount: usageCount
         };
       }
 
-      const oldQr = await updatePaymentQrCode(id, { is_active: false, is_default: false, force: true });
+      const replacementQr = await getActiveDefaultPaymentQr(current.payment_method_id);
+      if (!replacementQr || Number(replacementQr.id) === Number(id)) {
+        const err = new Error('Set another active QR as default before replacing this QR.');
+        err.code = 'QR_REPLACEMENT_REQUIRED';
+        throw err;
+      }
+
+      let remainingUsageCount = usageCount;
+      let action = 'replaced_archived';
+      const filePath = current.file_path || await getPaymentQrCodeFilePath(id);
+
+      await db.exec('BEGIN');
+      try {
+        await db.prepare(`
+          UPDATE registration_payment_windows
+          SET payment_qr_code_id = ?,
+              updated_at = ?
+          WHERE payment_qr_code_id = ?
+            AND status IN ('active', 'manual_review')
+            AND matched_payment_event_id IS NULL
+        `).run(replacementQr.id, now, id);
+
+        remainingUsageCount = await countPaymentQrUsage(id);
+        if (remainingUsageCount === 0) {
+          await db.prepare('DELETE FROM payment_qr_codes WHERE id = ?').run(id);
+          action = 'replaced_deleted';
+        } else {
+          await db.prepare(`
+            UPDATE payment_qr_codes
+            SET is_active = ${sql.boolFalse},
+                is_default = ${sql.boolFalse},
+                archived_at = ?,
+                replaced_by_qr_id = ?,
+                updated_at = ?
+            WHERE id = ?
+          `).run(now, replacementQr.id, now, id);
+        }
+        await db.exec('COMMIT');
+      } catch (error) {
+        await db.exec('ROLLBACK');
+        throw error;
+      }
+
+      const oldQr = action === 'replaced_deleted' ? current : await getPaymentQrCode(id);
       return {
-        action: 'replaced_deactivated',
+        action,
         qr: oldQr,
         replacementQr,
         affectedWindows: activeReferences,
-        remainingUsageCount
+        remainingUsageCount,
+        file_path: action === 'replaced_deleted' ? filePath || null : null
       };
     }
 
@@ -6025,11 +6087,16 @@ async function migrate(db) {
       file_path TEXT NOT NULL,
       is_default INTEGER NOT NULL DEFAULT 0,
       is_active INTEGER NOT NULL DEFAULT 1,
+      archived_at TEXT,
+      replaced_by_qr_id INTEGER,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
+      FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE,
+      FOREIGN KEY (replaced_by_qr_id) REFERENCES payment_qr_codes(id) ON DELETE SET NULL
     )
   `);
+  await addColumnIfMissing(db, 'payment_qr_codes', 'archived_at', 'TEXT');
+  await addColumnIfMissing(db, 'payment_qr_codes', 'replaced_by_qr_id', 'INTEGER');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS registration_payment_windows (
@@ -6073,7 +6140,7 @@ async function migrate(db) {
   await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_payment_windows_matched_event ON registration_payment_windows(matched_payment_event_id) WHERE matched_payment_event_id IS NOT NULL');
 
   await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order ON payment_methods(is_active, display_order ASC, id ASC)');
-  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default ON payment_qr_codes(payment_method_id, is_active, is_default, archived_at, updated_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status ON registration_payment_windows(contact_id, status, expires_at DESC)');
 
   await migrateLegacyChimeQrData(db);

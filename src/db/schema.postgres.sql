@@ -483,6 +483,8 @@ CREATE TABLE IF NOT EXISTS payment_qr_codes (
   file_path TEXT NOT NULL,
   is_default BOOLEAN NOT NULL DEFAULT FALSE,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  archived_at TEXT,
+  replaced_by_qr_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
   updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );

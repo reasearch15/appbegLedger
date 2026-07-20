@@ -71,7 +71,7 @@ function removeStoredFile(rootDir, filePath) {
 
 function handleRouteError(res, error, fallback = 'Request failed.') {
   const code = error.code || null;
-  const status = ['LAST_ACTIVE_DEFAULT', 'INACTIVE_QR', 'DEFAULT_QR_REQUIRED', 'METHOD_IN_USE', 'QR_IN_USE', 'DUPLICATE_KEY'].includes(code)
+  const status = ['LAST_ACTIVE_DEFAULT', 'INACTIVE_QR', 'ARCHIVED_QR', 'DEFAULT_QR_REQUIRED', 'QR_REPLACEMENT_REQUIRED', 'METHOD_IN_USE', 'QR_IN_USE', 'DUPLICATE_KEY'].includes(code)
     ? 409
     : 400;
   res.status(status).json({ error: error.message || fallback, code });
@@ -83,7 +83,7 @@ function parseId(value) {
 }
 
 async function notifyQrReplacementUsers({ store, result }) {
-  if (!['replaced_deleted', 'replaced_deactivated'].includes(result?.action)) return;
+  if (!['replaced_deleted', 'replaced_archived'].includes(result?.action)) return;
   const replacementQr = result.replacementQr;
   const affectedWindows = result.affectedWindows || [];
   if (!replacementQr?.file_path || !affectedWindows.length) return;

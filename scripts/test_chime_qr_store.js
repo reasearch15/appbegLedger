@@ -117,10 +117,91 @@ async function run() {
         updated_at = ?
     WHERE id = ?
   `).run(new Date().toISOString(), new Date().toISOString(), historicalWindow.id);
+  const archivedHistorical = await store.deletePaymentQrCode(historical.id);
+  assert.equal(archivedHistorical.action, 'archived');
+  const hiddenHistoricalList = await store.listPaymentQrCodes(method.id);
+  assert.equal(hiddenHistoricalList.some((qr) => Number(qr.id) === Number(historical.id)), false);
+  const historicalAfterArchive = await store.getPaymentQrCode(historical.id);
+  assert.ok(historicalAfterArchive.archived_at);
+  const historicalWindowAfterArchive = await store.getRegistrationPaymentWindow(historicalWindow.id);
+  assert.equal(Number(historicalWindowAfterArchive.payment_qr_code_id), Number(historical.id));
+
+  const mixed = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: relativePath,
+    label: 'Mixed QR',
+    isActive: true,
+    isDefault: false
+  });
+  const mixedActiveWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: mixed.id,
+    paymentDisplayName: 'QR User',
+    firstDepositAmount: 13.01,
+    creditedDepositAmount: 14,
+    flowType: 'deposit',
+    windowMinutes: 7
+  });
+  const mixedHistoricalWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: mixed.id,
+    paymentDisplayName: 'QR User',
+    firstDepositAmount: 14.01,
+    creditedDepositAmount: 15,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  await store.db.prepare(`
+    UPDATE registration_payment_windows
+    SET status = 'completed',
+        matched_payment_event_id = 456,
+        completed_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), new Date().toISOString(), mixedHistoricalWindow.id);
+  const replacedArchived = await store.deletePaymentQrCode(mixed.id);
+  assert.equal(replacedArchived.action, 'replaced_archived');
+  const mixedActiveAfter = await store.getRegistrationPaymentWindow(mixedActiveWindow.id);
+  const mixedHistoricalAfter = await store.getRegistrationPaymentWindow(mixedHistoricalWindow.id);
+  assert.equal(Number(mixedActiveAfter.payment_qr_code_id), Number(second.id));
+  assert.equal(Number(mixedHistoricalAfter.payment_qr_code_id), Number(mixed.id));
+  assert.ok((await store.getPaymentQrCode(mixed.id)).archived_at);
+
+  const noReplacementMethod = await store.createPaymentMethod({ name: 'No Replacement', key: `norepl${Date.now()}` });
+  const lonelyDefault = await store.createPaymentQrCode({
+    paymentMethodId: noReplacementMethod.id,
+    filePath: relativePath,
+    label: 'Only Default',
+    isActive: true,
+    isDefault: true
+  });
+  const lonelyOld = await store.createPaymentQrCode({
+    paymentMethodId: noReplacementMethod.id,
+    filePath: relativePath,
+    label: 'No Replacement QR',
+    isActive: true,
+    isDefault: false
+  });
+  await store.updatePaymentQrCode(lonelyDefault.id, { is_active: false, force: true });
+  await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: noReplacementMethod.id,
+    paymentQrCodeId: lonelyOld.id,
+    paymentDisplayName: 'QR User',
+    firstDepositAmount: 15.01,
+    creditedDepositAmount: 16,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
   await assert.rejects(
-    store.deletePaymentQrCode(historical.id),
-    (error) => error.code === 'QR_IN_USE'
-      && /referenced by existing records/.test(error.message)
+    store.deletePaymentQrCode(lonelyOld.id),
+    (error) => error.code === 'QR_REPLACEMENT_REQUIRED'
+      && /Set another active QR as default before replacing this QR/.test(error.message)
   );
 
   await store.db?.close?.();

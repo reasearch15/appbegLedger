@@ -306,8 +306,10 @@ export function createPaymentInfoController({ api, getState, setState, render, f
         setState({
           paymentInfoSuccess: result.action === 'replaced_deleted'
             ? 'Active payment flows were moved to the current default QR. Old QR deleted.'
-            : result.action === 'replaced_deactivated'
-              ? 'Active payment flows were moved to the current default QR. Old QR kept inactive for historical records.'
+            : result.action === 'replaced_archived'
+              ? 'Active payment flows were moved to the current default QR. Old QR archived for historical records.'
+              : result.action === 'archived'
+                ? 'QR archived for historical records.'
               : 'QR deleted.'
         });
       }

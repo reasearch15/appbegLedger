@@ -498,9 +498,12 @@ CREATE TABLE IF NOT EXISTS payment_qr_codes (
   file_path TEXT NOT NULL,
   is_default INTEGER NOT NULL DEFAULT 0,
   is_active INTEGER NOT NULL DEFAULT 1,
+  archived_at TEXT,
+  replaced_by_qr_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE
+  FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id) ON DELETE CASCADE,
+  FOREIGN KEY (replaced_by_qr_id) REFERENCES payment_qr_codes(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS registration_payment_windows (
@@ -619,7 +622,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_methods_active_order
   ON payment_methods(is_active, display_order ASC, id ASC);
 
 CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
-  ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC);
+  ON payment_qr_codes(payment_method_id, is_active, is_default, archived_at, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_registration_payment_windows_contact_status
   ON registration_payment_windows(contact_id, status, expires_at DESC);

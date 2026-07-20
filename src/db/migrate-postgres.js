@@ -42,11 +42,19 @@ export async function migratePostgres(driver) {
       file_path TEXT NOT NULL,
       is_default BOOLEAN NOT NULL DEFAULT FALSE,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      archived_at TEXT,
+      replaced_by_qr_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_payment_qr_codes_method_default
-      ON payment_qr_codes(payment_method_id, is_active, is_default, updated_at DESC);
+      ON payment_qr_codes(payment_method_id, is_active, is_default, archived_at, updated_at DESC);
+  `);
+  await driver.exec(`
+    ALTER TABLE payment_qr_codes
+      ADD COLUMN IF NOT EXISTS archived_at TEXT;
+    ALTER TABLE payment_qr_codes
+      ADD COLUMN IF NOT EXISTS replaced_by_qr_id BIGINT REFERENCES payment_qr_codes(id) ON DELETE SET NULL;
   `);
   await driver.exec(`
     ALTER TABLE registration_payment_windows
