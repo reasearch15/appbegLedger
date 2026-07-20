@@ -236,7 +236,11 @@ export function redactRegistrationInfoForApi(info = {}) {
 
 export function guestMenuButtons() {
   return [
-    [{ label: '👑 Register', action: 'menu:register', text: 'Register', data: 'menu:register' }]
+    [{ label: '👑 Register', action: 'menu:register', text: 'Register', data: 'menu:register' }],
+    [
+      { label: 'Help', action: 'menu:how_it_works', text: 'Help', data: 'menu:how_it_works' },
+      { label: 'Contact', action: 'menu:support', text: 'Contact', data: 'menu:support' }
+    ]
   ];
 }
 

@@ -1,4 +1,5 @@
 import { isBotActiveForContact, isChatbotButtonAction } from './chatbotEngine.js';
+import { parseBotCommand } from './botRegistrationState.js';
 
 export function normalizeAutoRegistrationBotSettings(row = {}) {
   const enabledRaw = row.auto_registration_bot_enabled;
@@ -32,6 +33,10 @@ export function canAutoRegistrationBotReply({ settings, messageSentAt }) {
 }
 
 function isSupportInboundEnqueue(enqueueParams = {}) {
+  const command = parseBotCommand(enqueueParams.inputText || '');
+  if (command && ['start', 'register', 'status', 'support', 'cancel', 'deposit'].includes(command.command)) {
+    return false;
+  }
   return enqueueParams.jobType === 'inbound_message'
     && !enqueueParams.action
     && Boolean(String(enqueueParams.inputText || '').trim());

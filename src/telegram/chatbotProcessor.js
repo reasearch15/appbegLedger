@@ -60,7 +60,7 @@ function canEnqueueBotJob(contact, { jobType = 'inbound_message', action = null 
   return { ok: true, reason: 'active' };
 }
 
-async function processSupportAiJob({ store, contact, job, io, bot }) {
+async function processSupportAiJob({ store, contact, job, io, bot, supportAiGenerator = generateCustomerSupportReply }) {
   console.log(`[support-ai] support_ai_inbound_received contact=${contact.id} job=${job.id} message_id=${job.message_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'}`);
 
   if (!isSupportInboundJob(job)) {
@@ -121,7 +121,7 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
   let supportDraft;
   let savedDraft;
   try {
-    supportDraft = await generateCustomerSupportReply({
+    supportDraft = await supportAiGenerator({
       store,
       contact,
       messageText: job.input_text || ''
@@ -201,7 +201,7 @@ async function processSupportAiJob({ store, contact, job, io, bot }) {
       emitSupportAiDraftCleared(io, contact);
     }
     await store.completeBotJob(job.id, {
-      status: 'failed',
+      status: 'completed',
       errorText: error.message || String(error)
     });
     emitSupportAiDraftUpdate(io, contact, { configured: true, draft: null, error: error.message });
@@ -369,7 +369,7 @@ export async function enqueueChatbotJob(store, {
   return job;
 }
 
-export async function processBotJob(store, job, { io = null, bot = null } = {}) {
+export async function processBotJob(store, job, { io = null, bot = null, supportAiGenerator = generateCustomerSupportReply } = {}) {
   const contact = await store.getUserProfile(job.contact_id);
   if (!contact) {
     await store.completeBotJob(job.id, { status: 'failed', errorText: 'Contact not found' });
@@ -383,7 +383,7 @@ export async function processBotJob(store, job, { io = null, bot = null } = {}) 
 
     const registrationJob = shouldUseRegistrationBot(job, beforeState, contact);
     if (!registrationJob) {
-      return await processSupportAiJob({ store, contact, job, io, bot });
+      return await processSupportAiJob({ store, contact, job, io, bot, supportAiGenerator });
     }
 
     if (!isBotActiveForContact(contact)) {

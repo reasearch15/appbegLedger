@@ -99,9 +99,10 @@ async function run() {
   assert.equal(start.kind, 'welcome');
   assert.match(start.replies[0].text, /Welcome to Royal VIP/);
   assert.match(start.replies[0].text, /not registered/);
-  assert.equal(start.replies[0].buttons.length, 1);
+  assert.equal(start.replies[0].buttons.length, 2);
   assert.equal(normalizeCallbackAction(start.replies[0].buttons[0][0].data), 'bot:register');
-  console.log('ok /start guest welcome + Register only');
+  assert.deepEqual(start.replies[0].buttons.flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
+  console.log('ok /start guest welcome + Register/Help/Contact');
 
   // Register starts at payment name
   store.apply(await decideBotReply({ store, contact: guest, messageText: '', action: 'menu:register' }));
@@ -373,9 +374,9 @@ async function run() {
   assert.deepEqual(registeredMenuButtons()[0].map((b) => b.text), ['Deposit', 'Cash Out']);
   console.log('ok registered menu has Deposit/Cash Out/My Account/Support');
 
-  // Guest menu only Register
-  assert.deepEqual(guestMenuButtons()[0].map((b) => b.text), ['Register']);
-  console.log('ok guest menu is Register only');
+  // Guest menu: Register + Help/Contact
+  assert.deepEqual(guestMenuButtons().flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
+  console.log('ok guest menu has Register/Help/Contact');
 
   // Expiry copy
   assert.match(REGISTRATION_PAYMENT_EXPIRY_MESSAGE, /Registration failed/);
