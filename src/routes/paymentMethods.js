@@ -69,7 +69,7 @@ function removeStoredFile(rootDir, filePath) {
 
 function handleRouteError(res, error, fallback = 'Request failed.') {
   const code = error.code || null;
-  const status = ['LAST_ACTIVE_DEFAULT', 'INACTIVE_QR', 'DEFAULT_QR_REQUIRED', 'METHOD_IN_USE', 'DUPLICATE_KEY'].includes(code)
+  const status = ['LAST_ACTIVE_DEFAULT', 'INACTIVE_QR', 'DEFAULT_QR_REQUIRED', 'METHOD_IN_USE', 'QR_IN_USE', 'DUPLICATE_KEY'].includes(code)
     ? 409
     : 400;
   res.status(status).json({ error: error.message || fallback, code });

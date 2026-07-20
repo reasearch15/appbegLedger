@@ -275,9 +275,14 @@ export function createPaymentInfoController({ api, getState, setState, render, f
       const message = qr.is_default
         ? 'Set another QR as default before deleting this one.'
         : qr.in_use
-          ? 'This QR was used in registration payments. It will be deactivated instead of permanently deleted. Continue?'
+          ? 'This QR cannot be deleted because it is referenced by existing records. Deactivate it instead.'
           : 'Delete this QR permanently?';
       if (qr.is_default) {
+        setState({ paymentInfoError: message, paymentInfoSuccess: null });
+        render();
+        return;
+      }
+      if (qr.in_use) {
         setState({ paymentInfoError: message, paymentInfoSuccess: null });
         render();
         return;
@@ -302,12 +307,8 @@ export function createPaymentInfoController({ api, getState, setState, render, f
         });
         setState({ paymentInfoSuccess: qr.is_active ? 'QR deactivated.' : 'QR activated.' });
       } else if (action === 'delete') {
-        const result = await api(`/api/payment-qrs/${id}`, { method: 'DELETE' });
-        setState({
-          paymentInfoSuccess: result.action === 'deactivated'
-            ? 'QR deactivated because it was used in registration payments.'
-            : 'QR deleted.'
-        });
+        await api(`/api/payment-qrs/${id}`, { method: 'DELETE' });
+        setState({ paymentInfoSuccess: 'QR deleted.' });
       }
       const methodId = getState().selectedPaymentMethodId;
       if (methodId) await refreshPaymentMethodQrs(methodId, { silent: true });

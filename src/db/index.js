@@ -4754,8 +4754,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
     const usageCount = await countPaymentQrUsage(id);
     if (usageCount > 0) {
-      const deactivated = await updatePaymentQrCode(id, { is_active: false, is_default: false });
-      return { action: 'deactivated', qr: deactivated, reason: 'in_use' };
+      const err = new Error('This QR cannot be deleted because it is referenced by existing records. Deactivate it instead.');
+      err.code = 'QR_IN_USE';
+      throw err;
     }
 
     const filePath = await getPaymentQrCodeFilePath(id);

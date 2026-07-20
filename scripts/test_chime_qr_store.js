@@ -1,4 +1,6 @@
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDataStore } from '../src/db/index.js';
@@ -15,7 +17,8 @@ async function run() {
     'base64'
   ));
 
-  const store = await createDataStore();
+  const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appbeg-qr-store-'));
+  const store = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dbDir, 'test.sqlite') });
   const relativePath = path.relative(rootDir, fixturePath).split(path.sep).join('/');
 
   const method = await store.createPaymentMethod({ name: 'Test Method', key: `test${Date.now()}` });
@@ -52,7 +55,43 @@ async function run() {
     throw new Error(`expected hard delete, got ${deleted.action}`);
   }
 
-  await store.deletePaymentMethod(method.id);
+  const inUse = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: relativePath,
+    label: 'In Use QR',
+    isActive: true,
+    isDefault: false
+  });
+  const user = await store.upsertTelegramUser({
+    id: 99123,
+    first_name: 'QR',
+    last_name: 'User',
+    username: 'qr_user',
+    is_bot: false
+  });
+  await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: inUse.id,
+    paymentDisplayName: 'QR User',
+    firstDepositAmount: 10.01,
+    creditedDepositAmount: 11,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  await assert.rejects(
+    store.deletePaymentQrCode(inUse.id),
+    (error) => error.code === 'QR_IN_USE'
+      && /referenced by existing records/.test(error.message)
+  );
+  const stillThere = await store.getPaymentQrCode(inUse.id);
+  if (!stillThere || !stillThere.is_active) {
+    throw new Error('in-use QR should remain present and active after failed delete');
+  }
+
+  await store.db?.close?.();
+  fs.rmSync(dbDir, { recursive: true, force: true });
 
   console.log('ALL PAYMENT METHOD STORE CHECKS PASSED');
 }
