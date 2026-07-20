@@ -10,6 +10,19 @@ import { registerPaymentMethodRoutes } from '../src/routes/paymentMethods.js';
 const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appbeg-qr-endpoint-'));
 const rootDir = path.resolve('.');
 const store = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dbDir, 'test.sqlite') });
+const originalBot = globalThis.telegramBot;
+const sentPhotos = [];
+globalThis.telegramBot = {
+  telegram: {
+    async sendPhoto(chatId, photoInput, options = {}) {
+      sentPhotos.push({ chatId, photoInput, options });
+      return { message_id: 7000 + sentPhotos.length };
+    },
+    async sendMessage() {
+      throw new Error('Expected QR replacement to send a photo, not text.');
+    }
+  }
+};
 
 const app = express();
 app.use(express.json());
@@ -35,7 +48,7 @@ try {
   });
   const replacementDefault = await store.createPaymentQrCode({
     paymentMethodId: method.id,
-    filePath: 'data/media/payment-qr/default.png',
+    filePath: 'https://cdn.example.com/default.png',
     label: 'Default',
     isActive: true,
     isDefault: false
@@ -60,7 +73,7 @@ try {
     username: 'qr_endpoint',
     is_bot: false
   });
-  await store.createRegistrationPaymentWindow({
+  const firstActiveWindow = await store.createRegistrationPaymentWindow({
     contactId: user.id,
     telegramUserId: user.telegram_id,
     paymentMethodId: method.id,
@@ -71,18 +84,68 @@ try {
     flowType: 'registration',
     windowMinutes: 7
   });
-  const blockedResponse = await fetch(`${baseUrl}/api/payment-qrs/${inUse.id}`, { method: 'DELETE' });
+  const secondActiveWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: inUse.id,
+    paymentDisplayName: 'QR Endpoint',
+    firstDepositAmount: 11.01,
+    creditedDepositAmount: 12,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  const replacementResponse = await fetch(`${baseUrl}/api/payment-qrs/${inUse.id}`, { method: 'DELETE' });
+  const replacementPayload = await replacementResponse.json();
+  assert.equal(replacementResponse.status, 200);
+  assert.equal(replacementPayload.action, 'replaced_deleted');
+  assert.equal(sentPhotos.length, 1);
+  assert.equal(sentPhotos[0].chatId, user.telegram_id);
+  assert.match(sentPhotos[0].options.caption, /Payment details have changed/);
+  assert.equal(sentPhotos[0].photoInput, 'https://cdn.example.com/default.png');
+  assert.equal(await store.getPaymentQrCode(inUse.id), null);
+  const migratedWindowA = await store.getRegistrationPaymentWindow(firstActiveWindow.id);
+  const migratedWindowB = await store.getRegistrationPaymentWindow(secondActiveWindow.id);
+  assert.equal(Number(migratedWindowA.payment_qr_code_id), Number(replacementDefault.id));
+  assert.equal(Number(migratedWindowB.payment_qr_code_id), Number(replacementDefault.id));
+
+  const historical = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: 'https://cdn.example.com/historical.png',
+    label: 'Historical',
+    isActive: true,
+    isDefault: false
+  });
+  const historicalWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: historical.id,
+    paymentDisplayName: 'QR Endpoint',
+    firstDepositAmount: 12.01,
+    creditedDepositAmount: 13,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  await store.db.prepare(`
+    UPDATE registration_payment_windows
+    SET status = 'completed',
+        matched_payment_event_id = 321,
+        completed_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), new Date().toISOString(), historicalWindow.id);
+  const blockedResponse = await fetch(`${baseUrl}/api/payment-qrs/${historical.id}`, { method: 'DELETE' });
   const blockedPayload = await blockedResponse.json();
   assert.equal(blockedResponse.status, 409);
   assert.equal(blockedPayload.code, 'QR_IN_USE');
   assert.match(blockedPayload.error, /referenced by existing records/);
-  const stillThere = await store.getPaymentQrCode(inUse.id);
-  assert.equal(Boolean(stillThere), true);
-  assert.equal(stillThere.is_active, true);
+  assert.equal(sentPhotos.length, 1);
 
   console.log('ok payment QR delete endpoint');
 } finally {
   await new Promise((resolve) => server.close(resolve));
+  globalThis.telegramBot = originalBot;
   await store.db?.close?.();
   fs.rmSync(dbDir, { recursive: true, force: true });
 }

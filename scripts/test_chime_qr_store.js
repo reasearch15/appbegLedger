@@ -80,15 +80,48 @@ async function run() {
     flowType: 'registration',
     windowMinutes: 7
   });
+  const replaced = await store.deletePaymentQrCode(inUse.id);
+  if (replaced.action !== 'replaced_deleted') {
+    throw new Error(`expected active QR replacement delete, got ${replaced.action}`);
+  }
+  const migratedWindow = await store.getRegistrationPaymentWindow(replaced.affectedWindows[0].id);
+  if (Number(migratedWindow.payment_qr_code_id) !== Number(second.id)) {
+    throw new Error('active window should point to replacement default QR');
+  }
+  assert.equal(await store.getPaymentQrCode(inUse.id), null);
+
+  const historical = await store.createPaymentQrCode({
+    paymentMethodId: method.id,
+    filePath: relativePath,
+    label: 'Historical QR',
+    isActive: true,
+    isDefault: false
+  });
+  const historicalWindow = await store.createRegistrationPaymentWindow({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    paymentMethodId: method.id,
+    paymentQrCodeId: historical.id,
+    paymentDisplayName: 'QR User',
+    firstDepositAmount: 12.01,
+    creditedDepositAmount: 13,
+    flowType: 'registration',
+    windowMinutes: 7
+  });
+  await store.claimPaymentWindowMatch(historicalWindow.id, 1).catch(() => null);
+  await store.db.prepare(`
+    UPDATE registration_payment_windows
+    SET status = 'completed',
+        matched_payment_event_id = 123,
+        completed_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(new Date().toISOString(), new Date().toISOString(), historicalWindow.id);
   await assert.rejects(
-    store.deletePaymentQrCode(inUse.id),
+    store.deletePaymentQrCode(historical.id),
     (error) => error.code === 'QR_IN_USE'
       && /referenced by existing records/.test(error.message)
   );
-  const stillThere = await store.getPaymentQrCode(inUse.id);
-  if (!stillThere || !stillThere.is_active) {
-    throw new Error('in-use QR should remain present and active after failed delete');
-  }
 
   await store.db?.close?.();
   fs.rmSync(dbDir, { recursive: true, force: true });

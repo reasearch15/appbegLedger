@@ -3,10 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import { slugifyPaymentMethodKey } from '../payments/methodUtils.js';
+import { queueBotPhotoReply } from '../telegram/chatbotProcessorDelivery.js';
 
 const ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
 const ALLOWED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const QR_REPLACEMENT_MESSAGE = 'Payment details have changed. Please use the new QR code shown below from now on. Do not send payment to the previous QR.';
 
 function extensionForMime(mimeType) {
   switch (mimeType) {
@@ -78,6 +80,50 @@ function handleRouteError(res, error, fallback = 'Request failed.') {
 function parseId(value) {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+async function notifyQrReplacementUsers({ store, result }) {
+  if (!['replaced_deleted', 'replaced_deactivated'].includes(result?.action)) return;
+  const replacementQr = result.replacementQr;
+  const affectedWindows = result.affectedWindows || [];
+  if (!replacementQr?.file_path || !affectedWindows.length) return;
+
+  const windowsByContact = new Map();
+  for (const window of affectedWindows) {
+    const contactId = Number(window.contact_id);
+    if (!windowsByContact.has(contactId)) windowsByContact.set(contactId, []);
+    windowsByContact.get(contactId).push(window);
+  }
+
+  for (const [contactId, windows] of windowsByContact.entries()) {
+    const alreadyNotified = await Promise.all(windows.map((window) => (
+      store.wasPaymentQrReplacementNotified?.({
+        contactId,
+        oldQrId: result.qr.id,
+        newQrId: replacementQr.id,
+        windowId: window.id
+      })
+    )));
+    if (alreadyNotified.some(Boolean)) continue;
+    const contact = await store.getUserProfile(contactId);
+    if (!contact) continue;
+    await queueBotPhotoReply({
+      store,
+      user: contact,
+      text: QR_REPLACEMENT_MESSAGE,
+      mediaPath: replacementQr.file_path,
+      buttons: [],
+      bot: globalThis.telegramBot || null
+    });
+    for (const window of windows) {
+      await store.recordPaymentQrReplacementNotified?.({
+        contactId,
+        oldQrId: result.qr.id,
+        newQrId: replacementQr.id,
+        windowId: window.id
+      });
+    }
+  }
 }
 
 export function registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin }) {
@@ -216,7 +262,11 @@ export function registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin 
       if (!id) return res.status(400).json({ error: 'Invalid QR id.' });
       const result = await store.deletePaymentQrCode(id);
       if (!result) return res.status(404).json({ error: 'Payment QR not found.' });
+      await notifyQrReplacementUsers({ store, result });
       if (result.action === 'deleted') {
+        removeStoredFile(rootDir, result.file_path);
+      }
+      if (result.action === 'replaced_deleted') {
         removeStoredFile(rootDir, result.file_path);
       }
       res.json(result);

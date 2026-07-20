@@ -4648,6 +4648,63 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return Number(row?.count || 0);
   }
 
+  async function listActivePaymentQrReferences(id) {
+    const rows = await db.prepare(`
+      SELECT
+        w.*,
+        u.display_name,
+        u.username AS telegram_username,
+        u.first_name,
+        u.last_name
+      FROM registration_payment_windows w
+      INNER JOIN telegram_users u ON u.id = w.contact_id
+      WHERE w.payment_qr_code_id = ?
+        AND w.status IN ('active', 'manual_review')
+        AND w.matched_payment_event_id IS NULL
+      ORDER BY w.created_at ASC, w.id ASC
+    `).all(id);
+    return rows.map((row) => ({
+      ...hydratePaymentWindow(row),
+      display_name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown',
+      telegram_username: row.telegram_username || null
+    }));
+  }
+
+  async function wasPaymentQrReplacementNotified({ contactId, oldQrId, newQrId, windowId }) {
+    const row = await db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM activity_events
+      WHERE telegram_user_id = ?
+        AND event_type = 'payment_qr_replacement_notified'
+        AND metadata_json LIKE ?
+        AND metadata_json LIKE ?
+        AND metadata_json LIKE ?
+    `).get(
+      contactId,
+      `%"oldQrId":${Number(oldQrId)}%`,
+      `%"newQrId":${Number(newQrId)}%`,
+      `%"windowId":${Number(windowId)}%`
+    );
+    return Number(row?.count || 0) > 0;
+  }
+
+  async function recordPaymentQrReplacementNotified({ contactId, oldQrId, newQrId, windowId }) {
+    if (await wasPaymentQrReplacementNotified({ contactId, oldQrId, newQrId, windowId })) return false;
+    await logEvent({
+      telegramUserId: contactId,
+      eventType: 'payment_qr_replacement_notified',
+      title: 'Payment QR Replacement Sent',
+      body: 'Replacement payment QR sent for active payment flow.',
+      actorName: 'System',
+      metadata: {
+        oldQrId: Number(oldQrId),
+        newQrId: Number(newQrId),
+        windowId: Number(windowId)
+      }
+    });
+    return true;
+  }
+
   async function createPaymentQrCode({ paymentMethodId, filePath, label = null, isActive = true, isDefault = false }) {
     const now = nowIso();
     const existing = await listPaymentQrCodes(paymentMethodId);
@@ -4754,9 +4811,49 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
     const usageCount = await countPaymentQrUsage(id);
     if (usageCount > 0) {
-      const err = new Error('This QR cannot be deleted because it is referenced by existing records. Deactivate it instead.');
-      err.code = 'QR_IN_USE';
-      throw err;
+      const activeReferences = await listActivePaymentQrReferences(id);
+      const replacementQr = await getActiveDefaultPaymentQr(current.payment_method_id);
+      const canReplaceActiveReferences = activeReferences.length > 0
+        && replacementQr
+        && Number(replacementQr.id) !== Number(id);
+
+      if (!canReplaceActiveReferences) {
+        const err = new Error('This QR cannot be deleted because it is referenced by existing records. Deactivate it instead.');
+        err.code = 'QR_IN_USE';
+        throw err;
+      }
+
+      const now = nowIso();
+      await db.prepare(`
+        UPDATE registration_payment_windows
+        SET payment_qr_code_id = ?,
+            updated_at = ?
+        WHERE payment_qr_code_id = ?
+          AND status IN ('active', 'manual_review')
+          AND matched_payment_event_id IS NULL
+      `).run(replacementQr.id, now, id);
+
+      const remainingUsageCount = await countPaymentQrUsage(id);
+      if (remainingUsageCount === 0) {
+        const filePath = await getPaymentQrCodeFilePath(id);
+        await db.prepare('DELETE FROM payment_qr_codes WHERE id = ?').run(id);
+        return {
+          action: 'replaced_deleted',
+          qr: current,
+          replacementQr,
+          affectedWindows: activeReferences,
+          file_path: filePath || null
+        };
+      }
+
+      const oldQr = await updatePaymentQrCode(id, { is_active: false, is_default: false, force: true });
+      return {
+        action: 'replaced_deactivated',
+        qr: oldQr,
+        replacementQr,
+        affectedWindows: activeReferences,
+        remainingUsageCount
+      };
     }
 
     const filePath = await getPaymentQrCodeFilePath(id);
@@ -5480,6 +5577,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getPaymentQrCode,
     getPaymentQrCodeFilePath,
     countPaymentQrUsage,
+    listActivePaymentQrReferences,
+    wasPaymentQrReplacementNotified,
+    recordPaymentQrReplacementNotified,
     createPaymentQrCode,
     updatePaymentQrCode,
     setDefaultPaymentQr,
