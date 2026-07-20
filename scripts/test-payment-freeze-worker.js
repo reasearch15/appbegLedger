@@ -19,23 +19,32 @@ async function insertPayment(store, {
   messageDate = new Date().toISOString(),
   freezeAt = null,
   unmatchedReason = null,
-  windowId = null
+  windowId = null,
+  processingStatus = 'Parsed',
+  parsedAmount = 9,
+  parsedSenderName = 'Amy Fei',
+  parsedPaymentApp = 'Chime'
 }) {
   const now = new Date().toISOString();
   await store.db.prepare(`
     INSERT INTO payment_events (
       id, telegram_message_id, telegram_group_id, telegram_group_title,
       message_text, raw_payload_json, processing_status, routing_status,
+      parsed_amount, parsed_sender_name, parsed_payment_app,
       message_date, freeze_at, unmatched_reason, registration_payment_window_id,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, '{}', 'Parsed', ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     1000 + id,
     -100,
     'Payments',
     'You received $9 from Amy Fei',
+    processingStatus,
     routingStatus,
+    parsedAmount,
+    parsedSenderName,
+    parsedPaymentApp,
     messageDate,
     freezeAt,
     unmatchedReason,
@@ -122,6 +131,72 @@ async function run() {
     assert.equal(payment.matched_at, null);
     assert.equal(payment.routed_at, null);
     console.log('ok empty routing timestamp updates are normalized to NULL');
+  }
+
+  // Overdue unparsed searching gets a deadline but does not freeze via background scan
+  {
+    const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
+    await insertPayment(store, {
+      id: 46,
+      routingStatus: 'searching',
+      messageDate: received,
+      freezeAt: null,
+      processingStatus: 'New',
+      parsedAmount: null,
+      parsedSenderName: null,
+      parsedPaymentApp: null
+    });
+    const result = await store.freezeOverdueSearchingPayments({ now });
+    const payment = await store.getPaymentEvent(46);
+    assert.equal(payment.freeze_at, computePaymentFreezeAt(received));
+    assert.equal(payment.routing_status, 'searching');
+    assert.equal(payment.processing_status, 'New');
+    assert.ok(!result.frozen.some((p) => Number(p.id) === 46));
+
+    const tick = await processPaymentFreezeTick({ store, io: null, now });
+    const afterTick = await store.getPaymentEvent(46);
+    assert.equal(afterTick.routing_status, 'searching');
+    assert.ok(!tick.frozen.some((p) => Number(p.id) === 46));
+    console.log('ok overdue unparsed payment is backfilled but not frozen by background scan');
+  }
+
+  // Same overdue payment can freeze after a valid parse result is populated
+  {
+    await store.db.prepare(`
+      UPDATE payment_events
+      SET processing_status = 'Parsed',
+          parsed_amount = 9,
+          parsed_sender_name = 'Amy Fei',
+          parsed_payment_app = 'Chime',
+          updated_at = ?
+      WHERE id = 46
+    `).run(new Date().toISOString());
+    const result = await store.freezeOverdueSearchingPayments({ now });
+    const payment = await store.getPaymentEvent(46);
+    assert.ok(result.frozen.some((p) => Number(p.id) === 46));
+    assert.equal(payment.routing_status, ROUTING_STATUS.FROZEN);
+    assert.equal(payment.processing_status, 'Parsed');
+    console.log('ok overdue payment freezes after valid parse fields are populated');
+  }
+
+  // Parsed status without complete parse fields still does not freeze
+  {
+    const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
+    await insertPayment(store, {
+      id: 47,
+      routingStatus: 'unrouted',
+      messageDate: received,
+      freezeAt: computePaymentFreezeAt(received),
+      processingStatus: 'Parsed',
+      parsedAmount: null,
+      parsedSenderName: null,
+      parsedPaymentApp: null
+    });
+    const result = await store.freezeOverdueSearchingPayments({ now });
+    const payment = await store.getPaymentEvent(47);
+    assert.equal(payment.routing_status, 'unrouted');
+    assert.ok(!result.frozen.some((p) => Number(p.id) === 47));
+    console.log('ok parsed status without parse fields is not frozen');
   }
 
   // Matched never freezes

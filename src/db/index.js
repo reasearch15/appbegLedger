@@ -97,6 +97,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   const freezeAtPresentPredicate = sql.isPostgres
     ? "NULLIF(freeze_at::text, '') IS NOT NULL"
     : "freeze_at IS NOT NULL AND freeze_at != ''";
+  const completedPaymentParsePredicate = `(
+    processing_status = 'Parsed'
+    AND parsed_amount IS NOT NULL
+    AND TRIM(COALESCE(parsed_sender_name, '')) != ''
+    AND TRIM(COALESCE(parsed_payment_app, '')) != ''
+  )`;
 
   function calculateEditDistancePercent(original = '', final = '') {
     const a = String(original || '').trim();
@@ -3098,6 +3104,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
         AND ${freezeAtPresentPredicate}
         AND freeze_at <= ?
+        AND ${completedPaymentParsePredicate}
         AND registration_payment_window_id IS NULL
     `).all(nowIsoStr);
 
