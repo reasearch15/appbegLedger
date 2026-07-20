@@ -68,6 +68,8 @@ export async function migratePostgres(driver) {
     ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS expiry_notified_at TEXT;
     ALTER TABLE registration_payment_windows
+      ADD COLUMN IF NOT EXISTS registration_penalty_cleared_at TEXT;
+    ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS flow_type TEXT NOT NULL DEFAULT 'registration';
     ALTER TABLE registration_payment_windows
       ADD COLUMN IF NOT EXISTS matched_payment_event_id BIGINT;

@@ -223,7 +223,8 @@ app.get('/api/contacts/:id', async (req, res) => {
     tags: await store.listTags(),
     quickReplies: await store.listQuickReplies(),
     automationState: redactRegistrationSecrets(await store.getAutomationState(user.id)),
-    automationLogs: await store.listAutomationLogsForUser(user.id)
+    automationLogs: await store.listAutomationLogsForUser(user.id),
+    registrationPaymentPenalty: await store.getRegistrationPaymentPenaltyStatus(user.id)
   });
 });
 
@@ -915,6 +916,24 @@ app.post('/api/contacts/:id/registration/revoke', requireAdmin, async (req, res)
   } catch (error) {
     const status = error.code === 'NOT_REGISTERED' ? 409 : 400;
     res.status(status).json({ error: error.message });
+  }
+});
+
+app.post('/api/contacts/:id/registration/penalty/clear', requireAdmin, async (req, res) => {
+  try {
+    const contactId = Number(req.params.id);
+    const result = await store.clearRegistrationPaymentPenalty(contactId, {
+      actorId: req.ledgerUser?.id || null,
+      actorName: req.ledgerUser?.username || req.body.staffName || 'Admin'
+    });
+    if (!result) return res.status(404).json({ error: 'Contact not found.' });
+
+    io.emit('contacts:changed');
+    io.emit('users:changed');
+    io.emit('contact:changed', { contactId, userId: contactId });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 

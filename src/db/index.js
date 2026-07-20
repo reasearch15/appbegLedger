@@ -5030,8 +5030,90 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         AND COALESCE(flow_type, 'registration') = ?
         AND expires_at >= ?
         AND expires_at <= ?
+        AND registration_penalty_cleared_at IS NULL
     `).get(contactId, PAYMENT_WINDOW_FLOW.REGISTRATION, since, safeNow.toISOString());
     return Number(row?.count || 0);
+  }
+
+  async function getRegistrationPaymentPenaltyStatus(contactId, now = new Date()) {
+    const existing = await getUserProfile(contactId);
+    if (!existing) return null;
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const safeNow = Number.isNaN(nowDate.getTime()) ? new Date() : nowDate;
+    const nowText = safeNow.toISOString();
+    const expiredStrikeCount = await countRecentExpiredRegistrationPaymentWindows(contactId, safeNow);
+    const cooldown = await getActiveRegistrationPaymentCooldown(contactId, nowText);
+    return {
+      contact_id: Number(contactId),
+      expired_strike_count: expiredStrikeCount,
+      cooldown_active: cooldown.active,
+      cooldown_until: cooldown.active ? cooldown.cooldown_until : null,
+      registration_allowed: !cooldown.active
+    };
+  }
+
+  async function clearRegistrationPaymentPenalty(contactId, {
+    actorId = null,
+    actorName = 'Admin',
+    now = new Date()
+  } = {}) {
+    const existing = await getUserProfile(contactId);
+    if (!existing) return null;
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const safeNow = Number.isNaN(nowDate.getTime()) ? new Date() : nowDate;
+    const nowText = safeNow.toISOString();
+    const previousStatus = await getRegistrationPaymentPenaltyStatus(contactId, safeNow);
+    const since = new Date(safeNow.getTime() - REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS).toISOString();
+
+    await db.exec('BEGIN');
+    try {
+      await db.prepare(`
+        UPDATE registration_payment_windows
+        SET registration_penalty_cleared_at = COALESCE(registration_penalty_cleared_at, ?),
+            updated_at = ?
+        WHERE contact_id = ?
+          AND status = 'expired'
+          AND COALESCE(flow_type, 'registration') = ?
+          AND expires_at >= ?
+          AND expires_at <= ?
+          AND registration_penalty_cleared_at IS NULL
+      `).run(nowText, nowText, contactId, PAYMENT_WINDOW_FLOW.REGISTRATION, since, nowText);
+
+      await db.prepare(`
+        UPDATE telegram_users
+        SET registration_payment_cooldown_until = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(nowText, contactId);
+
+      await logEvent({
+        telegramUserId: contactId,
+        eventType: 'registration_penalty_cleared',
+        title: 'Registration Penalty Cleared',
+        body: 'Registration payment-window penalty was cleared by an admin.',
+        actorName,
+        metadata: {
+          action: 'registration_penalty_cleared',
+          actorId: actorId == null ? null : Number(actorId),
+          contactId: Number(contactId),
+          previousExpiredWindowCount: previousStatus?.expired_strike_count || 0,
+          previousCooldownExpiry: previousStatus?.cooldown_until || null,
+          timestamp: nowText
+        },
+        createdAt: nowText
+      });
+
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+
+    return {
+      previous: previousStatus,
+      status: await getRegistrationPaymentPenaltyStatus(contactId, safeNow),
+      contact: await getUserProfile(contactId)
+    };
   }
 
   async function refreshRegistrationPaymentCooldown(contactId, now = new Date()) {
@@ -5748,7 +5830,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     deletePaymentQrCode,
     getActiveRegistrationPaymentCooldown,
     countRecentExpiredRegistrationPaymentWindows,
+    getRegistrationPaymentPenaltyStatus,
     refreshRegistrationPaymentCooldown,
+    clearRegistrationPaymentPenalty,
     createRegistrationPaymentWindow,
     getActiveRegistrationPaymentWindow,
     getRegistrationPaymentWindow,
@@ -6233,6 +6317,7 @@ async function migrate(db) {
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_qr_code_id', 'INTEGER');
   await addColumnIfMissing(db, 'registration_payment_windows', 'payment_display_name', 'TEXT');
   await addColumnIfMissing(db, 'registration_payment_windows', 'expiry_notified_at', 'TEXT');
+  await addColumnIfMissing(db, 'registration_payment_windows', 'registration_penalty_cleared_at', 'TEXT');
   await addColumnIfMissing(db, 'registration_payment_windows', 'flow_type', "TEXT NOT NULL DEFAULT 'registration'");
   await addColumnIfMissing(db, 'registration_payment_windows', 'matched_payment_event_id', 'INTEGER');
   await addColumnIfMissing(db, 'registration_payment_windows', 'expected_payment_cents', 'INTEGER');

@@ -72,6 +72,8 @@ let state = {
   timeline: [],
   automationState: null,
   automationLogs: [],
+  registrationPaymentPenalty: null,
+  registrationPenaltyClearState: null,
   customerSupportPrompt: null,
   customerSupportPromptSaving: false,
   allTags: [],
@@ -299,6 +301,7 @@ function applyContactDetail(detail) {
   state.timeline = detail.timeline || [];
   state.automationState = detail.automationState;
   state.automationLogs = detail.automationLogs || [];
+  state.registrationPaymentPenalty = detail.registrationPaymentPenalty || null;
   state.allTags = detail.tags || [];
   state.quickReplies = detail.quickReplies || [];
   state.contactLoading = false;
@@ -462,6 +465,7 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
   if (changed) {
     state.registrationWizard = null;
     state.appbegCreateState = null;
+    state.registrationPenaltyClearState = null;
   }
   if (!changed && state.contact?.id === id) {
     render();
@@ -479,6 +483,8 @@ async function openContactById(contactId, { pane = 'overview' } = {}) {
     state.timeline = [];
     state.automationState = null;
     state.automationLogs = [];
+    state.registrationPaymentPenalty = null;
+    state.registrationPenaltyClearState = null;
     state.contactLoading = true;
   } else {
     state.contactLoading = false;
@@ -1085,6 +1091,8 @@ async function refreshSelectedContact({ markRead = false, requestId = null, forc
     state.timeline = [];
     state.automationState = null;
     state.automationLogs = [];
+    state.registrationPaymentPenalty = null;
+    state.registrationPenaltyClearState = null;
     state.allTags = [];
     state.quickReplies = [];
     return;
@@ -1601,6 +1609,13 @@ function detailsPanel() {
         ${registrationPanel()}
       </section>
 
+      ${isAdmin() ? `
+      <section class="card">
+        <div class="card-title">Registration payment-window penalty</div>
+        ${registrationPenaltyPanel()}
+      </section>
+      ` : ''}
+
       <section class="card">
         <div class="card-title">Assignment</div>
         ${infoRow('Assigned Staff', contact.assigned_staff_name || 'Unassigned')}
@@ -1746,6 +1761,36 @@ function registrationPanel() {
       <button type="button" class="button secondary" data-overview-action="start-register">Start Registration</button>
       <button type="button" class="button secondary" id="openRegistrationModalBtn">Quick form</button>
     </div>
+  `;
+}
+
+function registrationPenaltyPanel() {
+  const penalty = state.registrationPaymentPenalty || {
+    expired_strike_count: 0,
+    cooldown_active: false,
+    cooldown_until: null,
+    registration_allowed: true
+  };
+  const clearState = state.registrationPenaltyClearState || {};
+  const strikes = Number(penalty.expired_strike_count || 0);
+  const cooldownActive = Boolean(penalty.cooldown_active);
+  const canClear = strikes > 0 || cooldownActive;
+  const clearing = Boolean(clearState.clearing);
+  return `
+    ${infoRow('Expired windows in 24h', strikes)}
+    ${infoRow('Cooldown', cooldownActive ? 'Active' : 'Inactive')}
+    ${cooldownActive ? infoRow('Cooldown expires', fmtDateTime(penalty.cooldown_until)) : ''}
+    ${infoRow('Registration allowed', penalty.registration_allowed ? 'Yes' : 'No')}
+    <div class="control-grid">
+      <button
+        type="button"
+        class="button secondary"
+        data-registration-penalty-action="clear"
+        ${!canClear || clearing ? 'disabled' : ''}
+      >${clearing ? 'Clearing...' : 'Clear registration penalty'}</button>
+    </div>
+    ${clearState.success ? `<div class="settings-success">${escapeHtml(clearState.success)}</div>` : ''}
+    ${clearState.error ? `<div class="settings-error">${escapeHtml(clearState.error)}</div>` : ''}
   `;
 }
 
@@ -3279,6 +3324,14 @@ function bindEvents() {
       void controlChatbot(button.dataset.botControl);
     });
   });
+  document.querySelectorAll('[data-registration-penalty-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.disabled) return;
+      if (button.dataset.registrationPenaltyAction === 'clear') {
+        void clearRegistrationPenalty();
+      }
+    });
+  });
   document.querySelectorAll('[data-automation-action]').forEach((button) => {
     button.addEventListener('click', () => controlAutomation(button.dataset.automationAction));
   });
@@ -3348,6 +3401,44 @@ async function controlChatbot(action) {
   await refreshContacts({ force: true, reason: 'chatbot control' });
   if (action === 'takeover' || action === 'pause') {
     state.mobileContactsPane = 'chat';
+  }
+  render();
+}
+
+async function clearRegistrationPenalty() {
+  const contactId = Number(state.selectedContactId);
+  if (!contactId || state.registrationPenaltyClearState?.clearing) return;
+  const proceed = window.confirm([
+    "Clear this user's registration penalty?",
+    '',
+    'This will reset their expired registration payment-window strikes and remove any active registration cooldown. They will be able to start registration again immediately.',
+    '',
+    'Payments, deposits, cashouts, completed registrations, and chat history will not be changed.'
+  ].join('\n'));
+  if (!proceed) return;
+
+  state.registrationPenaltyClearState = { clearing: true, error: null, success: null };
+  render();
+  try {
+    const payload = await api(`/api/contacts/${contactId}/registration/penalty/clear`, {
+      method: 'POST',
+      body: JSON.stringify({ staffName: state.staffName })
+    });
+    state.registrationPaymentPenalty = payload.status || null;
+    state.contact = payload.contact ? normalizeContact(payload.contact) : state.contact;
+    state.registrationPenaltyClearState = {
+      clearing: false,
+      error: null,
+      success: 'Registration penalty cleared. This contact can start registration again immediately.'
+    };
+    contactDetailCache.delete(contactId);
+    await refreshSelectedContact({ force: true, reason: 'registration penalty cleared' });
+  } catch (error) {
+    state.registrationPenaltyClearState = {
+      clearing: false,
+      error: error.message || 'Could not clear registration penalty.',
+      success: null
+    };
   }
   render();
 }

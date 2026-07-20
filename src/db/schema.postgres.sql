@@ -510,6 +510,7 @@ CREATE TABLE IF NOT EXISTS registration_payment_windows (
   expires_at TEXT NOT NULL,
   completed_at TEXT,
   expiry_notified_at TEXT,
+  registration_penalty_cleared_at TEXT,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
   updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );
