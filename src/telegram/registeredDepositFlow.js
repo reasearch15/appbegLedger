@@ -4,8 +4,9 @@
  */
 
 import {
+  centsToDollars,
   MIN_REGISTRATION_DEPOSIT,
-  parseFirstDepositAmount
+  parseMoneyToCents
 } from '../registration/utils.js';
 import { formatDepositAmount } from '../payments/methodUtils.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
@@ -43,7 +44,7 @@ export function isRegisteredDepositFlow(flow, step) {
 }
 
 export async function startRegisteredDeposit(contact, info = {}) {
-  const knownName = info.payment_display_name || info.payment_name || null;
+  const knownName = String(info.payment_display_name || info.payment_name || '').trim();
   if (knownName) {
     return {
       kind: 'deposit_ask_amount',
@@ -212,8 +213,9 @@ export async function continueRegisteredDeposit({
   }
 
   if (normalizedStep === 'deposit_amount') {
-    const amount = parseFirstDepositAmount(text);
-    if (amount == null) {
+    const amountCents = parseMoneyToCents(text);
+    const minCents = MIN_REGISTRATION_DEPOSIT * 100;
+    if (!Number.isSafeInteger(amountCents) || amountCents < minCents) {
       return {
         kind: 'deposit_ask_amount',
         replies: [{
@@ -232,6 +234,7 @@ export async function continueRegisteredDeposit({
         escalate: false
       };
     }
+    const amount = centsToDollars(amountCents);
 
     const qrSource = await resolveRegistrationDefaultQr(store);
     if (!qrSource) {

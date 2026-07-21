@@ -34,7 +34,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     contact_status_condition: 'registered',
     response_type: 'menu',
     response_message: 'Welcome back!',
-    buttons: [[{ label: 'Deposit', action: 'keyword:deposit' }, { label: 'Royal VIP', url: 'https://royal.youplatform.org' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'keyword:support' }]],
+    buttons: [[{ label: '🟢 Deposit', action: 'keyword:deposit', style: 'success' }, { label: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'keyword:support' }]],
     priority: 11
   },
   {
@@ -74,7 +74,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     contact_status_condition: 'any',
     response_type: 'menu',
     response_message: "How registration works:\n\n1. Register your Royal VIP account.\n2. Make your first deposit when prompted.\n3. Your account is created automatically after payment verification.\n4. Log in and start playing instantly.\n5. Deposit and cash out online anytime through the Royal VIP website.\n\n💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.",
-    buttons: [[{ label: 'Register', action: 'flow:registration_info' }], [{ label: 'Deposit', action: 'keyword:deposit' }, { label: 'Cash Out', action: 'keyword:cashout' }], [{ label: 'Contact Support', action: 'keyword:support' }]],
+    buttons: [[{ label: 'Register', action: 'flow:registration_info' }], [{ label: 'Contact Support', action: 'keyword:support' }]],
     priority: 40
   },
   {

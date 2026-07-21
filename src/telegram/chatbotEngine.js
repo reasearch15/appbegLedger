@@ -160,6 +160,7 @@ export function isChatbotButtonAction(action) {
   return value.startsWith('bot:')
     || value.startsWith('menu:')
     || value.startsWith('register:')
+    || value.startsWith('deposit:')
     || value.startsWith('staff')
     || value === 'register'
     || value === 'confirm'
@@ -691,6 +692,18 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     return talkToStaffDecision();
   }
 
+  if (!action && isRegisteredDepositDiscoveryText(text)) {
+    return {
+      kind: 'registered_deposit_discovery',
+      replies: [{
+        text: 'To make a deposit, tap Deposit below and follow the payment instructions.',
+        buttons: [[registeredMenuButtons()[0][0]]]
+      }],
+      statePatch: null,
+      escalate: false
+    };
+  }
+
   if (['bot:cashout', 'bot:my_account', 'bot:my_games', 'bot:my_game'].includes(action)) {
     const label = {
       'bot:cashout': 'cash out',
@@ -720,6 +733,12 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     statePatch: null,
     escalate: false
   };
+}
+
+function isRegisteredDepositDiscoveryText(text = '') {
+  const value = String(text || '').trim().toLowerCase();
+  if (!value) return false;
+  return /^(deposit|add money|recharge|load|payment|make deposit|i want to deposit|i need to deposit|load money|load coin|top up|topup)$/i.test(value);
 }
 
 async function startRegistrationDecision(contact, info, store, { resumed = false } = {}) {
@@ -756,6 +775,9 @@ function reviewDecision(info) {
 
 function normalizeStep(step, flow) {
   const canonical = canonicalizeRegistrationStep(step);
+  if (isRegisteredDepositFlow(flow, step)) {
+    return String(step || canonical);
+  }
   if (flow === 'registration_info') {
     if (canonical === 'username' || step === 'appbeg_username') return 'username';
     if (canonical === 'review' || step === 'confirm') return 'review';

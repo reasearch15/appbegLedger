@@ -8,7 +8,7 @@ const SCREENS = {
       : CUSTOMER_REGISTRATION_HELP_TEXT,
     getButtons: ({ registered }) => registered
       ? [
-          [{ label: 'Deposit', action: 'screen:Deposit' }, { label: 'Royal VIP', url: 'https://royal.youplatform.org' }],
+          [{ label: '🟢 Deposit', action: 'screen:Deposit', style: 'success' }, { label: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }],
           [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'screen:Support' }]
         ]
       : [
@@ -78,6 +78,7 @@ export function buildMenu({ screenName = 'Home', registered = false }) {
     replyMarkup: {
       inline_keyboard: [...rows, ...controlRows].map((row) => row.map((button) => ({
         text: button.label,
+        ...(button.style ? { style: button.style } : {}),
         ...(button.url ? { url: button.url } : { callback_data: button.action })
       })))
     }

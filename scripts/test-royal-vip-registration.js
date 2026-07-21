@@ -397,17 +397,19 @@ async function run() {
   assert.equal(registeredState.effective_status, 'Registered');
   assert.equal(registeredState.menu_kind, 'registered');
   assert.deepEqual(registeredMenuButtons().map((row) => row.map((b) => b.text)), [
-    ['Deposit', 'Royal VIP'],
+    ['🟢 Deposit', '🔴 Royal VIP'],
     ['My Account', 'Support']
   ]);
   assert.equal(registeredMenuButtons()[0][1].url, 'https://royal.youplatform.org');
   assert.equal(registeredMenuButtons()[0][1].data, undefined);
   assert.deepEqual(normalizeButtonRows(registeredMenuButtons())[0][1], {
-    text: 'Royal VIP',
+    text: '🔴 Royal VIP',
+    style: 'danger',
     url: 'https://royal.youplatform.org'
   });
   assert.deepEqual(buildMenu({ registered: true }).replyMarkup.inline_keyboard[0][1], {
-    text: 'Royal VIP',
+    text: '🔴 Royal VIP',
+    style: 'danger',
     url: 'https://royal.youplatform.org'
   });
   console.log('ok registered menu has Deposit/Royal VIP/My Account/Support');

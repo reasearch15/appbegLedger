@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { resolvePaymentQrTelegramInput } from '../payments/methodUtils.js';
+import { recordActiveBotMessage } from './callbackSafety.js';
 
 export function createBotReplySender(bot, store) {
   return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
@@ -48,6 +49,13 @@ export function createBotReplySender(bot, store) {
     });
     if (normalizedButtons.length) {
       console.log(`[telegram-outbound] welcome_buttons_sent contact=${user.id} channel=bot_api buttons=${countButtons(normalizedButtons)}`);
+      await recordActiveBotMessage({
+        store,
+        user,
+        bot,
+        messageId: telegramResponse.message_id,
+        buttons: normalizedButtons
+      });
     }
     return {
       ok: true,
@@ -115,6 +123,15 @@ export function createBotPhotoSender(bot, store) {
       source: 'bot_api',
       messageType: normalizedButtons.length ? 'buttons' : messageType
     });
+    if (normalizedButtons.length) {
+      await recordActiveBotMessage({
+        store,
+        user,
+        bot,
+        messageId: telegramResponse.message_id,
+        buttons: normalizedButtons
+      });
+    }
 
     return {
       ok: true,
@@ -179,7 +196,8 @@ export function normalizeButtonRows(buttons = []) {
           if (!button || typeof button !== 'object') return null;
           const text = String(button.text || button.label || '').trim();
           const url = String(button.url || '').trim();
-          if (text && url) return { text, url };
+          const style = normalizeButtonStyle(button.style);
+          if (text && url) return { text, url, ...(style ? { style } : {}) };
           const data = String(button.data || button.action || button.callback_data || '').trim();
           if (!text || !data) return null;
           const encoded = Buffer.from(data, 'utf8');
@@ -187,7 +205,7 @@ export function normalizeButtonRows(buttons = []) {
             console.warn(`[telegram-outbound] callback_data too long (${encoded.length} bytes): ${data}`);
             return null;
           }
-          return { text, data };
+          return { text, data, ...(style ? { style } : {}) };
         })
         .filter(Boolean);
     })
@@ -198,15 +216,22 @@ function toTelegramInlineButton(button) {
   if (button.url) {
     return {
       text: button.text,
+      ...(button.style ? { style: button.style } : {}),
       url: button.url
     };
   }
   return {
     text: button.text,
+    ...(button.style ? { style: button.style } : {}),
     callback_data: button.data
   };
 }
 
 function countButtons(rows) {
   return rows.reduce((sum, row) => sum + row.length, 0);
+}
+
+function normalizeButtonStyle(style) {
+  const value = String(style || '').trim().toLowerCase();
+  return ['success', 'danger', 'primary'].includes(value) ? value : '';
 }

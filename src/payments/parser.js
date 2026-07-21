@@ -1,3 +1,5 @@
+import { centsToDollars, parseMoneyToCents } from '../registration/utils.js';
+
 const MONTHS = {
   jan: 1,
   feb: 2,
@@ -16,14 +18,6 @@ const MONTHS = {
 const AMOUNT_LINE = /You\s+received\s+\$(?<amount>\d+(?:\.\d+)?)\s+from\s+(?<payment_sender_name>.+?)\s*(?:\r?\n|$)/i;
 const MESSAGE_TIME_LINE = /(?<message_time>\d{1,2}:\d{2}\s+(?:AM|PM)\s+-\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4})/i;
 const RECIPIENT_LINE = /Hi\s+\$?(?<recipient_tag>[A-Za-z0-9_.-]+)/i;
-
-function parseDecimal(value) {
-  return Number.parseFloat(String(value).replace(/,/g, ''));
-}
-
-function roundAmount(value) {
-  return Math.round(value * 100) / 100;
-}
 
 export function parseMessageTime(messageTime) {
   const match = String(messageTime || '').trim().match(
@@ -77,8 +71,9 @@ export function parsePaymentMessage(rawText) {
   const timeMatch = raw_text.match(MESSAGE_TIME_LINE);
   if (!amountMatch?.groups || !timeMatch?.groups) return null;
 
-  const amount = roundAmount(parseDecimal(amountMatch.groups.amount));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const amountCents = parseMoneyToCents(amountMatch.groups.amount);
+  const amount = centsToDollars(amountCents);
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amount == null) return null;
 
   const payment_sender_name = String(amountMatch.groups.payment_sender_name || '').trim().replace(/\s+/g, ' ');
   const message_time = String(timeMatch.groups.message_time || '').trim();
@@ -92,6 +87,7 @@ export function parsePaymentMessage(rawText) {
     raw_text,
     payment_app: 'Chime',
     amount,
+    amount_cents: amountCents,
     payment_sender_name,
     message_time,
     payment_datetime: payment_datetime ? payment_datetime.toISOString() : null,

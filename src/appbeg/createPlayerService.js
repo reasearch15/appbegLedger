@@ -5,6 +5,21 @@ import { centsToDollars, parseMoneyToCents, registrationCreditCents } from '../r
 import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 
+export const POST_REGISTRATION_READY_MESSAGE = [
+  '🎉 Your Royal VIP account is ready!',
+  '',
+  'Please tap “Royal VIP” below and log in using your Royal VIP username and password.',
+  '',
+  'After logging in:',
+  '• Tap “Play” to access and recharge your games.',
+  '• Open “Vault” to view your game usernames and passwords.',
+  '• You can manage your games and cash outs directly from Royal VIP.',
+  '',
+  'To make another deposit later, tap the “Deposit” button here in Telegram and follow the payment instructions.',
+  '',
+  'Keep your Royal VIP password private.'
+].join('\n');
+
 function registrationInfoForCreate(info = {}) {
   const usernameResult = validateAppBegUsername(info.preferred_appbeg_username || info.appbeg_username);
   if (!usernameResult.ok) throw new Error(usernameResult.error);
@@ -227,15 +242,7 @@ export async function createAppBegPlayerForContact(store, {
     });
 
     try {
-      const successText = [
-        'Welcome to Royal VIP!',
-        '',
-        'Your account has been created successfully.',
-        '',
-        'Username:',
-        result.username || username
-      ].join('\n');
-      await sendTelegramText(store, contact, successText, registeredMenuButtons());
+      await sendTelegramText(store, contact, POST_REGISTRATION_READY_MESSAGE, registeredMenuButtons());
     } catch (messageError) {
       console.warn('[appbeg-create-player] success message failed:', messageError.message);
     }

@@ -1,4 +1,4 @@
-import { amountsMatch, normalizePaymentName, paymentAppsMatch, paymentNameMatchMethod, paymentNamesMatch } from './matchUtils.js';
+import { amountCents, amountsExactlyMatch, normalizePaymentName, paymentAppsMatch, paymentNameMatchMethod, paymentNamesMatch } from './matchUtils.js';
 import { PAYMENT_WINDOW_FLOW, UNMATCHED_REASON } from './constants.js';
 
 const ELIGIBLE_FLOW_TYPES = new Set([
@@ -29,6 +29,14 @@ export function isEligibleActivePaymentWindow(window, { now = new Date() } = {})
   return true;
 }
 
+function windowAmountMatchesParsed(window, parsed) {
+  if (window.expected_payment_cents != null && window.expected_payment_cents !== '') {
+    const expectedCents = Number(window.expected_payment_cents);
+    return Number.isSafeInteger(expectedCents) && expectedCents === amountCents(parsed.amount);
+  }
+  return amountsExactlyMatch(window.first_deposit_amount, parsed.amount);
+}
+
 /**
  * Shared match rule for registration and registered-deposit windows.
  * Name + amount required; payment method/app matched when both sides have a value.
@@ -36,7 +44,7 @@ export function isEligibleActivePaymentWindow(window, { now = new Date() } = {})
  */
 export function windowMatchesParsed(window, parsed, { requireMethod = false } = {}) {
   if (!paymentNameMatchMethod(window.payment_display_name, parsed.payment_sender_name)) return false;
-  if (!amountsMatch(window.first_deposit_amount, parsed.amount)) return false;
+  if (!windowAmountMatchesParsed(window, parsed)) return false;
 
   const expectedApp = window.payment_method_key || window.payment_method_name || window.expected_payment_app;
   const parsedApp = parsed.payment_app;
@@ -51,7 +59,7 @@ export function windowMatchesParsed(window, parsed, { requireMethod = false } = 
 export function windowMatchDetails(window, parsed, { requireMethod = false } = {}) {
   const nameMethod = paymentNameMatchMethod(window.payment_display_name, parsed.payment_sender_name);
   if (!nameMethod) return null;
-  if (!amountsMatch(window.first_deposit_amount, parsed.amount)) return null;
+  if (!windowAmountMatchesParsed(window, parsed)) return null;
 
   const expectedApp = window.payment_method_key || window.payment_method_name || window.expected_payment_app;
   const parsedApp = parsed.payment_app;
@@ -114,7 +122,7 @@ export function classifyUnmatchedReason({
     paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name)
   ));
   const amountHits = eligible.filter((window) => (
-    amountsMatch(window.first_deposit_amount, parsed.amount)
+    windowAmountMatchesParsed(window, parsed)
   ));
 
   if (nameHits.length && !amountHits.length) return UNMATCHED_REASON.AMOUNT_MISMATCH;

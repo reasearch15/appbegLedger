@@ -183,10 +183,10 @@ await assertStartSendsMenu({
   registration_status: 'Registered',
   appbeg_account_id: 'playeruid123456',
   appbeg_link_status: 'linked'
-}, ['Deposit', 'Royal VIP', 'My Account', 'Support'], /Welcome back/, {
+}, ['🟢 Deposit', '🔴 Royal VIP', 'My Account', 'Support'], /Welcome back/, {
   row: 0,
   column: 1,
-  text: 'Royal VIP',
+  text: '🔴 Royal VIP',
   url: 'https://royal.youplatform.org'
 });
 globalThis.appbegStore = previousAppBegStore;

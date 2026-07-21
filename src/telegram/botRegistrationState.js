@@ -294,8 +294,8 @@ export function paymentQrRetryButtons() {
 export function registeredMenuButtons() {
   return [
     [
-      { label: '💰 Deposit', action: 'menu:deposit', text: 'Deposit', data: 'menu:deposit' },
-      { label: 'Royal VIP', text: 'Royal VIP', url: 'https://royal.youplatform.org' }
+      { label: '🟢 Deposit', action: 'menu:deposit', text: '🟢 Deposit', data: 'menu:deposit', style: 'success' },
+      { label: '🔴 Royal VIP', text: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }
     ],
     [
       { label: '👤 My Account', action: 'menu:my_account', text: 'My Account', data: 'menu:my_account' },

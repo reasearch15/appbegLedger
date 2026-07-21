@@ -3,6 +3,7 @@ import { PROFILE_PHOTOS_ENABLED } from '../config/profilePhotos.js';
 import { enqueueChatbotJob } from './chatbotProcessor.js';
 import { tryEnqueueRegistrationBotJob } from './autoRegistrationBot.js';
 import { ensureBotApiPrivateContact } from './botPrivateEntry.js';
+import { EXPIRED_CALLBACK_MESSAGE, validateCallbackFreshness } from './callbackSafety.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -19,11 +20,47 @@ export function startTelegramListener({ token, store, io }) {
 
     try {
       const user = await ensureBotApiPrivateContact(store, ctx.from);
-      await ctx.answerCbQuery();
-
       const action = ctx.callbackQuery.data;
       const fresh = await store.getUserProfile(user.id);
       const callbackMessageId = ctx.callbackQuery.message?.message_id || null;
+      const freshness = await validateCallbackFreshness({
+        store,
+        user: fresh || user,
+        action,
+        callbackMessageId
+      });
+      if (!freshness.ok) {
+        await ctx.answerCbQuery(EXPIRED_CALLBACK_MESSAGE);
+        console.log(
+          `[chatbot] callback_expired contact=${user.id} action=${action || 'n/a'} ` +
+          `pressed_message_id=${freshness.pressedMessageId || 'n/a'} active_message_id=${freshness.activeMessageId || 'n/a'}`
+        );
+        if (freshness.recoverCurrentStep) {
+          const recoveryResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+            CHATBOT_ENABLED,
+            contact: fresh,
+            sentAt: ctx.callbackQuery.message?.date
+              ? new Date(ctx.callbackQuery.message.date * 1000).toISOString()
+              : null,
+            enqueueParams: {
+              contactId: user.id,
+              telegramUserId: user.telegram_id,
+              incomingTelegramMessageId: callbackMessageId,
+              jobType: 'inbound_message',
+              inputText: '',
+              action: null,
+              force_entry_menu: true
+            }
+          });
+          if (recoveryResult.enqueued) {
+            io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
+            io.emit('contacts:changed');
+          }
+        }
+        return;
+      }
+      await ctx.answerCbQuery();
+
       const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
         CHATBOT_ENABLED,
         contact: fresh,

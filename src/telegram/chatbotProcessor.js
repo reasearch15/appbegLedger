@@ -323,6 +323,20 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       console.log(`[chatbot] registration completed contact=${contact.id}`);
     }
 
+    let repliesSentBeforeCreate = false;
+    if (decision.createAppBegPlayer && decision.replies?.length) {
+      for (const reply of decision.replies) {
+        await queueBotReply({
+          store,
+          user: contact,
+          text: reply.text,
+          buttons: reply.buttons || [],
+          bot: bot || globalThis.telegramBot || null
+        });
+      }
+      repliesSentBeforeCreate = true;
+    }
+
     if (decision.createAppBegPlayer) {
       try {
         const created = await createAppBegPlayerForContact(store, {
@@ -371,14 +385,16 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     const afterState = await store.getAutomationState(contact.id);
     console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
 
-    for (const reply of decision.replies || []) {
-      await queueBotReply({
-        store,
-        user: contact,
-        text: reply.text,
-        buttons: reply.buttons || [],
-        bot: bot || globalThis.telegramBot || null
-      });
+    if (!repliesSentBeforeCreate) {
+      for (const reply of decision.replies || []) {
+        await queueBotReply({
+          store,
+          user: contact,
+          text: reply.text,
+          buttons: reply.buttons || [],
+          bot: bot || globalThis.telegramBot || null
+        });
+      }
     }
 
     if (decision.escalate) {

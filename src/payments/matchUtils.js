@@ -17,6 +17,22 @@ export function amountsMatch(expected, parsed) {
   return Math.abs(left - right) < 0.011;
 }
 
+export function amountCents(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
+  const [dollarsText, centsText = ''] = text.split('.');
+  const dollars = Number.parseInt(dollarsText, 10);
+  const cents = Number.parseInt(centsText.padEnd(2, '0'), 10);
+  if (!Number.isSafeInteger(dollars) || !Number.isInteger(cents)) return null;
+  return dollars * 100 + cents;
+}
+
+export function amountsExactlyMatch(expected, parsed) {
+  const expectedCents = amountCents(expected);
+  const parsedCents = amountCents(parsed);
+  return expectedCents != null && expectedCents === parsedCents;
+}
+
 export function paymentAppsMatch(expectedApp, parsedApp) {
   const expected = String(expectedApp || '').trim().toLowerCase();
   const parsed = String(parsedApp || '').trim().toLowerCase();

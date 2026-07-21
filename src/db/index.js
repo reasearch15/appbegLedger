@@ -3531,20 +3531,36 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       throw new Error('Payment event is not linked to the requested payment window.');
     }
 
-    const registrationCreditAmount = window.credited_deposit_cents != null
-      ? centsToDollars(Number(window.credited_deposit_cents))
-      : Number(window.credited_deposit_amount);
-    const authoritativeAmount = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
-      ? Number(registrationCreditAmount)
-      : Number(window.first_deposit_amount);
-    const requestedAmount = amount == null ? authoritativeAmount : Number(amount);
-    if (!Number.isFinite(authoritativeAmount) || authoritativeAmount <= 0) {
+    const registrationCreditCentsValue = window.credited_deposit_cents != null
+      ? Number(window.credited_deposit_cents)
+      : parseMoneyToCents(String(window.credited_deposit_amount));
+    const windowExpectedCents = window.expected_payment_cents != null
+      ? Number(window.expected_payment_cents)
+      : parseMoneyToCents(String(window.first_deposit_amount));
+    const receivedPaymentCents = window.received_payment_cents != null
+      ? Number(window.received_payment_cents)
+      : parseMoneyToCents(String(payment.parsed_amount));
+    const requestedCents = amount == null
+      ? windowExpectedCents
+      : parseMoneyToCents(String(amount));
+    const authoritativeCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+      ? registrationCreditCentsValue
+      : windowExpectedCents;
+    const authoritativeAmount = centsToDollars(authoritativeCents);
+    if (!Number.isSafeInteger(authoritativeCents) || authoritativeCents <= 0 || authoritativeAmount == null) {
       throw new Error('Matched payment window amount must be positive.');
     }
-    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+    if (!Number.isSafeInteger(requestedCents) || requestedCents <= 0) {
       throw new Error('Deposit credit amount must be positive.');
     }
-    if (Math.round(authoritativeAmount * 100) !== Math.round(requestedAmount * 100)) {
+    if (normalizedFlow === PAYMENT_WINDOW_FLOW.DEPOSIT) {
+      if (!Number.isSafeInteger(windowExpectedCents) || !Number.isSafeInteger(receivedPaymentCents)) {
+        throw new Error('Deposit payment amount could not be verified exactly.');
+      }
+      if (windowExpectedCents !== requestedCents || windowExpectedCents !== receivedPaymentCents) {
+        throw new Error('Deposit credit amount does not exactly match the entered and received payment amount.');
+      }
+    } else if (authoritativeCents !== requestedCents) {
       throw new Error('Deposit credit amount does not match the matched payment window amount.');
     }
 
