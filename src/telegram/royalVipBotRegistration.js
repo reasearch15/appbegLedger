@@ -24,6 +24,7 @@ import {
   BOT_REGISTRATION_FLOW,
   clearedBotRegistrationInfo,
   guestMenuButtons,
+  menuKindWelcomeText,
   paymentQrRetryButtons,
   referralChoiceButtons,
   registrationNavButtons,
@@ -472,11 +473,7 @@ export async function continueRoyalVipRegistration({
       replies: [{
         text: state.menu_kind === 'registered'
           ? 'Welcome back!'
-          : [
-            '👋 Welcome to Royal VIP!',
-            '',
-            'It looks like you are not registered with us yet.'
-          ].join('\n'),
+          : menuKindWelcomeText(contact, state),
         buttons: state.menu_kind === 'registered' ? registeredMenuButtons() : guestMenuButtons()
       }],
       statePatch: null,

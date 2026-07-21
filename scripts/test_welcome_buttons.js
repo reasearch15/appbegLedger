@@ -34,7 +34,7 @@ async function run() {
   const normalized = normalizeButtonRows(WELCOME_BUTTONS);
   assert.equal(normalized[0][0].data, 'menu:register');
   assert.equal(normalizeCallbackAction(normalized[0][0].data), 'bot:register');
-  assert.equal(normalized.length, 1);
+  assert.deepEqual(normalized.flat().map((button) => button.text), ['Register', 'Help', 'Contact']);
   console.log('ok welcome button normalization helpers');
 
   assert.equal(normalizeCallbackAction('register'), 'bot:register');
@@ -62,7 +62,8 @@ async function run() {
   });
   assert.equal(welcome.kind, 'welcome');
   assert.equal(Boolean(welcome.replies[0].buttons), true);
-  assert.ok(welcome.replies[0].text.includes('not registered'));
+  assert.ok(welcome.replies[0].text.includes('How registration works'));
+  assert.ok(!welcome.replies[0].text.includes('AppBeg'));
   console.log('ok decideBotReply welcome includes Bot API buttons');
 
   const started = await decideBotReply({

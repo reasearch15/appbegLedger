@@ -261,7 +261,7 @@ async function applyRegistrationDecision({ store, contact, decision, job, io, bo
       await sendBotReply({
         store,
         user: contact,
-        text: `We couldn't create your AppBeg account right now: ${error.message}\n\nPlease reply Staff and our team will help you finish registration.`,
+        text: "We couldn't create your Royal VIP account right now. Please reply Staff and our team will help you finish registration.",
         bot: bot || globalThis.telegramBot || null
       });
     }

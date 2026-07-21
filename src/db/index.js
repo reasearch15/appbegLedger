@@ -2050,7 +2050,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     for (const row of rows) {
       const info = parseJsonField(row.registration_info_json, {});
       if (normalizedAppBeg && normalizeAppBegUsername(info.preferred_appbeg_username) === normalizedAppBeg) {
-        return `AppBeg username "${appbegUsername}" is already used by ${row.display_name}.`;
+        return `Royal VIP username "${appbegUsername}" is already used by ${row.display_name}.`;
       }
       if (normalizedPayment && normalizePaymentTag(info.payment_tag) === normalizedPayment) {
         return `Payment name/tag "${paymentTag}" is already used by ${row.display_name}.`;

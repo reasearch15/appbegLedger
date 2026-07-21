@@ -250,7 +250,7 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
       intent: 'registration_progress',
       recommended_action: 'send_support_reply',
       confidence: 0.9,
-      reply_text: 'Your registration details are complete, but your AppBeg account is not fully linked yet. Please wait while staff finishes linking your account.'
+      reply_text: 'Your registration details are complete. Please wait while our team finishes linking your Royal VIP account.'
     };
   }
 
@@ -279,7 +279,7 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
         intent: 'registration_progress',
         recommended_action: 'continue_registration_flow',
         confidence: 0.9,
-        reply_text: 'We are ready for your AppBeg username. It must start with a capital letter and end with a number, for example Rajex01.'
+        reply_text: 'We are ready for your Royal VIP username. It must start with a capital letter and end with a number, for example Rajex01.'
       };
     }
     if (step === 'password') {
@@ -287,7 +287,7 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
         intent: 'registration_progress',
         recommended_action: 'continue_registration_flow',
         confidence: 0.9,
-        reply_text: 'Please send the AppBeg password you want to use. Keep it private and do not share it with anyone else.'
+        reply_text: 'Please send the Royal VIP password you want to use. Keep it private and do not share it with anyone else.'
       };
     }
     return {
@@ -303,7 +303,7 @@ function buildCoreSupportAiDecision({ messageText, contactContext }) {
       intent: 'registration_progress',
       recommended_action: 'send_support_reply',
       confidence: 0.95,
-      reply_text: 'Your details are complete. A coadmin now needs to create your AppBeg account. Please wait while staff finishes this step.'
+      reply_text: 'Your details are complete. Please wait while our team finishes creating your Royal VIP account.'
     };
   }
 
@@ -390,7 +390,7 @@ export function formatSupportAiContextBlock(contactContext, recentMessages = '')
       ? `Underlying registration phase: ${contactContext.underlying_registration_phase}`
       : null,
     `Registration status: ${contactContext.registration_status}`,
-    `AppBeg link status: ${contactContext.appbeg_link_status || 'not set'}`,
+    `Royal VIP link status: ${contactContext.appbeg_link_status || 'not set'}`,
     `Current flow: ${contactContext.current_flow || 'none'}`,
     `Current step: ${contactContext.current_step || 'none'}`,
     `Payment window: ${contactContext.payment_window_status || 'none'}`,
@@ -398,9 +398,9 @@ export function formatSupportAiContextBlock(contactContext, recentMessages = '')
     `Payment app: ${contactContext.payment_app || 'not collected'}`,
     `Payment name: ${contactContext.payment_display_name || 'not collected'}`,
     `Deposit amount: ${contactContext.deposit_amount ?? 'not collected'}`,
-    `AppBeg username: ${contactContext.appbeg_username || 'not collected'}`,
-    `AppBeg player UID: ${contactContext.appbeg_player_uid || 'not linked'}`,
-    `AppBeg player exists in database: ${contactContext.appbeg_player_exists ? 'yes' : 'no'}`,
+    `Royal VIP username: ${contactContext.appbeg_username || 'not collected'}`,
+    `Royal VIP player UID: ${contactContext.appbeg_player_uid || 'not linked'}`,
+    `Royal VIP player exists in database: ${contactContext.appbeg_player_exists ? 'yes' : 'no'}`,
     `Account creation complete: ${contactContext.account_creation_complete ? 'yes' : 'no'}`,
     `Staff takeover: ${contactContext.staff_takeover ? 'yes' : 'no'}`,
     recentMessages

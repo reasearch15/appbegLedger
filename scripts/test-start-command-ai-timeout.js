@@ -166,7 +166,7 @@ async function assertStartSendsMenu(contact, expectedButtons, expectedTextPatter
   assert.equal(store.calls.completedJobs.at(-1).status, 'completed');
 }
 
-await assertStartSendsMenu(guest, ['Register', 'Help', 'Contact'], /Welcome to Royal VIP/);
+await assertStartSendsMenu(guest, ['Register', 'Help', 'Contact'], /How registration works/);
 console.log('ok guest /start sends deterministic menu without AI');
 
 const previousAppBegStore = globalThis.appbegStore;

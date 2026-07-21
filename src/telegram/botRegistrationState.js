@@ -7,6 +7,18 @@ import { isUnregisteredStatus } from '../registration/utils.js';
 
 export const BOT_REGISTRATION_FLOW = 'bot_registration';
 
+export const CUSTOMER_REGISTRATION_HELP_TEXT = [
+  'How registration works:',
+  '',
+  '1. Register your Royal VIP account.',
+  '2. Make your first deposit when prompted.',
+  '3. Your account is created automatically after payment verification.',
+  '4. Log in and start playing instantly.',
+  '5. Deposit and cash out online anytime through the Royal VIP website.',
+  '',
+  '💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.'
+].join('\n');
+
 /** Phase 1 canonical steps (aliases map older names onto these). */
 export const PHASE1_REGISTRATION_STEPS = [
   'choose_payment_app',
@@ -390,7 +402,7 @@ export function menuKindWelcomeText(contact, state) {
     case 'registered':
       return 'Welcome back!';
     case 'suspended':
-      return 'Your AppBeg account currently requires review.';
+      return 'Your Royal VIP account currently requires review.';
     case 'pending':
       return 'Your registration is being reviewed.';
     case 'waiting_payment':
@@ -401,11 +413,7 @@ export function menuKindWelcomeText(contact, state) {
       return 'Your previous registration was not approved. You can start again when ready.';
     case 'guest':
     default:
-      return [
-        '👋 Welcome to Royal VIP!',
-        '',
-        'It looks like you are not registered with us yet.'
-      ].join('\n');
+      return CUSTOMER_REGISTRATION_HELP_TEXT;
   }
 }
 

@@ -103,8 +103,8 @@ export function formatSupportAiRegistrationPromptRules(contactContext = {}) {
     '',
     'Draft rules:',
     registered
-      ? '- Customer is a registered AppBeg player. Never offer new registration. Never ask them to create another account. Answer as an existing player (login, play, load coin, cashout, bonus, account help).'
-      : '- Customer is not registered in AppBeg. Registration guidance is allowed. Use the deterministic registration flow when relevant.',
+      ? '- Customer is a registered Royal VIP player. Never offer new registration. Never ask them to create another account. Answer as an existing player (login, play, load coin, cashout, bonus, account help).'
+      : '- Customer is not registered with Royal VIP. Registration guidance is allowed. Use the deterministic registration flow when relevant.',
     registered
       ? '- If they ask to register again, explain they already have an account and offer login or account help.'
       : '- If they want to play, guide them through registration first.'

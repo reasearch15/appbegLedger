@@ -55,9 +55,17 @@ export function chatbotWelcomeCooldownMs() {
   return Math.max(0, seconds) * 1000;
 }
 
-export const WELCOME_MESSAGE = `Hello, welcome to Royal VIP 👋
-You are not registered with us yet.
-Click Register to start.`;
+export const WELCOME_MESSAGE = [
+  'How registration works:',
+  '',
+  '1. Register your Royal VIP account.',
+  '2. Make your first deposit when prompted.',
+  '3. Your account is created automatically after payment verification.',
+  '4. Log in and start playing instantly.',
+  '5. Deposit and cash out online anytime through the Royal VIP website.',
+  '',
+  '💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.'
+].join('\n');
 
 export const WELCOME_BUTTONS = [[{ label: 'Register', action: 'flow:registration_info' }]];
 

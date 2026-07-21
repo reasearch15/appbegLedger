@@ -43,8 +43,8 @@ async function run() {
     contact,
     messageText: 'hi'
   });
-  assertIncludes(welcome.replies[0].text, 'Welcome to Royal VIP');
-  assertIncludes(welcome.replies[0].text, 'not registered');
+  assertIncludes(welcome.replies[0].text, 'How registration works');
+  assertIncludes(welcome.replies[0].text, 'fast online casino platform');
   assertEqual(Boolean(welcome.replies[0].buttons), true);
   console.log('ok welcome text copy with buttons');
 

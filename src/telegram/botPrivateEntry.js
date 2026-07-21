@@ -84,11 +84,7 @@ export async function buildStateAwareEntryMenu({
   const info = { ...(state?.registration_info || {}) };
   const throttled = !forceFull && effective.menu_kind === 'guest' && isWelcomeThrottled(state);
   const text = throttled && effective.menu_kind === 'guest'
-    ? [
-      '👋 Welcome to Royal VIP!',
-      '',
-      'It looks like you are not registered with us yet.'
-    ].join('\n')
+    ? menuKindWelcomeText(contact, effective)
     : menuKindWelcomeText(contact, effective);
 
   const keepFlow = effective.registration_active

@@ -127,8 +127,9 @@ async function run() {
     forceEntryMenu: true
   });
   assert.equal(hello.kind, 'welcome');
-  assert.match(hello.replies[0].text, /Welcome to Royal VIP/);
-  assert.match(hello.replies[0].text, /not registered/);
+  assert.match(hello.replies[0].text, /How registration works/);
+  assert.match(hello.replies[0].text, /fast online casino platform/);
+  assert.doesNotMatch(hello.replies[0].text, /AppBeg/);
   assert.equal(hello.replies[0].buttons.flat()[0].data, 'menu:register');
   assert.equal(hello.kind !== 'registration_ask_payment_name', true);
   console.log('ok first hello shows guest menu and does not start registration');
@@ -164,7 +165,8 @@ async function run() {
     messageText: '/start'
   });
   assert.equal(start.kind, 'welcome');
-  assert.match(start.replies[0].text, /Welcome to Royal VIP/);
+  assert.match(start.replies[0].text, /How registration works/);
+  assert.doesNotMatch(start.replies[0].text, /AppBeg/);
   console.log('ok /start still shows guest menu');
 
   // Registered first message

@@ -23,7 +23,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     match_type: 'exact',
     contact_status_condition: 'new',
     response_type: 'menu',
-    response_message: "Hello, welcome to Royal VIP 👋\nYou are not registered with us yet.\nClick Register to start.",
+    response_message: "How registration works:\n\n1. Register your Royal VIP account.\n2. Make your first deposit when prompted.\n3. Your account is created automatically after payment verification.\n4. Log in and start playing instantly.\n5. Deposit and cash out online anytime through the Royal VIP website.\n\n💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.",
     buttons: [[{ label: 'Register', action: 'flow:registration_info' }]],
     priority: 10
   },
@@ -43,7 +43,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     match_type: 'exact',
     contact_status_condition: 'any',
     response_type: 'start_flow',
-    response_message: "Let's collect your registration info. What AppBeg username would you prefer?",
+    response_message: "Let's collect your registration info. What Royal VIP username would you prefer?",
     flow_key: 'registration_info',
     priority: 20
   },
@@ -73,7 +73,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     match_type: 'exact',
     contact_status_condition: 'any',
     response_type: 'menu',
-    response_message: 'How can we help?',
+    response_message: "How registration works:\n\n1. Register your Royal VIP account.\n2. Make your first deposit when prompted.\n3. Your account is created automatically after payment verification.\n4. Log in and start playing instantly.\n5. Deposit and cash out online anytime through the Royal VIP website.\n\n💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.",
     buttons: [[{ label: 'Register', action: 'flow:registration_info' }], [{ label: 'Deposit', action: 'keyword:deposit' }, { label: 'Cash Out', action: 'keyword:cashout' }], [{ label: 'Contact Support', action: 'keyword:support' }]],
     priority: 40
   },

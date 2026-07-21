@@ -52,7 +52,7 @@ async function run() {
 
   assert.equal(normalizeCallbackAction('menu:register'), 'bot:register');
   assert.equal(normalizeCallbackAction('register:confirm'), 'bot:confirm');
-  assert.equal(guestMenuButtons().flat().length, 1);
+  assert.deepEqual(guestMenuButtons().flat().map((button) => button.text), ['Register', 'Help', 'Contact']);
   assert.ok(registeredMenuButtons().flat().some((b) => b.text === 'Deposit'));
   assert.ok(REVIEW_BUTTONS.flat().some((b) => b.data === 'register:confirm'));
   assert.equal(WELCOME_BUTTONS[0][0].data, 'menu:register');
@@ -91,7 +91,8 @@ async function run() {
     messageText: '/start'
   });
   assert.equal(start.kind, 'welcome');
-  assert.match(start.replies[0].text, /Welcome to Royal VIP/);
+  assert.match(start.replies[0].text, /How registration works/);
+  assert.doesNotMatch(start.replies[0].text, /AppBeg/);
 
   const register = await decideBotReply({
     store: createMockStore(),

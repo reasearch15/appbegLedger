@@ -21,7 +21,7 @@ export function validateAppBegUsername(username) {
     return { ok: false, error: 'Username is required.', help: APPBEG_USERNAME_HELP };
   }
   if (!APPBEG_USERNAME_PATTERN.test(value)) {
-    return { ok: false, error: 'That username does not meet AppBeg requirements.', help: APPBEG_USERNAME_HELP };
+    return { ok: false, error: 'That username does not meet Royal VIP requirements.', help: APPBEG_USERNAME_HELP };
   }
   return { ok: true, username: value };
 }

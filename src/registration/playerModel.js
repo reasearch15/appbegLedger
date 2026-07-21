@@ -31,7 +31,7 @@ export function computeRegistrationProgress(player, info = {}, automationState =
     },
     {
       key: 'appbeg',
-      label: 'AppBeg Username',
+      label: 'Royal VIP Username',
       done: Boolean(info.preferred_appbeg_username || player.appbeg_account_id)
     },
     {
@@ -66,7 +66,7 @@ function requireBotRegistrationState() {
         { key: 'payment_display_name', label: 'Payment name', done: Boolean(info.payment_display_name) },
         { key: 'deposit', label: 'First deposit', done: info.first_deposit_amount != null },
         { key: 'payment_confirmed', label: 'Payment verified', done: Boolean(info.payment_confirmed) },
-        { key: 'username', label: 'AppBeg username', done: Boolean(info.preferred_appbeg_username || contact?.appbeg_account_id) },
+        { key: 'username', label: 'Royal VIP username', done: Boolean(info.preferred_appbeg_username || contact?.appbeg_account_id) },
         {
           key: 'password',
           label: 'Password set',
@@ -127,7 +127,7 @@ export function computeAttentionFlags(player, context = {}) {
   const timeoutMs = registrationTimeoutHours() * 60 * 60 * 1000;
 
   if (context.duplicateAppbeg) {
-    flags.push({ type: 'duplicate_appbeg', label: 'Duplicate AppBeg username', severity: 'high' });
+    flags.push({ type: 'duplicate_appbeg', label: 'Duplicate Royal VIP username', severity: 'high' });
   }
   if (context.duplicatePayment) {
     flags.push({ type: 'duplicate_payment', label: 'Duplicate payment tag', severity: 'high' });

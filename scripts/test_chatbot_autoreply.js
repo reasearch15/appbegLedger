@@ -78,7 +78,7 @@ async function run() {
   assertEqual(first.kind, 'welcome');
   assertEqual(first.markWelcomeSent, true);
   assertEqual(Boolean(first.replies[0].buttons), true);
-  assertIncludes(first.replies[0].text, 'not registered');
+  assertIncludes(first.replies[0].text, 'How registration works');
   console.log('ok hello triggers welcome when no active flow');
 
   store.state.last_auto_welcome_at = new Date().toISOString();

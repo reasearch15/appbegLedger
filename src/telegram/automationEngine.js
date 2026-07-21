@@ -12,7 +12,7 @@ import { buildMenu } from './menuEngine.js';
 const REGISTRATION_STEPS = ['appbeg_username', 'payment_tag', 'confirm'];
 
 const STEP_PROMPTS = {
-  appbeg_username: 'What is your AppBeg username?',
+  appbeg_username: 'What Royal VIP username would you like to use?',
   payment_tag: 'What payment name/tag should we use for you?'
 };
 
@@ -387,7 +387,7 @@ function buildConfirmSummary(user, registrationInfo = {}) {
     `Username: ${username}`,
     `Telegram ID: ${registrationInfo.telegram_user_id || user.telegram_id}`,
     `Phone: ${registrationInfo.telegram_phone || user.phone_number || 'Not provided'}`,
-    `AppBeg username: ${registrationInfo.preferred_appbeg_username || 'Not set'}`,
+    `Royal VIP username: ${registrationInfo.preferred_appbeg_username || 'Not set'}`,
     `Payment name/tag: ${registrationInfo.payment_tag || 'Not set'}`
   ].join('\n');
 }
@@ -395,7 +395,7 @@ function buildConfirmSummary(user, registrationInfo = {}) {
 function confirmButtons() {
   return [
     [{ label: 'Confirm', action: 'flow:registration_confirm' }],
-    [{ label: 'Edit AppBeg Username', action: 'flow:registration_edit_appbeg' }, { label: 'Edit Payment Tag', action: 'flow:registration_edit_payment' }],
+    [{ label: 'Edit Royal VIP Username', action: 'flow:registration_edit_appbeg' }, { label: 'Edit Payment Tag', action: 'flow:registration_edit_payment' }],
     [{ label: 'Cancel', action: 'nav:cancel' }]
   ];
 }

@@ -46,7 +46,7 @@ async function run() {
   const welcome = await decideBotReply({ store: store1, contact, messageText: 'hi' });
   assertEqual(welcome.kind, 'welcome');
   assertEqual(Boolean(welcome.replies[0].buttons), true);
-  assertIncludes(welcome.replies[0].text, 'not registered');
+  assertIncludes(welcome.replies[0].text, 'How registration works');
   console.log('ok welcome text with inline buttons');
 
   const store2 = createFakeStore({ current_flow: 'bot_registration', current_step: 'welcome' });

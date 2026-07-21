@@ -1,9 +1,11 @@
+import { CUSTOMER_REGISTRATION_HELP_TEXT } from './botRegistrationState.js';
+
 const SCREENS = {
   Home: {
     title: 'Home',
     getText: ({ registered }) => registered
       ? 'Welcome back!'
-      : "👋 Welcome to Royal VIP!\n\nI see you're not registered with us.\n\nPlease choose an option.",
+      : CUSTOMER_REGISTRATION_HELP_TEXT,
     getButtons: ({ registered }) => registered
       ? [
           [{ label: 'Deposit', action: 'screen:Deposit' }, { label: 'Royal VIP', url: 'https://royal.youplatform.org' }],
@@ -16,12 +18,12 @@ const SCREENS = {
   },
   Register: {
     title: 'Register',
-    text: 'Tap Register below to start your Royal VIP registration.',
+    text: CUSTOMER_REGISTRATION_HELP_TEXT,
     buttons: [[{ label: 'Register', action: 'bot:register' }]]
   },
   Help: {
     title: 'Help',
-    text: 'Choose a topic, or contact support for direct assistance.',
+    text: CUSTOMER_REGISTRATION_HELP_TEXT,
     buttons: [
       [{ label: 'Registration Help', action: 'bot:register' }],
       [{ label: 'Contact Support', action: 'screen:Support' }]

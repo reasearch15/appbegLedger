@@ -21,6 +21,7 @@ import {
 } from '../payments/methodUtils.js';
 import {
   BOT_REGISTRATION_FLOW,
+  CUSTOMER_REGISTRATION_HELP_TEXT,
   buildPaymentMethodButtons,
   cancelConfirmButtons,
   canonicalizeRegistrationStep,
@@ -364,7 +365,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
             effective.current_step && effective.current_step !== 'welcome'
               ? `Current step: ${effective.current_step}`
               : null,
-            effective.appbeg_username ? `AppBeg username: ${effective.appbeg_username}` : null
+            effective.appbeg_username ? `Royal VIP username: ${effective.appbeg_username}` : null
           ].filter(Boolean).join('\n'),
           buttons: menuKindButtons(effective.menu_kind)
         }],
@@ -379,14 +380,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return {
       kind: 'how_it_works',
       replies: [{
-        text: [
-          'Here is how registration works:',
-          '1. Choose your payment method.',
-          '2. Enter your payment account details.',
-          '3. Complete your first deposit when prompted.',
-          '4. Choose your AppBeg username and password.',
-          '5. Review and confirm — we create your account after verification.'
-        ].join('\n'),
+        text: CUSTOMER_REGISTRATION_HELP_TEXT,
         buttons: menuKindButtons(effective.menu_kind)
       }],
       statePatch: null,
@@ -777,11 +771,7 @@ function welcomeMessage() {
 }
 
 function welcomeNudgeMessage() {
-  return [
-    '👋 Welcome to Royal VIP!',
-    '',
-    'It looks like you are not registered with us yet.'
-  ].join('\n');
+  return CUSTOMER_REGISTRATION_HELP_TEXT;
 }
 
 function paymentAppPrompt(username = null, methods = []) {

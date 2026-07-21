@@ -111,12 +111,20 @@ async function run() {
   const store = createMockStore();
   const start = await decideBotReply({ store, contact: guest, messageText: '/start' });
   assert.equal(start.kind, 'welcome');
-  assert.match(start.replies[0].text, /Welcome to Royal VIP/);
-  assert.match(start.replies[0].text, /not registered/);
+  assert.match(start.replies[0].text, /How registration works/);
+  assert.match(start.replies[0].text, /fast online casino platform/);
+  assert.doesNotMatch(start.replies[0].text, /AppBeg/);
   assert.equal(start.replies[0].buttons.length, 2);
   assert.equal(normalizeCallbackAction(start.replies[0].buttons[0][0].data), 'bot:register');
   assert.deepEqual(start.replies[0].buttons.flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
   console.log('ok /start guest welcome + Register/Help/Contact');
+
+  const help = await decideBotReply({ store, contact: guest, messageText: '', action: 'menu:how_it_works' });
+  assert.match(help.replies[0].text, /How registration works/);
+  assert.match(help.replies[0].text, /Deposit and cash out online anytime/);
+  assert.doesNotMatch(help.replies[0].text, /AppBeg/);
+  assert.deepEqual(help.replies[0].buttons.flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
+  console.log('ok Help shows customer-facing registration copy');
 
   // Register starts at payment name
   store.apply(await decideBotReply({ store, contact: guest, messageText: '', action: 'menu:register' }));
