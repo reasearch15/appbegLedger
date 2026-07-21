@@ -635,7 +635,7 @@ h2 {
 
 .payments-feed {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   min-width: 0;
 }
@@ -685,8 +685,12 @@ h2 {
 }
 
 .payment-load-more {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
   display: flex;
   justify-content: center;
+  min-width: 920px;
   padding: 10px 12px;
   border-top: 1px solid var(--line);
   background: var(--panel-soft);
@@ -2974,6 +2978,10 @@ textarea {
 
   .payment-table-header,
   .payment-row {
+    min-width: 0;
+  }
+
+  .payment-load-more {
     min-width: 0;
   }
 

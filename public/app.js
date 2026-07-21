@@ -2227,8 +2227,8 @@ function paymentsWorkspace() {
               <span>Status</span>
             </div>
             <div class="payment-table">${paymentRows()}</div>
+            ${paymentLoadMoreControl()}
           </div>
-          ${paymentLoadMoreControl()}
         </section>
 
         <div class="payment-detail-wrap">
