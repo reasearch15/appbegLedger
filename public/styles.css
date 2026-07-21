@@ -680,7 +680,6 @@ h2 {
 .payment-table-scroll {
   overflow-x: auto;
   overflow-y: auto;
-  max-height: calc(var(--app-vh, 100dvh) - 220px);
   min-height: 240px;
   min-width: 0;
 }
