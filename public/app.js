@@ -1947,13 +1947,11 @@ function paymentRows() {
 }
 
 function paymentLoadMoreControl() {
-  const disabled = state.paymentsLoadingMore || !state.paymentHasMore;
-  const label = state.paymentsLoadingMore
-    ? 'Loading...'
-    : (state.paymentHasMore ? 'Load more' : 'No more payments');
+  if (!state.paymentsLoadingMore && !state.paymentHasMore) return '';
+  const label = state.paymentsLoadingMore ? 'Loading...' : 'Load more';
   return `
     <div class="payment-load-more">
-      <button type="button" class="button secondary" data-payment-load-more ${disabled ? 'disabled' : ''}>
+      <button type="button" class="button secondary" data-payment-load-more ${state.paymentsLoadingMore ? 'disabled' : ''}>
         ${label}
       </button>
     </div>
