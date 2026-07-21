@@ -4,6 +4,7 @@ export const EXPIRED_CALLBACK_MESSAGE = 'This button has expired. Please use the
 
 const READ_ONLY_CALLBACKS = new Set([
   'staff:takeover',
+  'bot:main_menu',
   'bot:my_account',
   'bot:status',
   'bot:how_it_works'
@@ -16,6 +17,7 @@ export function hasCallbackButtons(buttons = []) {
 export function isStateChangingCallbackAction(action) {
   const normalized = normalizeCallbackAction(action);
   if (!normalized) return false;
+  if (normalized === 'bot:how_it_works' || normalized.startsWith('bot:help:')) return false;
   if (READ_ONLY_CALLBACKS.has(normalized)) return false;
   return normalized.startsWith('bot:')
     || normalized.startsWith('register:')

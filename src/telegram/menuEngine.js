@@ -1,4 +1,5 @@
 import { CUSTOMER_REGISTRATION_HELP_TEXT } from './botRegistrationState.js';
+import { HELP_HOME_TITLE, helpCenterHomeButtons } from './royalVipHelpCenter.js';
 
 const SCREENS = {
   Home: {
@@ -23,11 +24,12 @@ const SCREENS = {
   },
   Help: {
     title: 'Help',
-    text: CUSTOMER_REGISTRATION_HELP_TEXT,
-    buttons: [
-      [{ label: 'Registration Help', action: 'bot:register' }],
-      [{ label: 'Contact Support', action: 'screen:Support' }]
-    ]
+    text: [
+      HELP_HOME_TITLE,
+      '',
+      'Choose a topic below. This guide is read-only and will not change your registration, deposit, cashout, or game requests.'
+    ].join('\n'),
+    buttons: helpCenterHomeButtons()
   },
   Support: {
     title: 'Support',

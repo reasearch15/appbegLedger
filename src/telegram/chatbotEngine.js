@@ -55,6 +55,11 @@ import {
   isPlainRegisterText,
   shouldShowEntryMenu
 } from './botPrivateEntry.js';
+import {
+  buildHelpCenterDecision,
+  HELP_TOPIC_PREFIX,
+  isHelpCenterAction
+} from './royalVipHelpCenter.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
@@ -168,6 +173,7 @@ export function isChatbotButtonAction(action) {
     || value === 'cancel'
     || value === 'flow:registration_info'
     || value.startsWith('bot:payment_app:')
+    || value.startsWith(HELP_TOPIC_PREFIX)
     || value.startsWith('payment_app:');
 }
 
@@ -377,16 +383,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return await mainMenuDecision(contact, info, automationState, effective, { forceFull: true });
   }
 
-  if (action === 'bot:how_it_works') {
-    return {
-      kind: 'how_it_works',
-      replies: [{
-        text: CUSTOMER_REGISTRATION_HELP_TEXT,
-        buttons: menuKindButtons(effective.menu_kind)
-      }],
-      statePatch: null,
-      escalate: false
-    };
+  if (isHelpCenterAction(action)) {
+    return buildHelpCenterDecision(action);
   }
 
   if (action === 'bot:cancel_request') {

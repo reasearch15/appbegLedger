@@ -120,11 +120,12 @@ async function run() {
   console.log('ok /start guest welcome + Register/Help/Contact');
 
   const help = await decideBotReply({ store, contact: guest, messageText: '', action: 'menu:how_it_works' });
-  assert.match(help.replies[0].text, /How registration works/);
-  assert.match(help.replies[0].text, /Deposit and cash out online anytime/);
+  assert.match(help.replies[0].text, /Royal VIP Help Center/);
+  assert.match(help.replies[0].text, /Choose a topic/);
   assert.doesNotMatch(help.replies[0].text, /AppBeg/);
-  assert.deepEqual(help.replies[0].buttons.flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
-  console.log('ok Help shows customer-facing registration copy');
+  assert.ok(help.replies[0].buttons.flat().some((b) => b.text === '🎮 Playing Games'));
+  assert.ok(help.replies[0].buttons.flat().some((b) => b.text === '🏠 Main Menu'));
+  console.log('ok Help opens Royal VIP Help Center');
 
   // Register starts at payment name
   store.apply(await decideBotReply({ store, contact: guest, messageText: '', action: 'menu:register' }));
