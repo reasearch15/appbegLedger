@@ -138,9 +138,35 @@ export function shouldShowEntryMenu({
   const value = String(text || '').trim();
   if (!value) return true; // media / empty
   if (/^\/start(@\w+)?(\s|$)/i.test(value)) return true;
+  if (isGreetingEntryText(value)) return true;
   return false;
 }
 
 export function isPlainRegisterText(text = '') {
   return /^register$/i.test(String(text || '').trim());
+}
+
+export function isGreetingEntryText(text = '') {
+  const normalized = normalizeGreetingText(text);
+  if (!normalized) return false;
+  if (/^h+i+$/.test(normalized)) return true;
+  if (/^he+l+o+( there)?$/.test(normalized)) return true;
+  if (/^he+y+( there)?$/.test(normalized)) return true;
+  return [
+    'good morning',
+    'good afternoon',
+    'good evening',
+    'hola',
+    'namaste',
+    'start',
+    'menu'
+  ].includes(normalized);
+}
+
+function normalizeGreetingText(text = '') {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }

@@ -34,8 +34,7 @@ import {
   waitingPaymentCancelButtons
 } from './botRegistrationState.js';
 import { REGISTRATION_QR_LOAD_FAILED_MESSAGE } from '../payments/methodUtils.js';
-
-const GREETING_PATTERNS = /^(hi|hello|hey|yo|hola|howdy|sup|what'?s up|good morning|good afternoon|good evening)\b/i;
+import { isGreetingEntryText } from './botPrivateEntry.js';
 
 export const PAYMENT_NAME_PROMPT = [
   'What is your full name as it appears on your payment account?',
@@ -90,7 +89,7 @@ export const ACCOUNT_CREATE_PROGRESS = [
 export function isCasualOffTopicMessage(text = '') {
   const value = String(text || '').trim();
   if (!value) return false;
-  if (GREETING_PATTERNS.test(value)) return true;
+  if (isGreetingEntryText(value)) return true;
   if (/^(ok|okay|thanks|thank you|cool|sure|yes|no|yep|nope)$/i.test(value)) return true;
   return false;
 }

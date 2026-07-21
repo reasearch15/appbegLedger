@@ -8,6 +8,7 @@ import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 import { generateCustomerSupportReply } from './customerSupportAi.js';
 import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
+import { isGreetingEntryText } from './botPrivateEntry.js';
 
 export const SUPPORT_AI_FALLBACK_REPLY = "Sorry, I'm having trouble accessing support right now. Please try again shortly.";
 const SUPPORT_AI_TIMEOUT_MS = Number(process.env.CUSTOMER_SUPPORT_AI_TIMEOUT_MS || 15000);
@@ -22,6 +23,7 @@ export function shouldUseRegistrationBot(job, automationState = {}, contact = nu
   if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
   const text = String(job.input_text || '').trim();
   if (/^\/(start|register|status|support|cancel|deposit)(@\w+)?(\s|$)/i.test(text)) return true;
+  if (isGreetingEntryText(text)) return true;
   if (/^(staff|done|confirm|cancel|stop)$/i.test(text)) return true;
   // Empty / media updates use the shared entry menu.
   if (!text) return true;

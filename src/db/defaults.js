@@ -34,7 +34,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     contact_status_condition: 'registered',
     response_type: 'menu',
     response_message: 'Welcome back!',
-    buttons: [[{ label: '🟢 Deposit', action: 'keyword:deposit', style: 'success' }, { label: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'keyword:support' }]],
+    buttons: [[{ label: '🟢 Deposit', action: 'keyword:deposit', style: 'success' }, { label: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' }, style: 'danger' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Help', action: 'screen:Help' }, { label: 'Support', action: 'keyword:support' }]],
     priority: 11
   },
   {

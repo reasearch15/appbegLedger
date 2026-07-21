@@ -52,6 +52,7 @@ import {
 } from './registeredDepositFlow.js';
 import {
   buildStateAwareEntryMenu,
+  isGreetingEntryText,
   isPlainRegisterText,
   shouldShowEntryMenu
 } from './botPrivateEntry.js';
@@ -121,11 +122,10 @@ const SUPPORT_PATTERNS = [
 
 const AFFIRM_PATTERNS = /^(yes|y|ok|okay|confirm|correct|looks good|sure|yea|yeah|yep|approve)\b/i;
 const NEGATE_PATTERNS = /^(no|n|edit|wrong|change|fix|back)\b/i;
-const GREETING_PATTERNS = /^(hi|hello|hey|yo|hola|howdy|sup|what'?s up|good morning|good afternoon|good evening)\b/i;
 const CASUAL_OFF_TOPIC_PATTERNS = /^(thanks|thank you|thx|haha|lol|hehe|hihi|ok|okay|cool|nice|great|awesome)\b[!.?\s]*$/i;
 
 export function isGreetingMessage(text = '') {
-  return GREETING_PATTERNS.test(String(text || '').trim());
+  return isGreetingEntryText(text);
 }
 
 export function isCasualOffTopicMessage(text = '') {
@@ -304,6 +304,16 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     } else if (command.command === 'cancel') {
       action = registrationInProgress ? 'bot:cancel_request' : 'bot:stop';
     }
+  }
+
+  if (!action && isGreetingEntryText(text)) {
+    return await buildStateAwareEntryMenu({
+      store,
+      contact,
+      automationState,
+      paymentWindow,
+      forceFull: true
+    });
   }
 
   // Shared entry menu for first interaction / empty media / forced entry (same as /start).

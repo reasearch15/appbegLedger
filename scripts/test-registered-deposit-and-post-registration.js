@@ -196,9 +196,16 @@ async function run() {
   assert.doesNotMatch(sent.text, /Secret123/);
   assert.deepEqual(sent.payload.buttons.map((row) => row.map((button) => button.text)), [
     ['🟢 Deposit', '🔴 Royal VIP'],
-    ['My Account', 'Support']
+    ['My Account', 'Help', 'Support']
   ]);
-  assert.equal(sent.payload.buttons[0][1].url, 'https://royal.youplatform.org');
+  assert.equal(sent.payload.buttons[0][1].web_app.url, 'https://royal.youplatform.org');
+  assert.equal(sent.payload.buttons[0][1].url, undefined);
+  assert.equal(sent.payload.buttons[0][1].data, undefined);
+  assert.deepEqual(sent.payload.reply_markup.inline_keyboard[0][1], {
+    text: '🔴 Royal VIP',
+    style: 'danger',
+    web_app: { url: 'https://royal.youplatform.org' }
+  });
   assert.equal(sent.payload.buttons[0][0].style, 'success');
   assert.equal(sent.payload.buttons[0][1].style, 'danger');
   assert.equal((await registrationStore.getAutomationState()).registration_info.active_bot_message_id, 1);
@@ -246,6 +253,28 @@ async function run() {
   assert.equal(validAmount.sendPaymentQr.paymentDisplayName, 'Amy Fei');
   assert.equal(validAmount.sendPaymentQr.flowType, PAYMENT_WINDOW_FLOW.DEPOSIT);
   console.log('ok registered Deposit asks amount and prepares deposit QR');
+
+  const activeDepositGreetingStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_amount'
+  });
+  const activeDepositGreeting = await decideBotReply({
+    store: activeDepositGreetingStore,
+    contact: registeredContact(),
+    messageText: 'Hello!'
+  });
+  assert.equal(activeDepositGreeting.kind, 'menu_registered');
+  assert.equal(activeDepositGreeting.sendPaymentQr, undefined);
+  assert.equal(activeDepositGreeting.statePatch.currentFlow, 'registered_deposit');
+  assert.equal(activeDepositGreeting.statePatch.currentStep, 'deposit_amount');
+  assert.deepEqual(activeDepositGreeting.replies[0].buttons.flat().map((button) => button.text), [
+    '🟢 Deposit',
+    '🔴 Royal VIP',
+    'My Account',
+    'Help',
+    'Support'
+  ]);
+  console.log('ok greeting during active deposit restores menu without starting a second timer');
 
   const window = {
     id: 1,

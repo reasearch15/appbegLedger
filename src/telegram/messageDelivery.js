@@ -196,7 +196,9 @@ export function normalizeButtonRows(buttons = []) {
           if (!button || typeof button !== 'object') return null;
           const text = String(button.text || button.label || '').trim();
           const url = String(button.url || '').trim();
+          const webAppUrl = String(button.web_app?.url || button.webAppUrl || '').trim();
           const style = normalizeButtonStyle(button.style);
+          if (text && webAppUrl) return { text, web_app: { url: webAppUrl }, ...(style ? { style } : {}) };
           if (text && url) return { text, url, ...(style ? { style } : {}) };
           const data = String(button.data || button.action || button.callback_data || '').trim();
           if (!text || !data) return null;
@@ -213,6 +215,13 @@ export function normalizeButtonRows(buttons = []) {
 }
 
 function toTelegramInlineButton(button) {
+  if (button.web_app?.url) {
+    return {
+      text: button.text,
+      ...(button.style ? { style: button.style } : {}),
+      web_app: { url: button.web_app.url }
+    };
+  }
   if (button.url) {
     return {
       text: button.text,

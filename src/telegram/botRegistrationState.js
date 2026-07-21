@@ -295,10 +295,11 @@ export function registeredMenuButtons() {
   return [
     [
       { label: '🟢 Deposit', action: 'menu:deposit', text: '🟢 Deposit', data: 'menu:deposit', style: 'success' },
-      { label: '🔴 Royal VIP', text: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }
+      { label: '🔴 Royal VIP', text: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' }, style: 'danger' }
     ],
     [
       { label: '👤 My Account', action: 'menu:my_account', text: 'My Account', data: 'menu:my_account' },
+      { label: '📖 Help', action: 'bot:how_it_works', text: 'Help', data: 'bot:how_it_works' },
       { label: '💬 Support', action: 'menu:support', text: 'Support', data: 'menu:support' }
     ]
   ];

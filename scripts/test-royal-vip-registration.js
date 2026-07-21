@@ -193,8 +193,10 @@ async function run() {
     contact: { ...guest, registration_status: 'Waiting For Payment' },
     messageText: 'hello'
   });
-  assert.equal(waiting.kind, 'registration_waiting_payment');
-  console.log('ok waiting payment ignores extra questions');
+  assert.equal(waiting.kind, 'menu_waiting_payment');
+  assert.equal(waiting.statePatch, null);
+  assert.deepEqual(waiting.replies[0].buttons.flat().map((button) => button.text), ['Cancel Registration']);
+  console.log('ok waiting payment greeting shows safe recovery menu');
 
   // After payment confirmed -> username
   fresh._state().registration_info.payment_confirmed = true;
@@ -399,21 +401,23 @@ async function run() {
   assert.equal(registeredState.menu_kind, 'registered');
   assert.deepEqual(registeredMenuButtons().map((row) => row.map((b) => b.text)), [
     ['🟢 Deposit', '🔴 Royal VIP'],
-    ['My Account', 'Support']
+    ['My Account', 'Help', 'Support']
   ]);
-  assert.equal(registeredMenuButtons()[0][1].url, 'https://royal.youplatform.org');
+  assert.equal(registeredMenuButtons()[0][1].web_app.url, 'https://royal.youplatform.org');
+  assert.equal(registeredMenuButtons()[0][1].url, undefined);
   assert.equal(registeredMenuButtons()[0][1].data, undefined);
   assert.deepEqual(normalizeButtonRows(registeredMenuButtons())[0][1], {
     text: '🔴 Royal VIP',
     style: 'danger',
-    url: 'https://royal.youplatform.org'
+    web_app: { url: 'https://royal.youplatform.org' }
   });
   assert.deepEqual(buildMenu({ registered: true }).replyMarkup.inline_keyboard[0][1], {
     text: '🔴 Royal VIP',
     style: 'danger',
-    url: 'https://royal.youplatform.org'
+    web_app: { url: 'https://royal.youplatform.org' }
   });
-  console.log('ok registered menu has Deposit/Royal VIP/My Account/Support');
+  assert.equal(buildMenu({ registered: true }).replyMarkup.inline_keyboard[0][1].callback_data, undefined);
+  console.log('ok registered menu has Deposit/Royal VIP/My Account/Help/Support');
 
   // Guest menu: Register + Help/Contact
   assert.deepEqual(guestMenuButtons().flat().map((b) => b.text), ['Register', 'Help', 'Contact']);

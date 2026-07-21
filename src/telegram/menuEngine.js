@@ -9,8 +9,8 @@ const SCREENS = {
       : CUSTOMER_REGISTRATION_HELP_TEXT,
     getButtons: ({ registered }) => registered
       ? [
-          [{ label: '🟢 Deposit', action: 'screen:Deposit', style: 'success' }, { label: '🔴 Royal VIP', url: 'https://royal.youplatform.org', style: 'danger' }],
-          [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'screen:Support' }]
+          [{ label: '🟢 Deposit', action: 'screen:Deposit', style: 'success' }, { label: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' }, style: 'danger' }],
+          [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Help', action: 'screen:Help' }, { label: 'Support', action: 'screen:Support' }]
         ]
       : [
           [{ label: 'Register', action: 'bot:register' }],
@@ -78,11 +78,19 @@ export function buildMenu({ screenName = 'Home', registered = false }) {
     title: screen.title,
     text,
     replyMarkup: {
-      inline_keyboard: [...rows, ...controlRows].map((row) => row.map((button) => ({
-        text: button.label,
-        ...(button.style ? { style: button.style } : {}),
-        ...(button.url ? { url: button.url } : { callback_data: button.action })
-      })))
+      inline_keyboard: [...rows, ...controlRows].map((row) => row.map((button) => {
+        const base = {
+          text: button.label,
+          ...(button.style ? { style: button.style } : {})
+        };
+        if (button.web_app?.url) {
+          return { ...base, web_app: { url: button.web_app.url } };
+        }
+        if (button.url) {
+          return { ...base, url: button.url };
+        }
+        return { ...base, callback_data: button.action };
+      }))
     }
   };
 }

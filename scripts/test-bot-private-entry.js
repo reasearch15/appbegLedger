@@ -4,6 +4,7 @@ import { shouldUseRegistrationBot } from '../src/telegram/chatbotProcessor.js';
 import {
   ensureBotApiPrivateContact,
   buildStateAwareEntryMenu,
+  isGreetingEntryText,
   shouldShowEntryMenu
 } from '../src/telegram/botPrivateEntry.js';
 
@@ -87,6 +88,14 @@ async function run() {
   assert.equal(shouldShowEntryMenu({ text: '/start', forceEntryMenu: false, registrationInProgress: false }), true);
   assert.equal(shouldShowEntryMenu({ text: 'hello', forceEntryMenu: true, registrationInProgress: false }), true);
   assert.equal(shouldShowEntryMenu({ text: 'John Smith', forceEntryMenu: false, registrationInProgress: true }), false);
+  assert.equal(isGreetingEntryText('hi'), true);
+  assert.equal(isGreetingEntryText('Hello!'), true);
+  assert.equal(isGreetingEntryText('hiii 👋'), true);
+  assert.equal(isGreetingEntryText('  GOOD MORNING!!!  '), true);
+  assert.equal(isGreetingEntryText('namaste'), true);
+  assert.equal(isGreetingEntryText('menu'), true);
+  assert.equal(isGreetingEntryText('This payment did not start'), false);
+  assert.equal(isGreetingEntryText('I need support'), false);
 
   const store = createStore();
   const contact = await ensureBotApiPrivateContact(store, {
@@ -134,6 +143,29 @@ async function run() {
   assert.equal(hello.kind !== 'registration_ask_payment_name', true);
   console.log('ok first hello shows guest menu and does not start registration');
 
+  const hiii = await decideBotReply({
+    store: createStore({
+      contact: {
+        id: 9,
+        telegram_id: 99,
+        display_name: 'Alex',
+        registration_status: 'New',
+        telegram_sync_source: 'bot_api'
+      }
+    }),
+    contact: {
+      id: 9,
+      telegram_id: 99,
+      display_name: 'Alex',
+      registration_status: 'New',
+      telegram_sync_source: 'bot_api'
+    },
+    messageText: 'hiii 👋'
+  });
+  assert.equal(hiii.kind, 'welcome');
+  assert.match(hiii.replies[0].text, /How registration works/);
+  console.log('ok repeated-letter greeting behaves like /start');
+
   // Plain register shows menu, does not start
   const plainRegister = await decideBotReply({
     store: createStore({
@@ -169,6 +201,53 @@ async function run() {
   assert.doesNotMatch(start.replies[0].text, /AppBeg/);
   console.log('ok /start still shows guest menu');
 
+  const previousAppBegStore = globalThis.appbegStore;
+  globalThis.appbegStore = {
+    configured: true,
+    async getPlayerByUid() {
+      return { uid: 'playeruid123456', status: 'active', username: 'AmyVip01' };
+    }
+  };
+  const registeredHello = await decideBotReply({
+    store: createStore({
+      contact: {
+        id: 10,
+        telegram_id: 1010,
+        display_name: 'Amy',
+        registration_status: 'Registered',
+        appbeg_account_id: 'playeruid123456',
+        appbeg_link_status: 'linked',
+        active_messaging_source: 'bot_api'
+      },
+      automation: {
+        registration_info: {
+          appbeg_player_uid: 'playeruid123456',
+          appbeg_creation_complete: true
+        }
+      }
+    }),
+    contact: {
+      id: 10,
+      telegram_id: 1010,
+      display_name: 'Amy',
+      registration_status: 'Registered',
+      appbeg_account_id: 'playeruid123456',
+      appbeg_link_status: 'linked',
+      active_messaging_source: 'bot_api'
+    },
+    messageText: 'Hello!'
+  });
+  assert.equal(registeredHello.kind, 'menu_registered');
+  assert.deepEqual(registeredHello.replies[0].buttons.flat().map((button) => button.text), [
+    '🟢 Deposit',
+    '🔴 Royal VIP',
+    'My Account',
+    'Help',
+    'Support'
+  ]);
+  globalThis.appbegStore = previousAppBegStore;
+  console.log('ok registered greeting shows registered menu');
+
   // Registered first message
   const registeredMenu = await buildStateAwareEntryMenu({
     store: createStore(),
@@ -201,7 +280,7 @@ async function run() {
       {},
       { registration_status: 'Registered' }
     ),
-    false
+    true
   );
   assert.equal(
     shouldUseRegistrationBot(
@@ -230,6 +309,51 @@ async function run() {
   assert.equal(active.kind, 'registration_ask_first_deposit_amount');
   assert.equal(active.kind !== 'welcome', true);
   console.log('ok active registration ignores entry menu and advances step');
+
+  const activeGreetingStore = createStore({
+    automation: {
+      current_flow: 'bot_registration',
+      current_step: 'payment_name',
+      registration_info: {
+        payment_display_name: 'Already Saved'
+      }
+    },
+    contact: { id: 11, telegram_id: 1111, display_name: 'Alex', registration_status: 'Collecting Info' }
+  });
+  const activeGreeting = await decideBotReply({
+    store: activeGreetingStore,
+    contact: { id: 11, telegram_id: 1111, display_name: 'Alex', registration_status: 'Collecting Info' },
+    messageText: 'hey there'
+  });
+  assert.equal(activeGreeting.kind, 'menu_in_progress');
+  assert.equal(activeGreeting.statePatch, null);
+  assert.deepEqual(activeGreeting.replies[0].buttons.flat().map((button) => button.text), [
+    'Continue Registration',
+    'Restart Registration',
+    'Cancel Registration'
+  ]);
+  assert.equal((await activeGreetingStore.ensureAutomationState(11)).registration_info.payment_display_name, 'Already Saved');
+  console.log('ok greeting during registration resumes safely without clearing collected info');
+
+  const sentenceWithStart = await decideBotReply({
+    store: createStore({
+      contact: { id: 12, telegram_id: 1212, display_name: 'Amy', registration_status: 'Registered' }
+    }),
+    contact: { id: 12, telegram_id: 1212, display_name: 'Amy', registration_status: 'Registered' },
+    messageText: 'This payment did not start'
+  });
+  assert.notEqual(sentenceWithStart.kind, 'menu_registered');
+  console.log('ok sentence containing start is not treated as /start');
+
+  const supportMessage = await decideBotReply({
+    store: createStore({
+      contact: { id: 13, telegram_id: 1313, display_name: 'Amy', registration_status: 'Registered' }
+    }),
+    contact: { id: 13, telegram_id: 1313, display_name: 'Amy', registration_status: 'Registered' },
+    messageText: 'I need support'
+  });
+  assert.notEqual(supportMessage.kind, 'menu_registered');
+  console.log('ok support messages are not swallowed by greeting matching');
 
   // Media / empty first update
   const media = await decideBotReply({

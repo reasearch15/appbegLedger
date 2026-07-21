@@ -137,7 +137,7 @@ const guest = {
   active_messaging_source: 'bot_api'
 };
 
-async function assertStartSendsMenu(contact, expectedButtons, expectedTextPattern, expectedUrlButton = null) {
+async function assertStartSendsMenu(contact, expectedButtons, expectedTextPattern, expectedNavigationButton = null) {
   const store = createProcessorStore(contact);
   let aiCalled = false;
   const result = await processBotJob(store, startJob(contact), {
@@ -156,10 +156,15 @@ async function assertStartSendsMenu(contact, expectedButtons, expectedTextPatter
     store.calls.outbound[0].payload.buttons.flat().map((button) => button.text),
     expectedButtons
   );
-  if (expectedUrlButton) {
-    const button = store.calls.outbound[0].payload.buttons[expectedUrlButton.row][expectedUrlButton.column];
-    assert.equal(button.text, expectedUrlButton.text);
-    assert.equal(button.url, expectedUrlButton.url);
+  if (expectedNavigationButton) {
+    const button = store.calls.outbound[0].payload.buttons[expectedNavigationButton.row][expectedNavigationButton.column];
+    assert.equal(button.text, expectedNavigationButton.text);
+    if (expectedNavigationButton.web_app) {
+      assert.deepEqual(button.web_app, expectedNavigationButton.web_app);
+      assert.equal(button.url, undefined);
+    } else {
+      assert.equal(button.url, expectedNavigationButton.url);
+    }
     assert.equal(button.data, undefined);
   }
   assert.equal(store.calls.staffReview.length, 0);
@@ -183,11 +188,11 @@ await assertStartSendsMenu({
   registration_status: 'Registered',
   appbeg_account_id: 'playeruid123456',
   appbeg_link_status: 'linked'
-}, ['🟢 Deposit', '🔴 Royal VIP', 'My Account', 'Support'], /Welcome back/, {
+}, ['🟢 Deposit', '🔴 Royal VIP', 'My Account', 'Help', 'Support'], /Welcome back/, {
   row: 0,
   column: 1,
   text: '🔴 Royal VIP',
-  url: 'https://royal.youplatform.org'
+  web_app: { url: 'https://royal.youplatform.org' }
 });
 globalThis.appbegStore = previousAppBegStore;
 console.log('ok registered /start sends deterministic menu without AI');

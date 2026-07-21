@@ -120,7 +120,7 @@ async function run() {
     user,
     bot,
     messageId: 201,
-    buttons: [[{ text: '🟢 Deposit', data: 'menu:deposit' }, { text: '🔴 Royal VIP', url: 'https://royal.youplatform.org' }]]
+    buttons: [[{ text: '🟢 Deposit', data: 'menu:deposit' }, { text: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' } }]]
   });
   assert.equal(nextState.registration_info.active_bot_message_id, 201);
   assert.equal(nextState.registration_info.active_bot_message_version, 5);
@@ -132,17 +132,17 @@ async function run() {
   }]);
   console.log('ok new callback menu records active message and disables previous keyboard');
 
-  const beforeUrlOnly = nextState.registration_info.active_bot_message_id;
-  const afterUrlOnly = await recordActiveBotMessage({
+  const beforeWebAppOnly = nextState.registration_info.active_bot_message_id;
+  const afterWebAppOnly = await recordActiveBotMessage({
     store: recordStore,
     user,
     bot,
     messageId: 202,
-    buttons: [[{ text: '🔴 Royal VIP', url: 'https://royal.youplatform.org' }]]
+    buttons: [[{ text: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' } }]]
   });
-  assert.equal(afterUrlOnly, null);
-  assert.equal((await recordStore.getAutomationState()).registration_info.active_bot_message_id, beforeUrlOnly);
-  console.log('ok URL-only buttons do not replace active callback controls');
+  assert.equal(afterWebAppOnly, null);
+  assert.equal((await recordStore.getAutomationState()).registration_info.active_bot_message_id, beforeWebAppOnly);
+  console.log('ok Web App-only buttons do not replace active callback controls');
 
   console.log('All callback-safety focused checks passed.');
 }
