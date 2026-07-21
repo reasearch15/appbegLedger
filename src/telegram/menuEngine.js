@@ -6,7 +6,7 @@ const SCREENS = {
       : "👋 Welcome to Royal VIP!\n\nI see you're not registered with us.\n\nPlease choose an option.",
     getButtons: ({ registered }) => registered
       ? [
-          [{ label: 'Deposit', action: 'screen:Deposit' }, { label: 'Cash Out', action: 'screen:Cashout' }],
+          [{ label: 'Deposit', action: 'screen:Deposit' }, { label: 'Royal VIP', url: 'https://royal.youplatform.org' }],
           [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'screen:Support' }]
         ]
       : [
@@ -76,7 +76,7 @@ export function buildMenu({ screenName = 'Home', registered = false }) {
     replyMarkup: {
       inline_keyboard: [...rows, ...controlRows].map((row) => row.map((button) => ({
         text: button.label,
-        callback_data: button.action
+        ...(button.url ? { url: button.url } : { callback_data: button.action })
       })))
     }
   };

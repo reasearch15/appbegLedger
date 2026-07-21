@@ -6,10 +6,7 @@ export function createBotReplySender(bot, store) {
     const normalizedButtons = normalizeButtonRows(buttons);
     const replyMarkup = normalizedButtons.length
       ? {
-        inline_keyboard: normalizedButtons.map((row) => row.map((button) => ({
-          text: button.text,
-          callback_data: button.data
-        })))
+        inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton))
       }
       : undefined;
 
@@ -68,10 +65,7 @@ export function createBotPhotoSender(bot, store) {
     const normalizedButtons = normalizeButtonRows(buttons);
     const replyMarkup = normalizedButtons.length
       ? {
-        inline_keyboard: normalizedButtons.map((row) => row.map((button) => ({
-          text: button.text,
-          callback_data: button.data
-        })))
+        inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton))
       }
       : undefined;
 
@@ -184,6 +178,8 @@ export function normalizeButtonRows(buttons = []) {
         .map((button) => {
           if (!button || typeof button !== 'object') return null;
           const text = String(button.text || button.label || '').trim();
+          const url = String(button.url || '').trim();
+          if (text && url) return { text, url };
           const data = String(button.data || button.action || button.callback_data || '').trim();
           if (!text || !data) return null;
           const encoded = Buffer.from(data, 'utf8');
@@ -196,6 +192,19 @@ export function normalizeButtonRows(buttons = []) {
         .filter(Boolean);
     })
     .filter((row) => row.length);
+}
+
+function toTelegramInlineButton(button) {
+  if (button.url) {
+    return {
+      text: button.text,
+      url: button.url
+    };
+  }
+  return {
+    text: button.text,
+    callback_data: button.data
+  };
 }
 
 function countButtons(rows) {

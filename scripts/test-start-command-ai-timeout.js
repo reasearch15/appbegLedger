@@ -137,7 +137,7 @@ const guest = {
   active_messaging_source: 'bot_api'
 };
 
-async function assertStartSendsMenu(contact, expectedButtons, expectedTextPattern) {
+async function assertStartSendsMenu(contact, expectedButtons, expectedTextPattern, expectedUrlButton = null) {
   const store = createProcessorStore(contact);
   let aiCalled = false;
   const result = await processBotJob(store, startJob(contact), {
@@ -156,6 +156,12 @@ async function assertStartSendsMenu(contact, expectedButtons, expectedTextPatter
     store.calls.outbound[0].payload.buttons.flat().map((button) => button.text),
     expectedButtons
   );
+  if (expectedUrlButton) {
+    const button = store.calls.outbound[0].payload.buttons[expectedUrlButton.row][expectedUrlButton.column];
+    assert.equal(button.text, expectedUrlButton.text);
+    assert.equal(button.url, expectedUrlButton.url);
+    assert.equal(button.data, undefined);
+  }
   assert.equal(store.calls.staffReview.length, 0);
   assert.equal(store.calls.completedJobs.at(-1).status, 'completed');
 }
@@ -177,7 +183,12 @@ await assertStartSendsMenu({
   registration_status: 'Registered',
   appbeg_account_id: 'playeruid123456',
   appbeg_link_status: 'linked'
-}, ['Deposit', 'Cash Out', 'My Account', 'Support'], /Welcome back/);
+}, ['Deposit', 'Royal VIP', 'My Account', 'Support'], /Welcome back/, {
+  row: 0,
+  column: 1,
+  text: 'Royal VIP',
+  url: 'https://royal.youplatform.org'
+});
 globalThis.appbegStore = previousAppBegStore;
 console.log('ok registered /start sends deterministic menu without AI');
 

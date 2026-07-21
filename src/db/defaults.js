@@ -34,7 +34,7 @@ export const DEFAULT_AUTOMATION_RULES = [
     contact_status_condition: 'registered',
     response_type: 'menu',
     response_message: 'Welcome back!',
-    buttons: [[{ label: 'Deposit', action: 'keyword:deposit' }, { label: 'Cash Out', action: 'keyword:cashout' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'keyword:support' }]],
+    buttons: [[{ label: 'Deposit', action: 'keyword:deposit' }, { label: 'Royal VIP', url: 'https://royal.youplatform.org' }], [{ label: 'My Account', action: 'screen:MyAccount' }, { label: 'Support', action: 'keyword:support' }]],
     priority: 11
   },
   {

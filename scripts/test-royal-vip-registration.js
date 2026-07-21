@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { decideBotReply, normalizeCallbackAction } from '../src/telegram/chatbotEngine.js';
+import { buildMenu } from '../src/telegram/menuEngine.js';
+import { normalizeButtonRows } from '../src/telegram/messageDelivery.js';
 import {
   resolveEffectiveRegistrationState,
   guestMenuButtons,
@@ -386,8 +388,21 @@ async function run() {
   });
   assert.equal(registeredState.effective_status, 'Registered');
   assert.equal(registeredState.menu_kind, 'registered');
-  assert.deepEqual(registeredMenuButtons()[0].map((b) => b.text), ['Deposit', 'Cash Out']);
-  console.log('ok registered menu has Deposit/Cash Out/My Account/Support');
+  assert.deepEqual(registeredMenuButtons().map((row) => row.map((b) => b.text)), [
+    ['Deposit', 'Royal VIP'],
+    ['My Account', 'Support']
+  ]);
+  assert.equal(registeredMenuButtons()[0][1].url, 'https://royal.youplatform.org');
+  assert.equal(registeredMenuButtons()[0][1].data, undefined);
+  assert.deepEqual(normalizeButtonRows(registeredMenuButtons())[0][1], {
+    text: 'Royal VIP',
+    url: 'https://royal.youplatform.org'
+  });
+  assert.deepEqual(buildMenu({ registered: true }).replyMarkup.inline_keyboard[0][1], {
+    text: 'Royal VIP',
+    url: 'https://royal.youplatform.org'
+  });
+  console.log('ok registered menu has Deposit/Royal VIP/My Account/Support');
 
   // Guest menu: Register + Help/Contact
   assert.deepEqual(guestMenuButtons().flat().map((b) => b.text), ['Register', 'Help', 'Contact']);
