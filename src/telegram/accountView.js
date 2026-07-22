@@ -135,14 +135,14 @@ export function accountViewSnapshotPatch(info = {}, { token, messageId, hidden =
   };
 }
 
-export function royalVipCredentialSnapshot({ info = {}, username, password, playerUid = null } = {}) {
+export function royalVipCredentialSnapshot({ info = {}, username, password, playerUid = null, telegramUserId = null } = {}) {
   return {
     ...info,
     royal_vip_credentials: {
       username: sanitizeCredentialText(username),
       password: sanitizeCredentialText(password),
       player_uid: playerUid || info.appbeg_player_uid || null,
-      telegram_user_id: info.telegram_user_id || null,
+      telegram_user_id: telegramUserId || info.telegram_user_id || null,
       saved_at: new Date().toISOString()
     }
   };

@@ -2123,7 +2123,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       appbeg_creation_complete: true,
       ready_to_create_player: false
     };
-    delete mergedInfo.appbeg_password;
+    mergedInfo.appbeg_password = undefined;
     mergedInfo.appbeg_password_redacted_at = nowIso();
     await updateRegistrationInfo(userId, mergedInfo, actorName);
     await db.prepare(`

@@ -176,7 +176,8 @@ export async function createAppBegPlayerForContact(store, {
       },
       username: result.username || username,
       password,
-      playerUid: result.playerUid
+      playerUid: result.playerUid,
+      telegramUserId: contact.telegram_id
     });
 
     if (typeof store.creditRegisteredDeposit !== 'function') {

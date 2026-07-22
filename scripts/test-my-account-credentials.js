@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createAppBegPlayerForContact } from '../src/appbeg/createPlayerService.js';
+import { createDataStore } from '../src/db/index.js';
+import { PAYMENT_WINDOW_FLOW } from '../src/payments/constants.js';
 import { decideBotReply } from '../src/telegram/chatbotEngine.js';
 import { processBotJob } from '../src/telegram/chatbotProcessor.js';
 import { resolveRoyalVipCredentials } from '../src/telegram/accountView.js';
@@ -83,6 +89,10 @@ function createStore({ initialState = {}, contactOverride = {}, botSettings = { 
 
 async function run() {
   const previousAppbegStore = globalThis.appbegStore;
+  const previousFetch = globalThis.fetch;
+  const previousBot = globalThis.telegramBot;
+  const previousApiUrl = process.env.APPBEG_API_URL;
+  const previousToken = process.env.APPBEG_LEDGER_INTERNAL_TOKEN;
   globalThis.appbegStore = {
     configured: true,
     async getPlayerByUid(uid) {
@@ -256,8 +266,126 @@ async function run() {
   assert.equal(back.statePatch.currentStep, 'deposit_amount');
   console.log('ok Back restores active deposit step without resetting state');
 
+  await testCredentialSnapshotPersistsInRealStore();
+
   globalThis.appbegStore = previousAppbegStore;
+  globalThis.fetch = previousFetch;
+  globalThis.telegramBot = previousBot;
+  if (previousApiUrl == null) delete process.env.APPBEG_API_URL;
+  else process.env.APPBEG_API_URL = previousApiUrl;
+  if (previousToken == null) delete process.env.APPBEG_LEDGER_INTERNAL_TOKEN;
+  else process.env.APPBEG_LEDGER_INTERNAL_TOKEN = previousToken;
   console.log('All My Account credential focused checks passed.');
+}
+
+async function testCredentialSnapshotPersistsInRealStore() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'royal-vip-account-'));
+  const store = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dir, 'test.sqlite') });
+  const previousFetch = globalThis.fetch;
+  const previousBot = globalThis.telegramBot;
+  const previousApiUrl = process.env.APPBEG_API_URL;
+  const previousToken = process.env.APPBEG_LEDGER_INTERNAL_TOKEN;
+  try {
+    process.env.APPBEG_API_URL = 'https://appbeg.test';
+    process.env.APPBEG_LEDGER_INTERNAL_TOKEN = 'token';
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      async text() {
+        if (String(url).endsWith('/api/internal/ledger/create-player')) {
+          return JSON.stringify({ ok: true, playerUid: 'playeruid123456', username: 'PersistVip01' });
+        }
+        return JSON.stringify({ status: 'credited', amount: 11 });
+      }
+    });
+    globalThis.telegramBot = {
+      telegram: {
+        async sendMessage(_chatId, _text, options = {}) {
+          return { message_id: 9001, reply_markup: options.reply_markup || null };
+        }
+      }
+    };
+
+    const savedContact = await store.upsertTelegramUser({
+      id: 91001,
+      first_name: 'Persist',
+      last_name: 'Check',
+      username: 'persist_check',
+      is_bot: false
+    });
+    const window = await store.createRegistrationPaymentWindow({
+      contactId: savedContact.id,
+      telegramUserId: savedContact.telegram_id,
+      paymentMethodId: null,
+      paymentDisplayName: 'Persist Check',
+      firstDepositAmount: 10.37,
+      creditedDepositAmount: 11,
+      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
+      windowMinutes: 7
+    });
+    const now = new Date().toISOString();
+    const paymentResult = await store.db.prepare(`
+      INSERT INTO payment_events (
+        telegram_message_id, telegram_group_id, sender_name, message_text, raw_payload_json,
+        processing_status, parsed_amount, parsed_sender_name, parsed_payment_app,
+        routing_status, contact_id, registration_payment_window_id, message_date, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, 'Parsed', ?, ?, ?, 'registration_payment_matched', ?, ?, ?, ?, ?)
+    `).run(
+      9100101,
+      -1001,
+      'Persist Check',
+      'You received $10.37 from Persist Check',
+      '{}',
+      10.37,
+      'Persist Check',
+      'Chime',
+      savedContact.id,
+      window.id,
+      now,
+      now,
+      now
+    );
+    const paymentId = Number(paymentResult.lastInsertRowid);
+    const claim = await store.claimPaymentWindowMatch(window.id, paymentId);
+    assert.equal(claim.ok, true);
+    await store.updateAutomationState(savedContact.id, {
+      currentFlow: 'bot_registration',
+      currentStep: 'creating_account',
+      registrationInfo: {
+        payment_confirmed: true,
+        preferred_appbeg_username: 'PersistVip01',
+        appbeg_password: 'PersistSecret1',
+        registration_payment_window_id: window.id,
+        payment_display_name: 'Persist Check',
+        first_deposit_amount: 10.37,
+        appbeg_coadmin_uid: 'coadmin_1',
+        telegram_user_id: savedContact.telegram_id
+      }
+    });
+
+    await createAppBegPlayerForContact(store, { contactId: savedContact.id, actorName: 'Test' });
+    const state = await store.getAutomationState(savedContact.id);
+    assert.equal(state.registration_info.appbeg_password, undefined);
+    assert.equal(state.registration_info.royal_vip_credentials.username, 'PersistVip01');
+    assert.equal(state.registration_info.royal_vip_credentials.password, 'PersistSecret1');
+    assert.equal(String(state.registration_info.royal_vip_credentials.telegram_user_id), String(savedContact.telegram_id));
+    const freshContact = await store.getUserProfile(savedContact.id);
+    const credentials = resolveRoyalVipCredentials({ contact: freshContact, info: state.registration_info });
+    assert.equal(credentials.ok, true);
+    assert.equal(credentials.username, 'PersistVip01');
+    assert.equal(credentials.password, 'PersistSecret1');
+    console.log('ok successful create persists credentials where My Account reads them');
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.telegramBot = previousBot;
+    if (previousApiUrl == null) delete process.env.APPBEG_API_URL;
+    else process.env.APPBEG_API_URL = previousApiUrl;
+    if (previousToken == null) delete process.env.APPBEG_LEDGER_INTERNAL_TOKEN;
+    else process.env.APPBEG_LEDGER_INTERNAL_TOKEN = previousToken;
+    store.db?.close?.();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 }
 
 run().catch((error) => {
