@@ -115,11 +115,29 @@ async function run() {
     contact: registeredContact(),
     action: `${HELP_TOPIC_PREFIX}deposits`
   });
-  assert.match(deposits.replies[0].text, /Tap Deposit/);
-  assert.match(deposits.replies[0].text, /exact amount/);
-  assert.match(deposits.replies[0].text, /payment reference image/);
-  assert.match(deposits.replies[0].text, /Royal VIP username/);
+  assert.match(deposits.replies[0].text, /Loading coins is now handled through the Royal VIP Telegram bot/);
+  assert.match(deposits.replies[0].text, /Tap \*\*Deposit\*\* from the bot's main menu/);
+  assert.match(deposits.replies[0].text, /Royal VIP balance will be updated automatically/);
+  assert.doesNotMatch(deposits.replies[0].text, /Load Coin|Load coin/i);
+  assert.doesNotMatch(deposits.replies[0].text, /payment reference/i);
+  assert.doesNotMatch(deposits.replies[0].text, /payment note|remark/i);
+  assert.doesNotMatch(deposits.replies[0].text, /10-minute/i);
+  assert.doesNotMatch(deposits.replies[0].text, /staff.*match/i);
   assert.doesNotMatch(deposits.replies[0].text, /16-digit code/);
+
+  const previousBot = globalThis.telegramBot;
+  globalThis.telegramBot = { botInfo: { username: 'ConfiguredRoyalVipBot' } };
+  const depositsWithBotLink = await decideBotReply({
+    store: createStore(),
+    contact: registeredContact(),
+    action: `${HELP_TOPIC_PREFIX}deposits`
+  });
+  const openBotButton = depositsWithBotLink.replies[0].buttons.flat()
+    .find((button) => button.text === '🚀 Open Royal VIP Bot');
+  assert.equal(openBotButton.url, 'https://t.me/ConfiguredRoyalVipBot');
+  assert.ok(depositsWithBotLink.replies[0].buttons.flat().some((button) => button.data === HELP_HOME_ACTION));
+  assert.ok(depositsWithBotLink.replies[0].buttons.flat().some((button) => button.data === 'bot:main_menu'));
+  globalThis.telegramBot = previousBot;
 
   const cashouts = await decideBotReply({
     store: createStore(),

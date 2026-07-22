@@ -4,6 +4,19 @@ export const HELP_HOME_TITLE = '📖 Royal VIP Help Center';
 
 const ROYAL_VIP_URL = 'https://royal.youplatform.org';
 
+function configuredRoyalVipBotUrl(env = process.env) {
+  const explicitUrl = String(env.ROYAL_VIP_TELEGRAM_BOT_URL || env.TELEGRAM_BOT_URL || '').trim();
+  if (explicitUrl) return explicitUrl;
+
+  const username = String(
+    env.TELEGRAM_BOT_USERNAME
+    || globalThis.telegramBot?.botInfo?.username
+    || globalThis.telegramBot?.telegram?.botInfo?.username
+    || ''
+  ).trim().replace(/^@+/, '');
+  return username ? `https://t.me/${username}` : '';
+}
+
 const HELP_TOPICS = [
   {
     key: 'getting_started',
@@ -44,16 +57,20 @@ const HELP_TOPICS = [
     label: '💰 Deposits',
     title: '💰 Deposits',
     text: [
-      'The fastest deposit path starts here in Telegram:',
+      'Loading coins is now handled through the Royal VIP Telegram bot.',
       '',
-      '1. Tap Deposit.',
-      '2. Enter the exact amount.',
-      '3. Pay using the shown payment instructions.',
-      '4. The system verifies the payment by saved payment name, exact amount, and active deposit window.',
-      '5. A matched payment is loaded into your Royal VIP account.',
+      'How to deposit:',
       '',
-      'Royal VIP also has Load coin in the Lobby. Load coin shows a payment reference image and your Royal VIP username for a 10-minute session. If you use Load coin, copy your Royal VIP username and paste it in the payment note/remark so staff can match it.'
-    ].join('\n')
+      "1. Tap **Deposit** from the bot's main menu.",
+      '2. Enter the exact amount you want to deposit.',
+      '3. Complete the payment using the instructions provided.',
+      '4. Once your payment is verified, your Royal VIP balance will be updated automatically.',
+      '',
+      'Need to deposit while using Royal VIP?',
+      '',
+      'Tap **Open Royal VIP Bot** below to start your deposit.'
+    ].join('\n'),
+    includeRoyalVipBotButton: true
   },
   {
     key: 'cashouts',
@@ -116,7 +133,7 @@ const HELP_TOPICS = [
       '',
       'Available account tools include:',
       '• Transfer Cash → Coin when you have cash balance.',
-      '• Load coin payment reference.',
+      '• Deposits through the Royal VIP Telegram bot.',
       '• Cashout from cash balance.',
       '• Agents chat for account help.',
       '• Logout from the player menu.',
@@ -133,7 +150,7 @@ const HELP_TOPICS = [
       'Use Support here or Agents inside Royal VIP so staff can help with a reset.',
       '',
       'How do I deposit?',
-      'Tap Deposit in Telegram, enter the exact amount, and follow the payment instructions.',
+      "Tap Deposit from the bot's main menu, enter the exact amount, and complete the payment using the instructions provided.",
       '',
       'How do I cash out?',
       'Open Royal VIP, tap Cashout from the Lobby, choose QR or Payment App, then send the request.',
@@ -142,7 +159,7 @@ const HELP_TOPICS = [
       'Open Vault. You can copy usernames and reveal/copy passwords there.',
       '',
       "Why wasn't my payment matched?",
-      'Payments must match the saved payment name, exact amount, and active payment window. If the name, amount, timing, or required Load coin payment note/remark is wrong, staff may need to review it.',
+      'Deposits are verified through the Royal VIP Telegram bot. Once your payment is verified, your Royal VIP balance is updated automatically.',
       '',
       'How do I contact support?',
       'Tap Contact Support here, or open Agents inside Royal VIP.'
@@ -198,6 +215,12 @@ export function helpTopicButtons(topicKey = '') {
   ];
   if (topic?.supportOnly) {
     rows.unshift([{ label: '☎ Contact Support', text: '☎ Contact Support', action: 'menu:support', data: 'menu:support' }]);
+  }
+  if (topic?.includeRoyalVipBotButton) {
+    const url = configuredRoyalVipBotUrl();
+    if (url) {
+      rows.unshift([{ label: '🚀 Open Royal VIP Bot', text: '🚀 Open Royal VIP Bot', url }]);
+    }
   }
   return rows;
 }
