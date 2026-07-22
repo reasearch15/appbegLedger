@@ -156,9 +156,7 @@ export function startTelegramListener({ token, store, io }) {
     }
   });
 
-  bot.launch()
-    .then(() => console.log('Telegram listener started.'))
-    .catch((error) => console.error('Telegram listener failed to start:', error));
+  startPollingBot(bot);
 
   const stop = (signal) => {
     console.log(`Stopping Telegram listener after ${signal}.`);
@@ -169,6 +167,30 @@ export function startTelegramListener({ token, store, io }) {
   process.once('SIGTERM', () => stop('SIGTERM'));
 
   return bot;
+}
+
+async function startPollingBot(bot) {
+  try {
+    const me = await bot.telegram.getMe();
+    console.log(`[telegram] getMe ok id=${me.id} username=@${me.username || 'unknown'}`);
+
+    const webhookInfo = await bot.telegram.getWebhookInfo();
+    const webhookConfigured = Boolean(webhookInfo?.url);
+    console.log(
+      `[telegram] webhook configured=${webhookConfigured} pending_updates=${webhookInfo?.pending_update_count ?? 0}` +
+      `${webhookInfo?.last_error_message ? ` last_error=${webhookInfo.last_error_message}` : ''}`
+    );
+
+    if (webhookConfigured) {
+      await bot.telegram.deleteWebhook({ drop_pending_updates: false });
+      console.log('[telegram] webhook deleted before polling start.');
+    }
+
+    await bot.launch();
+    console.log('Telegram listener started.');
+  } catch (error) {
+    console.error('Telegram listener failed to start:', error);
+  }
 }
 
 async function cacheProfilePhoto({ bot, store, user, io }) {
