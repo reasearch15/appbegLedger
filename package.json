@@ -21,6 +21,7 @@
     "test:support-ai-registration": "node scripts/test-support-ai-registration-state.js",
     "test:bot-onboarding": "node scripts/test-bot-onboarding-phase1.js",
     "test:royal-vip-registration": "node scripts/test-royal-vip-registration.js",
+    "test:my-account": "node scripts/test-my-account-credentials.js",
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",
     "test:payment-windows": "node scripts/test-unified-payment-windows.js",
     "test:payment-status": "node scripts/test-payment-status-ui.js",

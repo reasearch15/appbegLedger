@@ -214,7 +214,7 @@ export function normalizeButtonRows(buttons = []) {
     .filter((row) => row.length);
 }
 
-function toTelegramInlineButton(button) {
+export function toTelegramInlineButton(button) {
   if (button.web_app?.url) {
     return {
       text: button.text,

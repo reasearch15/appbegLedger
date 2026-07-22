@@ -51,6 +51,21 @@ const REGISTRATION_PAYMENT_COOLDOWN_MISSES = 3;
 const REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const REGISTRATION_PAYMENT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
+function redactSensitiveRegistrationInfo(info = {}) {
+  if (!info || typeof info !== 'object') return info;
+  const copy = { ...info };
+  for (const key of ['appbeg_password', 'royal_vip_password']) {
+    if (copy[key]) copy[key] = '[redacted]';
+  }
+  if (copy.royal_vip_credentials && typeof copy.royal_vip_credentials === 'object') {
+    copy.royal_vip_credentials = {
+      ...copy.royal_vip_credentials,
+      ...(copy.royal_vip_credentials.password ? { password: '[redacted]' } : {})
+    };
+  }
+  return copy;
+}
+
 function pickRowValue(row, key) {
   if (!row) return undefined;
   if (row[key] !== undefined) return row[key];
@@ -2315,7 +2330,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       title: 'Registration Info Updated',
       body: 'Stored registration info was edited.',
       actorName,
-      metadata: { registrationInfo: next }
+      metadata: { registrationInfo: redactSensitiveRegistrationInfo(next) }
     });
     return state;
   }

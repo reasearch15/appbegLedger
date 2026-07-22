@@ -4,6 +4,7 @@ import { validateAppBegPassword, validateAppBegUsername } from '../registration/
 import { centsToDollars, parseMoneyToCents, registrationCreditCents } from '../registration/utils.js';
 import { registeredMenuButtons } from '../telegram/botRegistrationState.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
+import { royalVipCredentialSnapshot } from '../telegram/accountView.js';
 
 export const POST_REGISTRATION_READY_MESSAGE = [
   '🎉 Your Royal VIP account is ready!',
@@ -163,15 +164,20 @@ export async function createAppBegPlayerForContact(store, {
       console.log(`[ledger] create_player_resumed contact=${id} playerUid=${result.playerUid || 'n/a'}`);
     }
 
-    const nextInfo = {
-      ...info,
-      preferred_appbeg_username: result.username || username,
-      appbeg_player_uid: result.playerUid,
-      appbeg_creation_complete: true,
-      created_by_coadmin_uid: coadminUid,
-      ready_to_create_player: false,
-      registration_confirmed: true
-    };
+    const nextInfo = royalVipCredentialSnapshot({
+      info: {
+        ...info,
+        preferred_appbeg_username: result.username || username,
+        appbeg_player_uid: result.playerUid,
+        appbeg_creation_complete: true,
+        created_by_coadmin_uid: coadminUid,
+        ready_to_create_player: false,
+        registration_confirmed: true
+      },
+      username: result.username || username,
+      password,
+      playerUid: result.playerUid
+    });
 
     if (typeof store.creditRegisteredDeposit !== 'function') {
       throw new Error('AppBeg deposit credit helper is not available.');

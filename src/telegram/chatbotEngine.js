@@ -61,6 +61,16 @@ import {
   HELP_TOPIC_PREFIX,
   isHelpCenterAction
 } from './royalVipHelpCenter.js';
+import {
+  ACCOUNT_DETAILS_HIDDEN_TEXT,
+  buildMissingAccountButtons,
+  buildMyAccountButtons,
+  buildMyAccountText,
+  createAccountViewToken,
+  isFreshAccountAction,
+  parseAccountAction,
+  resolveRoyalVipCredentials
+} from './accountView.js';
 
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
@@ -166,6 +176,7 @@ export function isChatbotButtonAction(action) {
     || value.startsWith('menu:')
     || value.startsWith('register:')
     || value.startsWith('deposit:')
+    || value.startsWith('account:')
     || value.startsWith('staff')
     || value === 'register'
     || value === 'confirm'
@@ -252,7 +263,7 @@ export function paymentAppButtons() {
   ];
 }
 
-export async function decideBotReply({ store, contact, messageText = '', action = null, forceEntryMenu = false }) {
+export async function decideBotReply({ store, contact, messageText = '', action = null, forceEntryMenu = false, callbackMessageId = null }) {
   const text = String(messageText || '').trim();
   action = normalizeCallbackAction(action) || null;
   const automationState = await store.ensureAutomationState(contact.id);
@@ -395,6 +406,18 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
   if (isHelpCenterAction(action)) {
     return buildHelpCenterDecision(action);
+  }
+
+  if (action === 'bot:my_account' || String(action || '').startsWith('account:')) {
+    return await accountViewDecision({
+      store,
+      contact,
+      info,
+      flow,
+      step: normalizedStep,
+      action,
+      callbackMessageId
+    });
   }
 
   if (action === 'bot:cancel_request') {
@@ -712,7 +735,7 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     };
   }
 
-  if (['bot:cashout', 'bot:my_account', 'bot:my_games', 'bot:my_game'].includes(action)) {
+  if (['bot:cashout', 'bot:my_games', 'bot:my_game'].includes(action)) {
     const label = {
       'bot:cashout': 'cash out',
       'bot:my_account': 'account',
@@ -740,6 +763,98 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
     }],
     statePatch: null,
     escalate: false
+  };
+}
+
+async function accountViewDecision({ store, contact, info = {}, flow = null, step = null, action = null, callbackMessageId = null }) {
+  const parsedAccountAction = parseAccountAction(action);
+  if (parsedAccountAction) {
+    const fresh = isFreshAccountAction({ info, action: parsedAccountAction, messageId: callbackMessageId });
+    if (!fresh) {
+      return {
+        kind: 'account_stale_button',
+        replies: [{
+          text: 'This account view has expired. Please open My Account again.',
+          buttons: menuKindButtons('registered')
+        }],
+        statePatch: null,
+        escalate: false,
+        logEvent: { event: 'account_view_stale_button', action: parsedAccountAction.type }
+      };
+    }
+
+    if (parsedAccountAction.type === 'hide') {
+      return {
+        kind: 'account_hide_details',
+        replies: [],
+        statePatch: null,
+        accountView: {
+          action: 'hide',
+          messageId: callbackMessageId,
+          token: parsedAccountAction.token,
+          fallbackText: ACCOUNT_DETAILS_HIDDEN_TEXT
+        },
+        sensitive: true,
+        escalate: false,
+        logEvent: { event: 'account_view_hidden' }
+      };
+    }
+
+    if (parsedAccountAction.type === 'support') {
+      return {
+        kind: 'account_contact_support',
+        replies: [{
+          text: 'No problem. Send your question here and our support team can follow the conversation.'
+        }],
+        statePatch: null,
+        escalate: false,
+        logEvent: { event: 'button_clicked', action: 'account:support' }
+      };
+    }
+
+    if (parsedAccountAction.type === 'back') {
+      if (isRegisteredDepositFlow(flow, step)) {
+        return continueRegisteredDeposit({ store, contact, text: '', action: null, step, info });
+      }
+      if (isRegistrationFlow(flow)) {
+        return continueRegistrationDecision({ store, contact, text: '', action: null, step, info, flow });
+      }
+      return {
+        kind: 'account_back_registered_menu',
+        replies: [{ text: 'Welcome back!', buttons: menuKindButtons('registered') }],
+        statePatch: null,
+        escalate: false
+      };
+    }
+  }
+
+  const credentials = resolveRoyalVipCredentials({ contact, info });
+  const token = createAccountViewToken();
+  const missing = !credentials.ok;
+  if (missing) {
+    console.log(`[chatbot] account_credentials_missing contact=${contact.id} reason=${credentials.reason}`);
+  }
+  const text = buildMyAccountText(credentials);
+  const buttons = missing ? buildMissingAccountButtons(token) : buildMyAccountButtons(token);
+
+  return {
+    kind: missing ? 'account_credentials_missing' : 'account_credentials',
+    replies: [{ text, buttons }],
+    statePatch: null,
+    accountView: {
+      action: 'show',
+      token,
+      previousMessageId: Number(info.account_view_message_id || 0) || null,
+      text,
+      buttons,
+      missing
+    },
+    sensitive: !missing,
+    escalate: false,
+    logEvent: {
+      event: missing ? 'account_credentials_missing' : 'account_view_opened',
+      reason: missing ? credentials.reason : undefined
+    }
   };
 }
 

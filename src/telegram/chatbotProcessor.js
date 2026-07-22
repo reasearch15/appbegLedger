@@ -9,6 +9,8 @@ import { generateCustomerSupportReply } from './customerSupportAi.js';
 import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
+import { normalizeButtonRows, toTelegramInlineButton } from './messageDelivery.js';
+import { accountViewSnapshotPatch } from './accountView.js';
 
 export const SUPPORT_AI_FALLBACK_REPLY = "Sorry, I'm having trouble accessing support right now. Please try again shortly.";
 const SUPPORT_AI_TIMEOUT_MS = Number(process.env.CUSTOMER_SUPPORT_AI_TIMEOUT_MS || 15000);
@@ -267,7 +269,8 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       contact,
       messageText: job.input_text || '',
       action: job.action || null,
-      forceEntryMenu
+      forceEntryMenu,
+      callbackMessageId: job.job_type === 'callback_action' ? job.incoming_telegram_message_id : null
     });
 
     console.log(`[chatbot] bot reply generated id=${job.id} contact=${contact.id} kind=${decision.kind}`);
@@ -326,6 +329,7 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     }
 
     let repliesSentBeforeCreate = false;
+    let accountViewHandled = false;
     if (decision.createAppBegPlayer && decision.replies?.length) {
       for (const reply of decision.replies) {
         await queueBotReply({
@@ -339,6 +343,16 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       repliesSentBeforeCreate = true;
     }
 
+    if (decision.accountView) {
+      await handleAccountViewDecision({
+        store,
+        contact,
+        decision,
+        bot: bot || globalThis.telegramBot || null
+      });
+      accountViewHandled = true;
+    }
+
     if (decision.createAppBegPlayer) {
       try {
         const created = await createAppBegPlayerForContact(store, {
@@ -346,10 +360,12 @@ export async function processBotJob(store, job, { io = null, bot = null, support
           actorName: 'Chatbot',
           io
         });
+        const currentInfo = (await store.getAutomationState(contact.id).catch(() => null))?.registration_info || {};
         await store.updateAutomationState(contact.id, {
           currentFlow: null,
           currentStep: null,
           registrationInfo: {
+            ...currentInfo,
             ...(decision.statePatch?.registrationInfo || {}),
             create_account_in_progress: false,
             appbeg_creation_complete: true,
@@ -387,7 +403,7 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     const afterState = await store.getAutomationState(contact.id);
     console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
 
-    if (!repliesSentBeforeCreate) {
+    if (!repliesSentBeforeCreate && !accountViewHandled) {
       for (const reply of decision.replies || []) {
         await queueBotReply({
           store,
@@ -408,7 +424,9 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       messageId: job.message_id,
       incomingTelegramMessageId: job.incoming_telegram_message_id,
       actionTaken: `chatbot:${decision.kind}`,
-      responseSent: (decision.replies || []).map((item) => item.text).join('\n---\n'),
+      responseSent: decision.sensitive
+        ? '[sensitive account details omitted]'
+        : (decision.replies || []).map((item) => item.text).join('\n---\n'),
       metadata: {
         jobId: job.id,
         escalate: Boolean(decision.escalate),
@@ -431,6 +449,110 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       errorText: error.message || String(error)
     });
     return { ok: false, error };
+  }
+}
+
+async function handleAccountViewDecision({ store, contact, decision, bot = null }) {
+  const view = decision.accountView || {};
+  if (!bot?.telegram) {
+    for (const reply of decision.replies || []) {
+      await queueBotReply({ store, user: contact, text: reply.text, buttons: reply.buttons || [], bot });
+    }
+    return;
+  }
+
+  if (view.action === 'hide') {
+    const messageId = Number(view.messageId || 0) || null;
+    if (messageId && bot.telegram.deleteMessage) {
+      try {
+        await bot.telegram.deleteMessage(contact.telegram_id, messageId);
+        const state = await store.getAutomationState(contact.id).catch(() => null);
+        await store.updateAutomationState(contact.id, {
+          registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
+            token: view.token,
+            messageId,
+            hidden: true
+          })
+        }).catch(() => null);
+        return;
+      } catch (error) {
+        console.log(`[chatbot] account_view_delete_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
+      }
+    }
+    if (messageId && bot.telegram.editMessageText) {
+      try {
+        await bot.telegram.editMessageText(contact.telegram_id, messageId, undefined, view.fallbackText || 'Account details hidden.');
+        const state = await store.getAutomationState(contact.id).catch(() => null);
+        await store.updateAutomationState(contact.id, {
+          registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
+            token: view.token,
+            messageId,
+            hidden: true
+          })
+        }).catch(() => null);
+        return;
+      } catch (error) {
+        console.log(`[chatbot] account_view_hide_edit_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
+      }
+    }
+    return;
+  }
+
+  if (view.action !== 'show') return;
+
+  const normalizedButtons = normalizeButtonRows(view.buttons || []);
+  const replyMarkup = normalizedButtons.length
+    ? { inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton)) }
+    : undefined;
+  const previousMessageId = Number(view.previousMessageId || 0) || null;
+  let messageId = null;
+
+  if (previousMessageId && bot.telegram.editMessageText) {
+    try {
+      await bot.telegram.editMessageText(
+        contact.telegram_id,
+        previousMessageId,
+        undefined,
+        view.text,
+        replyMarkup ? { reply_markup: replyMarkup } : undefined
+      );
+      messageId = previousMessageId;
+    } catch (error) {
+      console.log(`[chatbot] account_view_edit_previous_failed contact=${contact.id} message_id=${previousMessageId} reason=${error.message}`);
+    }
+  }
+
+  if (!messageId) {
+    const sent = await bot.telegram.sendMessage(
+      contact.telegram_id,
+      view.text,
+      replyMarkup ? { reply_markup: replyMarkup } : undefined
+    );
+    messageId = sent?.message_id || null;
+    await store.storeOutgoingMessage({
+      telegramUserId: contact.id,
+      telegramMessageId: messageId,
+      text: decision.sensitive ? '[sensitive account details omitted]' : view.text,
+      payload: {
+        channel: 'bot_api',
+        accountView: true,
+        buttons: normalizedButtons
+      },
+      senderType: 'bot',
+      source: 'bot_api',
+      messageType: normalizedButtons.length ? 'buttons' : 'text'
+    });
+  }
+
+  if (messageId) {
+    const state = await store.getAutomationState(contact.id).catch(() => null);
+    await store.updateAutomationState(contact.id, {
+      registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
+        token: view.token,
+        messageId,
+        hidden: false
+      })
+    });
   }
 }
 
