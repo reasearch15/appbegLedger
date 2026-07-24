@@ -60,7 +60,10 @@ const PAYMENT_LIKE_PATTERNS = [
   /you\s+received\s+\$/i,
   /\$\d+(?:\.\d+)?\s+from\s+/i,
   /\breceived\s+\$\d+/i,
-  /\bpayment\s+(?:of|received)\b/i
+  /\bpayment\s+(?:of|received)\b/i,
+  /new\s+chime\s+payment/i,
+  /amount\s+received\s*:/i,
+  /payment\s+name\s*:/i
 ];
 
 /**
@@ -81,6 +84,20 @@ export function classifyPaymentGroupMessage(rawText = '') {
   }
 
   if (PAYMENT_LIKE_PATTERNS.some((re) => re.test(text))) {
+    const labeledNotice = /new\s+chime\s+payment/i.test(text)
+      || /amount\s+received\s*:/i.test(text)
+      || /payment\s+name\s*:/i.test(text);
+
+    if (labeledNotice) {
+      if (!/amount\s+received\s*:\s*\$?\s*\d/i.test(text)) {
+        return { kind: 'payment_like', reason: MANUAL_REVIEW_REASON.MISSING_AMOUNT };
+      }
+      if (!/payment\s+name\s*:\s*\S+/i.test(text)) {
+        return { kind: 'payment_like', reason: MANUAL_REVIEW_REASON.MISSING_PAYMENT_NAME };
+      }
+      return { kind: 'payment_like', reason: MANUAL_REVIEW_REASON.MALFORMED_PAYMENT_MESSAGE };
+    }
+
     if (!/\$\d/.test(text) && !/received\s+\$/i.test(text)) {
       return { kind: 'payment_like', reason: MANUAL_REVIEW_REASON.MISSING_AMOUNT };
     }

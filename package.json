@@ -24,6 +24,7 @@
     "test:my-account": "node scripts/test-my-account-credentials.js",
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",
     "test:payment-windows": "node scripts/test-unified-payment-windows.js",
+    "test:chime-parser": "node scripts/test-chime-payment-parser.js",
     "test:payment-status": "node scripts/test-payment-status-ui.js",
     "test:payment-freeze": "node scripts/test-payment-freeze-worker.js",
     "test:manual-review": "node scripts/test-manual-review-panel.js",

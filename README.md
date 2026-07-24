@@ -35,8 +35,10 @@ PAYMENT_TELEGRAM_SYNC_ENABLED=true
 PAYMENT_TELEGRAM_API_ID=...
 PAYMENT_TELEGRAM_API_HASH=...
 PAYMENT_TELEGRAM_SESSION=./data/appbeg-payment.session
-PAYMENT_TELEGRAM_GROUP=...
+PAYMENT_TELEGRAM_GROUP=-5413513424
 ```
+
+`PAYMENT_TELEGRAM_GROUP` (or fallback `PAYMENT_GROUP_CHAT_ID`) is the **source** payment confirmation group the Telethon listener watches. It is not the outbound Telegram notification destination.
 
 Preview and run the one-time cleanup for old personal-account contacts with:
 
