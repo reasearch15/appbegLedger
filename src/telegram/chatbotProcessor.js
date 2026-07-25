@@ -18,13 +18,15 @@ const SUPPORT_AI_TIMEOUT_MS = Number(process.env.CUSTOMER_SUPPORT_AI_TIMEOUT_MS 
 export { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
 export { handlePaymentRegistrationQr } from './registrationQrSend.js';
 
-export function shouldUseRegistrationBot(job, automationState = {}, contact = null) {
+export function shouldUseRegistrationBot(job, automationState = {}, contact = null, botSession = null) {
   if (job.job_type === 'callback_action') return true;
   if (job.force_entry_menu) return true;
+  const sessionFlow = String(botSession?.workflow_key || botSession?.workflowKey || '').trim();
+  if (sessionFlow === 'deposit') return true;
   const flow = automationState.current_flow || automationState.currentFlow;
   if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
   const step = String(automationState.current_step || automationState.currentStep || '');
-  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(step)) return true;
+  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'waiting_amount', 'waiting_payment_name'].includes(step)) return true;
   const info = automationState.registration_info || automationState.registrationInfo || {};
   // Keep amount entry on the deposit bot even if flow was wiped while the prompt was shown.
   if (info.deposit_in_progress || info.deposit_awaiting_payment) return true;
@@ -223,9 +225,17 @@ export async function processBotJob(store, job, { io = null, bot = null, support
 
   try {
     const beforeState = await store.ensureAutomationState(contact.id);
-    console.log(`[chatbot] processing id=${job.id} contact=${contact.id} flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} status=${contact.registration_status}`);
+    const botSession = typeof store.getBotSession === 'function'
+      ? await store.getBotSession(contact.id).catch(() => null)
+      : null;
+    console.log(
+      `[chatbot] processing id=${job.id} contact=${contact.id} ` +
+      `flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} ` +
+      `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
+      `status=${contact.registration_status}`
+    );
 
-    const registrationJob = shouldUseRegistrationBot(job, beforeState, contact);
+    const registrationJob = shouldUseRegistrationBot(job, beforeState, contact, botSession);
     if (!registrationJob) {
       return await processSupportAiJob({ store, contact, job, io, bot, supportAiGenerator });
     }

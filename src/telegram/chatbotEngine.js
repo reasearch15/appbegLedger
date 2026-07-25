@@ -48,6 +48,8 @@ import {
 import {
   beginRegisteredDeposit,
   continueRegisteredDeposit,
+  depositStepFromBotSession,
+  isDepositBotSessionActive,
   isRegisteredDepositFlow,
   resolveRegisteredDepositStep
 } from './registeredDepositFlow.js';
@@ -268,6 +270,9 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const text = String(messageText || '').trim();
   action = normalizeCallbackAction(action) || null;
   const automationState = await store.ensureAutomationState(contact.id);
+  const botSession = typeof store.getBotSession === 'function'
+    ? await store.getBotSession(contact.id).catch(() => null)
+    : null;
   const info = { ...(automationState.registration_info || {}) };
   let flow = automationState.current_flow;
   // Bot API contacts must use bot_registration only — migrate legacy registration_info.
@@ -301,7 +306,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       });
     }
     if (command.command === 'register') {
-      if (effective.is_registered) {
+      if (effective.is_registered || contact.registration_status === 'Registered') {
         return decideRegisteredSupport({ text: '', action: null, contact, effective });
       }
       if (registrationInProgress) {
@@ -320,12 +325,13 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     }
   }
 
+  const ledgerRegistered = contact.registration_status === 'Registered'
+    || effective.is_registered
+    || effective.effective_status === 'Registered';
+
   // Deposit from ANY surface (Help, Account, main menu, stale flows) always wins:
   // reset prior session and start a clean deposit amount wizard.
-  if (
-    action === 'bot:deposit'
-    && (effective.is_registered || effective.effective_status === 'Registered')
-  ) {
+  if (action === 'bot:deposit' && ledgerRegistered) {
     return await beginRegisteredDeposit(store, contact, info);
   }
 
@@ -333,16 +339,22 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     isRegisteredDepositFlow(flow, normalizedStep)
     || info.deposit_in_progress
     || info.deposit_awaiting_payment
+    || isDepositBotSessionActive(botSession)
   );
-  const depositContinueStep = resolveRegisteredDepositStep(normalizedStep, info);
+  const depositContinueStep = resolveRegisteredDepositStep(
+    depositStepFromBotSession(botSession) || normalizedStep,
+    info
+  );
 
-  // Amount replies must stay on deposit even if Help/Support wiped flow/step.
-  if (
-    !action
-    && depositSessionActive
-    && (effective.is_registered || effective.effective_status === 'Registered')
-    && parseMoneyToCents(text) != null
-  ) {
+  // Amount replies must stay on deposit even if Help/Account/Main Menu corrupted flow/step.
+  if (!action && depositSessionActive && parseMoneyToCents(text) != null) {
+    console.log(
+      `[chatbot] deposit_amount_detected contact=${contact.id} ` +
+      `automation_flow=${flow || 'none'} automation_step=${normalizedStep || 'none'} ` +
+      `bot_session_flow=${botSession?.workflow_key || 'none'} ` +
+      `bot_session_step=${botSession?.workflow_step || 'none'} ` +
+      `resolved_step=${depositContinueStep}`
+    );
     return await continueRegisteredDeposit({
       store,
       contact,
@@ -520,11 +532,12 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return await stopRegistrationDecision({ store, contact, flow, step: normalizedStep, info });
   }
 
-  if (effective.is_registered || effective.effective_status === 'Registered') {
+  if (effective.is_registered || effective.effective_status === 'Registered' || ledgerRegistered) {
     if (
       action === 'bot:deposit'
       || action === 'deposit:cancel'
       || action === 'deposit:retry_qr'
+      || depositSessionActive
       || isRegisteredDepositFlow(flow, normalizedStep)
       || info.deposit_in_progress
       || info.deposit_awaiting_payment
@@ -538,11 +551,28 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         contact,
         text,
         action,
-        step: resolveRegisteredDepositStep(normalizedStep, info),
+        step: depositContinueStep,
         info
       });
     }
     return decideRegisteredSupport({ text, action, contact, effective });
+  }
+
+  // Active deposit must never fall into guest/registration catch-alls.
+  if (depositSessionActive) {
+    console.log(
+      `[chatbot] deposit_session_guard contact=${contact.id} ` +
+      `prevented_guest_intercept automation_flow=${flow || 'none'} ` +
+      `bot_session_flow=${botSession?.workflow_key || 'none'} step=${depositContinueStep}`
+    );
+    return await continueRegisteredDeposit({
+      store,
+      contact,
+      text,
+      action,
+      step: depositContinueStep,
+      info
+    });
   }
 
   if (effective.is_suspended || effective.effective_status === 'Suspended') {
@@ -593,7 +623,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   // Active registration flow always takes priority over greeting/welcome detection.
-  if (isRegistrationFlow(flow)) {
+  // Stale bot_registration leftovers on Ledger-Registered contacts must not block deposit.
+  if (isRegistrationFlow(flow) && !(ledgerRegistered && flow === BOT_REGISTRATION_FLOW && normalizedStep === 'welcome')) {
     return await continueRegistrationDecision({
       store,
       contact,
@@ -701,43 +732,19 @@ async function mainMenuDecision(contact, info, automationState = null, effective
       forceFull
     });
   }
-  const state = effective || await resolveEffectiveRegistrationState({ contact, automationState });
-  const throttled = !forceFull && state.menu_kind === 'guest' && isWelcomeThrottled(automationState);
-  const text = throttled && state.menu_kind === 'guest'
-    ? welcomeNudgeMessage()
-    : menuKindWelcomeText(contact, state);
-
-  const keepFlow = state.registration_active
-    && automationState?.current_flow
-    && state.menu_kind !== 'guest';
-
-  return {
-    kind: throttled ? 'welcome_nudge' : (state.menu_kind === 'guest' ? 'welcome' : `menu_${state.menu_kind}`),
-    replies: [{
-      text,
-      buttons: menuKindButtons(state.menu_kind)
-    }],
-    statePatch: keepFlow
-      ? null
-      : {
-        currentFlow: state.menu_kind === 'guest' ? BOT_REGISTRATION_FLOW : automationState?.current_flow || null,
-        currentStep: state.menu_kind === 'guest' ? 'welcome' : automationState?.current_step || null,
-        registrationInfo: {
-          ...info,
-          telegram_display_name: contact.display_name,
-          telegram_username: contact.username || null,
-          telegram_user_id: contact.telegram_id
-        }
+  return buildStateAwareEntryMenu({
+    store: {
+      async ensureAutomationState() {
+        return automationState;
       },
-    markWelcomeSent: state.menu_kind === 'guest',
-    escalate: false,
-    logEvent: {
-      event: throttled ? 'welcome_nudged' : 'main_menu_shown',
-      menuKind: state.menu_kind,
-      effectiveStatus: state.effective_status,
-      throttled
-    }
-  };
+      async getActiveRegistrationPaymentWindow() {
+        return null;
+      }
+    },
+    contact,
+    automationState,
+    forceFull
+  });
 }
 
 function welcomeDecision(contact, info, automationState = null, { forceFull = false } = {}) {

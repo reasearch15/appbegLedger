@@ -15,6 +15,12 @@ import { registeredMenuButtons } from './botRegistrationState.js';
 
 export const REGISTERED_DEPOSIT_FLOW = 'registered_deposit';
 
+/** Explicit bot_sessions workflow keys used while deposit amount entry is active. */
+export const DEPOSIT_BOT_SESSION_FLOW = 'deposit';
+export const DEPOSIT_BOT_SESSION_STEP_AMOUNT = 'waiting_amount';
+export const DEPOSIT_BOT_SESSION_STEP_NAME = 'waiting_payment_name';
+export const DEPOSIT_BOT_SESSION_STEP_AWAIT = 'await_payment';
+
 export const DEPOSIT_NAME_PROMPT = [
   'What payment name should we match for this deposit?',
   '',
@@ -35,12 +41,64 @@ function depositCancelButtons() {
 }
 
 export function isRegisteredDepositFlow(flow, step) {
-  if (flow === REGISTERED_DEPOSIT_FLOW) return true;
+  if (flow === REGISTERED_DEPOSIT_FLOW || flow === DEPOSIT_BOT_SESSION_FLOW) return true;
   return [
     'deposit_payment_name',
     'deposit_amount',
-    'deposit_await_payment'
+    'deposit_await_payment',
+    DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+    DEPOSIT_BOT_SESSION_STEP_NAME,
+    DEPOSIT_BOT_SESSION_STEP_AWAIT
   ].includes(String(step || ''));
+}
+
+export function isDepositBotSessionActive(botSession = null) {
+  if (!botSession) return false;
+  const flow = String(botSession.workflow_key || botSession.workflowKey || '').trim();
+  if (flow !== DEPOSIT_BOT_SESSION_FLOW) return false;
+  const step = String(botSession.workflow_step || botSession.workflowStep || '').trim();
+  return [
+    DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+    DEPOSIT_BOT_SESSION_STEP_NAME,
+    DEPOSIT_BOT_SESSION_STEP_AWAIT,
+    'deposit_amount',
+    'deposit_payment_name',
+    'deposit_await_payment'
+  ].includes(step);
+}
+
+export function depositStepFromBotSession(botSession = null) {
+  const step = String(botSession?.workflow_step || botSession?.workflowStep || '').trim();
+  if (step === DEPOSIT_BOT_SESSION_STEP_NAME || step === 'deposit_payment_name') return 'deposit_payment_name';
+  if (step === DEPOSIT_BOT_SESSION_STEP_AWAIT || step === 'deposit_await_payment') return 'deposit_await_payment';
+  if (step === DEPOSIT_BOT_SESSION_STEP_AMOUNT || step === 'deposit_amount') return 'deposit_amount';
+  return null;
+}
+
+async function writeDepositBotSession(store, contactId, {
+  step = DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+  context = null,
+  reset = true
+} = {}) {
+  if (!store || !contactId) return null;
+  if (reset && typeof store.resetBotState === 'function') {
+    await store.resetBotState(contactId, { actorName: 'Bot', action: 'deposit' }).catch(() => null);
+  }
+  if (typeof store.setBotScreen === 'function') {
+    return store.setBotScreen(contactId, 'Deposit', {
+      actorName: 'Bot',
+      pushCurrent: false,
+      workflowKey: DEPOSIT_BOT_SESSION_FLOW,
+      workflowStep: step,
+      context: context || {}
+    }).catch(() => null);
+  }
+  return null;
+}
+
+async function clearDepositBotSession(store, contactId) {
+  if (!store || !contactId || typeof store.resetBotState !== 'function') return null;
+  return store.resetBotState(contactId, { actorName: 'Bot', action: 'home' }).catch(() => null);
 }
 
 /**
@@ -49,6 +107,9 @@ export function isRegisteredDepositFlow(flow, step) {
  */
 export function resolveRegisteredDepositStep(step, info = {}) {
   const raw = String(step || '').trim();
+  if (raw === DEPOSIT_BOT_SESSION_STEP_AMOUNT) return 'deposit_amount';
+  if (raw === DEPOSIT_BOT_SESSION_STEP_NAME) return 'deposit_payment_name';
+  if (raw === DEPOSIT_BOT_SESSION_STEP_AWAIT) return 'deposit_await_payment';
   if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(raw)) {
     return raw;
   }
@@ -175,16 +236,44 @@ function resumeActiveDepositDecision(activeWindow, info = {}) {
  * Persists a fresh amount-entry session (caller must apply statePatch before/with the prompt).
  */
 export async function beginRegisteredDeposit(store, contact, info = {}) {
-  // Clear legacy bot_sessions screen stack so Help/Account/menu screens cannot linger.
-  if (typeof store.resetBotState === 'function') {
-    await store.resetBotState(contact.id, { actorName: 'Bot', action: 'deposit' }).catch(() => null);
-  }
-
   const normalized = await normalizeRegisteredDepositAttempt(store, contact.id, info);
   if (normalized.activeWindow) {
-    return resumeActiveDepositDecision(normalized.activeWindow, normalized.info);
+    await writeDepositBotSession(store, contact.id, {
+      step: DEPOSIT_BOT_SESSION_STEP_AWAIT,
+      context: {
+        payment_name: normalized.activeWindow.payment_display_name || normalized.info.payment_display_name || null,
+        window_id: normalized.activeWindow.id
+      }
+    });
+    const resumed = resumeActiveDepositDecision(normalized.activeWindow, normalized.info);
+    console.log(
+      `[chatbot] deposit_session_started contact=${contact.id} ` +
+      `flow=${DEPOSIT_BOT_SESSION_FLOW} step=${DEPOSIT_BOT_SESSION_STEP_AWAIT} ` +
+      `automation_flow=${REGISTERED_DEPOSIT_FLOW} automation_step=deposit_await_payment ` +
+      `reason=resume_active_window`
+    );
+    return resumed;
   }
-  return startRegisteredDeposit(contact, normalized.info);
+
+  const started = await startRegisteredDeposit(contact, normalized.info);
+  const sessionStep = started.statePatch?.currentStep === 'deposit_payment_name'
+    ? DEPOSIT_BOT_SESSION_STEP_NAME
+    : DEPOSIT_BOT_SESSION_STEP_AMOUNT;
+  await writeDepositBotSession(store, contact.id, {
+    step: sessionStep,
+    context: {
+      payment_name: started.statePatch?.registrationInfo?.payment_display_name
+        || started.statePatch?.registrationInfo?.payment_name
+        || null
+    }
+  });
+  console.log(
+    `[chatbot] deposit_session_started contact=${contact.id} ` +
+    `flow=${DEPOSIT_BOT_SESSION_FLOW} step=${sessionStep} ` +
+    `automation_flow=${started.statePatch?.currentFlow || 'none'} ` +
+    `automation_step=${started.statePatch?.currentStep || 'none'}`
+  );
+  return started;
 }
 
 export async function startRegisteredDeposit(contact, info = {}) {
@@ -249,6 +338,7 @@ export async function continueRegisteredDeposit({
     if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
       await store.expireRegistrationPaymentWindow(info.deposit_payment_window_id, { suppressNotification: true }).catch(() => null);
     }
+    await clearDepositBotSession(store, contact.id);
     return {
       kind: 'deposit_cancelled',
       replies: [{
@@ -338,6 +428,11 @@ export async function continueRegisteredDeposit({
         escalate: false
       };
     }
+    await writeDepositBotSession(store, contact.id, {
+      step: DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+      reset: false,
+      context: { payment_name: name }
+    });
     return {
       kind: 'deposit_ask_amount',
       replies: [{
@@ -364,6 +459,11 @@ export async function continueRegisteredDeposit({
   }
 
   if (normalizedStep === 'deposit_amount') {
+    console.log(
+      `[chatbot] deposit_amount_message contact=${contact.id} ` +
+      `text=${JSON.stringify(String(text || '').slice(0, 40))} ` +
+      `step=${normalizedStep} deposit_in_progress=${Boolean(info.deposit_in_progress)}`
+    );
     const amountCents = parseMoneyToCents(text);
     const minCents = MIN_REGISTRATION_DEPOSIT * 100;
     if (!Number.isSafeInteger(amountCents) || amountCents < minCents) {
@@ -430,6 +530,11 @@ export async function continueRegisteredDeposit({
     }
 
     const paymentDisplayName = normalized.info.payment_display_name || normalized.info.payment_name;
+    await writeDepositBotSession(store, contact.id, {
+      step: DEPOSIT_BOT_SESSION_STEP_AWAIT,
+      reset: false,
+      context: { payment_name: paymentDisplayName, amount }
+    });
     return {
       kind: 'registration_send_payment_qr',
       replies: [],

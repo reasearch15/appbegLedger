@@ -82,26 +82,54 @@ export async function buildStateAwareEntryMenu({
     paymentWindow: window
   });
   const info = { ...(state?.registration_info || {}) };
-  const throttled = !forceFull && effective.menu_kind === 'guest' && isWelcomeThrottled(state);
-  const text = throttled && effective.menu_kind === 'guest'
-    ? menuKindWelcomeText(contact, effective)
-    : menuKindWelcomeText(contact, effective);
+  const ledgerRegistered = contact?.registration_status === 'Registered' || effective.is_registered;
+  // Never demote a Ledger-Registered contact to guest menu / bot_registration via Main Menu.
+  const menuKind = ledgerRegistered && effective.menu_kind === 'guest'
+    ? 'registered'
+    : effective.menu_kind;
+  const throttled = !forceFull && menuKind === 'guest' && isWelcomeThrottled(state);
+  const text = throttled && menuKind === 'guest'
+    ? menuKindWelcomeText(contact, { ...effective, menu_kind: menuKind })
+    : menuKindWelcomeText(contact, { ...effective, menu_kind: menuKind });
 
   const keepFlow = effective.registration_active
     && state?.current_flow
-    && effective.menu_kind !== 'guest';
+    && menuKind !== 'guest';
+
+  const depositActive = state?.current_flow === 'registered_deposit'
+    || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(String(state?.current_step || ''))
+    || info.deposit_in_progress
+    || info.deposit_awaiting_payment;
+
+  let nextFlow = state?.current_flow || null;
+  let nextStep = state?.current_step || null;
+  if (!keepFlow) {
+    if (depositActive) {
+      nextFlow = state?.current_flow || 'registered_deposit';
+      nextStep = state?.current_step || 'deposit_amount';
+    } else if (ledgerRegistered) {
+      // Clear stale registration-wizard leftovers; never re-enter bot_registration from menu.
+      if (nextFlow === BOT_REGISTRATION_FLOW || nextFlow === 'registration_info') {
+        nextFlow = null;
+        nextStep = null;
+      }
+    } else if (menuKind === 'guest') {
+      nextFlow = BOT_REGISTRATION_FLOW;
+      nextStep = 'welcome';
+    }
+  }
 
   return {
-    kind: throttled ? 'welcome_nudge' : (effective.menu_kind === 'guest' ? 'welcome' : `menu_${effective.menu_kind}`),
+    kind: throttled ? 'welcome_nudge' : (menuKind === 'guest' ? 'welcome' : `menu_${menuKind}`),
     replies: [{
       text,
-      buttons: menuKindButtons(effective.menu_kind)
+      buttons: menuKindButtons(menuKind)
     }],
     statePatch: keepFlow
       ? null
       : {
-        currentFlow: effective.menu_kind === 'guest' ? BOT_REGISTRATION_FLOW : state?.current_flow || null,
-        currentStep: effective.menu_kind === 'guest' ? 'welcome' : state?.current_step || null,
+        currentFlow: nextFlow,
+        currentStep: nextStep,
         registrationInfo: {
           ...info,
           telegram_display_name: contact.display_name,
@@ -109,13 +137,13 @@ export async function buildStateAwareEntryMenu({
           telegram_user_id: contact.telegram_id
         }
       },
-    markWelcomeSent: effective.menu_kind === 'guest',
+    markWelcomeSent: menuKind === 'guest',
     escalate: false,
-    effective,
+    effective: { ...effective, menu_kind: menuKind },
     logEvent: {
       event: throttled ? 'welcome_nudged' : 'main_menu_shown',
-      menuKind: effective.menu_kind,
-      effectiveStatus: effective.effective_status,
+      menuKind,
+      effectiveStatus: ledgerRegistered ? 'Registered' : effective.effective_status,
       throttled,
       entry: true
     }

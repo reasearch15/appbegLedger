@@ -120,11 +120,21 @@ function createDepositStore({
     }
   };
   const calls = { resetBotState: 0 };
+  let botSession = {
+    current_screen: 'Home',
+    workflow_key: null,
+    workflow_step: null,
+    state_stack_json: '[]',
+    context_json: '{}'
+  };
   return {
     state,
     calls,
     _state() {
       return state;
+    },
+    _botSession() {
+      return botSession;
     },
     async ensureAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
@@ -147,9 +157,29 @@ function createDepositStore({
       state.registration_info = { ...state.registration_info, ...info };
       return this.ensureAutomationState();
     },
+    async getBotSession() {
+      return { ...botSession };
+    },
     async resetBotState() {
       calls.resetBotState += 1;
-      return { current_screen: 'Home' };
+      botSession = {
+        current_screen: 'Home',
+        workflow_key: null,
+        workflow_step: null,
+        state_stack_json: '[]',
+        context_json: '{}'
+      };
+      return { ...botSession };
+    },
+    async setBotScreen(_id, screen, opts = {}) {
+      botSession = {
+        current_screen: screen,
+        workflow_key: opts.workflowKey ?? null,
+        workflow_step: opts.workflowStep ?? null,
+        state_stack_json: '[]',
+        context_json: JSON.stringify(opts.context || {})
+      };
+      return { ...botSession };
     },
     async getActiveRegistrationPaymentWindow() {
       return null;
@@ -347,8 +377,9 @@ async function run() {
   assert.equal(findMatchingActivePaymentWindow([window], parsePaymentMessage(paymentText('Amy Fei', '10.37'))).result, 'no_match');
   console.log('ok matched deposit window cannot be auto-matched twice');
 
+  const keywordStore = createDepositStore();
   const keyword = await decideBotReply({
-    store: depositStore,
+    store: keywordStore,
     contact: registeredContact(),
     messageText: 'recharge'
   });
@@ -358,7 +389,7 @@ async function run() {
   console.log('ok registered deposit keyword shows Deposit button');
 
   const ordinary = await decideBotReply({
-    store: depositStore,
+    store: createDepositStore(),
     contact: registeredContact(),
     messageText: 'what games are available?'
   });
@@ -383,6 +414,8 @@ async function run() {
   assert.equal(depositAfterHelp.statePatch.currentStep, 'deposit_amount');
   assert.equal(depositAfterHelp.statePatch.registrationInfo.deposit_in_progress, true);
   assert.ok(helpThenDepositStore.calls.resetBotState >= 1);
+  assert.equal(helpThenDepositStore._botSession().workflow_key, 'deposit');
+  assert.equal(helpThenDepositStore._botSession().workflow_step, 'waiting_amount');
   await helpThenDepositStore.updateAutomationState(77, depositAfterHelp.statePatch);
   const amountAfterHelp = await decideBotReply({
     store: helpThenDepositStore,
@@ -464,6 +497,30 @@ async function run() {
   assert.equal(amountAfterWipe.kind, 'registration_send_payment_qr');
   assert.equal(amountAfterWipe.sendPaymentQr.firstDepositAmount, 30);
   console.log('ok amount after wiped deposit flow/step still hits deposit handler');
+
+  // Stale bot_registration leftover + deposit bot session must still accept amount.
+  const corruptedStore = createDepositStore({
+    currentFlow: 'bot_registration',
+    currentStep: 'welcome',
+    registrationInfo: {
+      deposit_in_progress: true,
+      payment_display_name: 'Amy Fei',
+      payment_name: 'Amy Fei'
+    }
+  });
+  await corruptedStore.setBotScreen(77, 'Deposit', {
+    workflowKey: 'deposit',
+    workflowStep: 'waiting_amount',
+    context: { payment_name: 'Amy Fei' }
+  });
+  const amountAfterCorruption = await decideBotReply({
+    store: corruptedStore,
+    contact: registeredContact(),
+    messageText: '18'
+  });
+  assert.equal(amountAfterCorruption.kind, 'registration_send_payment_qr');
+  assert.equal(amountAfterCorruption.sendPaymentQr.firstDepositAmount, 18);
+  console.log('ok amount after Help/Menu session corruption still hits deposit handler');
 
   globalThis.appbegStore = previousStore;
   console.log('All registered deposit/post-registration focused checks passed.');
