@@ -11,6 +11,13 @@ import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
 import { normalizeButtonRows, toTelegramInlineButton } from './messageDelivery.js';
 import { accountViewSnapshotPatch } from './accountView.js';
+import {
+  DEPOSIT_BOT_SESSION_FLOW,
+  DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+  DEPOSIT_BOT_SESSION_STEP_NAME,
+  isActiveDepositSession,
+  REGISTERED_DEPOSIT_FLOW
+} from './registeredDepositFlow.js';
 
 export const SUPPORT_AI_FALLBACK_REPLY = "Sorry, I'm having trouble accessing support right now. Please try again shortly.";
 const SUPPORT_AI_TIMEOUT_MS = Number(process.env.CUSTOMER_SUPPORT_AI_TIMEOUT_MS || 15000);
@@ -21,8 +28,7 @@ export { handlePaymentRegistrationQr } from './registrationQrSend.js';
 export function shouldUseRegistrationBot(job, automationState = {}, contact = null, botSession = null) {
   if (job.job_type === 'callback_action') return true;
   if (job.force_entry_menu) return true;
-  const sessionFlow = String(botSession?.workflow_key || botSession?.workflowKey || '').trim();
-  if (sessionFlow === 'deposit') return true;
+  if (isActiveDepositSession(automationState, botSession)) return true;
   const flow = automationState.current_flow || automationState.currentFlow;
   if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
   const step = String(automationState.current_step || automationState.currentStep || '');
@@ -228,14 +234,21 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     const botSession = typeof store.getBotSession === 'function'
       ? await store.getBotSession(contact.id).catch(() => null)
       : null;
+    const depositActive = isActiveDepositSession(beforeState, botSession);
     console.log(
-      `[chatbot] processing id=${job.id} contact=${contact.id} ` +
-      `flow=${beforeState.current_flow || 'none'} step=${beforeState.current_step || 'none'} ` +
+      `[chatbot] inbound_lifecycle contact=${contact.id} telegram_id=${contact.telegram_id} ` +
+      `text=${JSON.stringify(String(job.input_text || '').slice(0, 80))} ` +
+      `action=${job.action || 'none'} job_type=${job.job_type || 'none'} ` +
+      `automation_flow=${beforeState.current_flow || 'none'} automation_step=${beforeState.current_step || 'none'} ` +
       `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
-      `status=${contact.registration_status}`
+      `deposit_active=${depositActive} status=${contact.registration_status}`
     );
 
     const registrationJob = shouldUseRegistrationBot(job, beforeState, contact, botSession);
+    console.log(
+      `[chatbot] inbound_router contact=${contact.id} handler=${registrationJob ? 'deposit_or_registration_bot' : 'support_ai'} ` +
+      `deposit_active=${depositActive}`
+    );
     if (!registrationJob) {
       return await processSupportAiJob({ store, contact, job, io, bot, supportAiGenerator });
     }
@@ -245,23 +258,38 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       jobCreatedAt: job.created_at
     });
     if (!eligibility.eligible) {
-      await store.completeBotJob(job.id, {
-        status: 'completed',
-        errorText: `Skipped: ${eligibility.reason}`
-      });
-      if (eligibility.reason === 'before_resume_checkpoint') {
-        console.log(`[chatbot] manual_chat_preserved contact=${contact.id} job=${job.id}`);
+      // Active deposit amount entry must never be silently dropped by eligibility gates.
+      // (Support inbound is enqueued without eligibility; registration path would otherwise
+      // complete the job with no user-visible reply — the "send 10, nothing happens" bug.)
+      if (depositActive) {
+        console.log(
+          `[chatbot] deposit_session_eligibility_bypass contact=${contact.id} job=${job.id} ` +
+          `reason=${eligibility.reason} bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'}`
+        );
       } else {
-        console.log(`[chatbot] auto_reply_skipped contact=${contact.id} job=${job.id} reason=${eligibility.reason}`);
+        await store.completeBotJob(job.id, {
+          status: 'completed',
+          errorText: `Skipped: ${eligibility.reason}`
+        });
+        if (eligibility.reason === 'before_resume_checkpoint') {
+          console.log(`[chatbot] manual_chat_preserved contact=${contact.id} job=${job.id}`);
+        } else {
+          console.log(`[chatbot] auto_reply_skipped contact=${contact.id} job=${job.id} reason=${eligibility.reason}`);
+        }
+        return { ok: true, skipped: true, reason: eligibility.reason };
       }
-      return { ok: true, skipped: true, reason: eligibility.reason };
     }
 
     const autoBot = await store.getAutoRegistrationBotSettings();
-    if (!autoBot.enabled) {
+    if (!autoBot.enabled && !depositActive) {
       await store.completeBotJob(job.id, { status: 'completed', errorText: 'Auto registration bot disabled' });
       console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${contact.id} job=${job.id}`);
       return { ok: true, skipped: true, reason: 'bot_disabled' };
+    }
+    if (!autoBot.enabled && depositActive) {
+      console.log(
+        `[chatbot] deposit_session_bot_disabled_bypass contact=${contact.id} job=${job.id}`
+      );
     }
 
     let forceEntryMenu = Boolean(job.force_entry_menu);
@@ -269,10 +297,10 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       const flow = beforeState.current_flow || beforeState.currentFlow;
       const step = beforeState.current_step || beforeState.currentStep || 'welcome';
       const info = beforeState.registration_info || beforeState.registrationInfo || {};
-      const inProgress = (
+      const inProgress = depositActive || (
         ((flow === 'bot_registration' || flow === 'registration_info') && step && step !== 'welcome')
         || flow === 'registered_deposit'
-        || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(String(step || ''))
+        || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'waiting_amount'].includes(String(step || ''))
         || info.deposit_in_progress
         || info.deposit_awaiting_payment
       );
@@ -435,6 +463,12 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       }
     }
 
+    // Re-assert deposit session AFTER outbound delivery. recordActiveBotMessage only patches
+    // registration_info; reinforce so Help/Account leftovers cannot leave amount entry orphaned.
+    if (decision.kind === 'deposit_ask_amount' || decision.kind === 'deposit_ask_payment_name') {
+      await reinforceDepositAmountSession(store, contact, decision);
+    }
+
     if (decision.escalate) {
       console.log(`[chatbot] bot escalation suppressed contact=${contact.id} reason=${decision.escalateReason || 'handoff'}`);
     }
@@ -581,6 +615,46 @@ function formatLogExtra(logEvent = {}) {
     .filter(([key]) => key !== 'event')
     .map(([key, value]) => ` ${key}=${value}`)
     .join('');
+}
+
+async function reinforceDepositAmountSession(store, contact, decision) {
+  const patch = decision?.statePatch || {};
+  const step = patch.currentStep === 'deposit_payment_name'
+    ? DEPOSIT_BOT_SESSION_STEP_NAME
+    : DEPOSIT_BOT_SESSION_STEP_AMOUNT;
+  const current = await store.getAutomationState(contact.id).catch(() => null);
+  const info = {
+    ...(current?.registration_info || {}),
+    ...(patch.registrationInfo || {}),
+    deposit_in_progress: true,
+    deposit_awaiting_payment: false
+  };
+  await store.updateAutomationState(contact.id, {
+    currentFlow: REGISTERED_DEPOSIT_FLOW,
+    currentStep: patch.currentStep || 'deposit_amount',
+    registrationInfo: info
+  }).catch(() => null);
+
+  if (typeof store.resetBotState === 'function') {
+    await store.resetBotState(contact.id, { actorName: 'Bot', action: 'deposit' }).catch(() => null);
+  }
+  if (typeof store.setBotScreen === 'function') {
+    await store.setBotScreen(contact.id, 'Deposit', {
+      actorName: 'Bot',
+      pushCurrent: false,
+      workflowKey: DEPOSIT_BOT_SESSION_FLOW,
+      workflowStep: step,
+      context: {
+        payment_name: info.payment_display_name || info.payment_name || null
+      }
+    }).catch(() => null);
+  }
+
+  console.log(
+    `[chatbot] deposit_session_reinforced contact=${contact.id} ` +
+    `flow=${DEPOSIT_BOT_SESSION_FLOW} step=${step} ` +
+    `automation_flow=${REGISTERED_DEPOSIT_FLOW} automation_step=${patch.currentStep || 'deposit_amount'}`
+  );
 }
 
 function emitUpdates(io, contact) {

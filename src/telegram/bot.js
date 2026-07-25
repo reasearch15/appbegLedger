@@ -121,6 +121,15 @@ export function startTelegramListener({ token, store, io }) {
         ? new Date(ctx.message.date * 1000).toISOString()
         : null;
       const inputText = ctx.message.text || ctx.message.caption || '';
+      const sess = await store.getBotSession(result.user.id).catch(() => null);
+      const auto = await store.getAutomationState(result.user.id).catch(() => null);
+      console.log(
+        `[chatbot] telegram_inbound contact=${result.user.id} telegram_id=${result.user.telegram_id} ` +
+        `text=${JSON.stringify(String(inputText).slice(0, 80))} ` +
+        `bot_session=${sess?.workflow_key || 'none'}/${sess?.workflow_step || 'none'} ` +
+        `automation_flow=${auto?.current_flow || 'none'} automation_step=${auto?.current_step || 'none'} ` +
+        `deposit_in_progress=${Boolean(auto?.registration_info?.deposit_in_progress)}`
+      );
       const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
         CHATBOT_ENABLED,
         contact: fresh,

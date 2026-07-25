@@ -67,6 +67,24 @@ export function isDepositBotSessionActive(botSession = null) {
   ].includes(step);
 }
 
+/** True when automation state and/or bot_sessions say deposit is waiting for user input. */
+export function isActiveDepositSession(automationState = {}, botSession = null) {
+  if (isDepositBotSessionActive(botSession)) return true;
+  const flow = automationState?.current_flow || automationState?.currentFlow || null;
+  const step = String(automationState?.current_step || automationState?.currentStep || '');
+  const info = automationState?.registration_info || automationState?.registrationInfo || {};
+  if (flow === REGISTERED_DEPOSIT_FLOW || flow === DEPOSIT_BOT_SESSION_FLOW) return true;
+  if ([
+    'deposit_payment_name',
+    'deposit_amount',
+    'deposit_await_payment',
+    DEPOSIT_BOT_SESSION_STEP_AMOUNT,
+    DEPOSIT_BOT_SESSION_STEP_NAME,
+    DEPOSIT_BOT_SESSION_STEP_AWAIT
+  ].includes(step)) return true;
+  return Boolean(info.deposit_in_progress || info.deposit_awaiting_payment);
+}
+
 export function depositStepFromBotSession(botSession = null) {
   const step = String(botSession?.workflow_step || botSession?.workflowStep || '').trim();
   if (step === DEPOSIT_BOT_SESSION_STEP_NAME || step === 'deposit_payment_name') return 'deposit_payment_name';

@@ -522,6 +522,95 @@ async function run() {
   assert.equal(amountAfterCorruption.sendPaymentQr.firstDepositAmount, 18);
   console.log('ok amount after Help/Menu session corruption still hits deposit handler');
 
+  // Eligibility skip must not swallow deposit amount messages (silent "nothing happens").
+  const { processBotJob, shouldUseRegistrationBot, isActiveDepositSession } = await import('../src/telegram/chatbotProcessor.js')
+    .then(async () => {
+      const processor = await import('../src/telegram/chatbotProcessor.js');
+      const depositFlow = await import('../src/telegram/registeredDepositFlow.js');
+      return {
+        processBotJob: processor.processBotJob,
+        shouldUseRegistrationBot: processor.shouldUseRegistrationBot,
+        isActiveDepositSession: depositFlow.isActiveDepositSession
+      };
+    });
+  const eligibilityStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_amount',
+    registrationInfo: {
+      deposit_in_progress: true,
+      payment_display_name: 'Amy Fei',
+      payment_name: 'Amy Fei'
+    }
+  });
+  await eligibilityStore.setBotScreen(77, 'Deposit', {
+    workflowKey: 'deposit',
+    workflowStep: 'waiting_amount'
+  });
+  eligibilityStore.getUserProfile = async () => registeredContact();
+  eligibilityStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
+  eligibilityStore.isIncomingMessageEligibleForAutoBot = async () => ({
+    eligible: false,
+    reason: 'missing_message_timestamp'
+  });
+  eligibilityStore.completeBotJob = async () => {};
+  eligibilityStore.logAutomationDecision = async () => {};
+  eligibilityStore.storeOutgoingMessage = async (msg) => ({ id: 1, ...msg });
+  eligibilityStore.getContactPreferredMessageSource = async () => 'bot_api';
+  eligibilityStore.getActivePaymentQrForRegistration = async () => ({
+    id: 10,
+    file_path: '/tmp/qr.png'
+  });
+  eligibilityStore.getActiveDefaultPaymentQr = async () => ({
+    id: 10,
+    file_path: '/tmp/qr.png'
+  });
+  eligibilityStore.createRegistrationPaymentWindow = async (payload) => ({
+    id: 99,
+    ...payload,
+    status: 'active',
+    expires_at: new Date(Date.now() + 7 * 60 * 1000).toISOString()
+  });
+  eligibilityStore.getActiveRegistrationPaymentWindow = async () => null;
+  let outboundCount = 0;
+  globalThis.telegramBot = {
+    telegram: {
+      async sendMessage(_c, _t, opts = {}) {
+        outboundCount += 1;
+        return { message_id: 9000 + outboundCount, reply_markup: opts.reply_markup || { inline_keyboard: [[{ text: 'x', callback_data: 'x' }]] } };
+      },
+      async sendPhoto() {
+        outboundCount += 1;
+        return { message_id: 9100 + outboundCount };
+      },
+      async editMessageReplyMarkup() {}
+    }
+  };
+  assert.equal(
+    isActiveDepositSession(eligibilityStore._state(), eligibilityStore._botSession()),
+    true
+  );
+  assert.equal(
+    shouldUseRegistrationBot(
+      { job_type: 'inbound_message', input_text: '10' },
+      eligibilityStore._state(),
+      registeredContact(),
+      eligibilityStore._botSession()
+    ),
+    true
+  );
+  const skippedAmount = await processBotJob(eligibilityStore, {
+    id: 501,
+    contact_id: 77,
+    job_type: 'inbound_message',
+    input_text: '10',
+    action: null,
+    incoming_telegram_message_id: 555,
+    created_at: new Date().toISOString()
+  }, { bot: globalThis.telegramBot });
+  assert.notEqual(skippedAmount.skipped, true);
+  assert.equal(skippedAmount.decision?.kind, 'registration_send_payment_qr');
+  console.log('ok deposit amount is not silently skipped when eligibility fails');
+
   globalThis.appbegStore = previousStore;
   console.log('All registered deposit/post-registration focused checks passed.');
 }

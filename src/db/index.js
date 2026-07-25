@@ -3978,7 +3978,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT sent_at
       FROM messages
       WHERE telegram_user_id = ?
-        AND telegram_message_id = ?
+        AND CAST(telegram_message_id AS TEXT) = CAST(? AS TEXT)
       ORDER BY id DESC
       LIMIT 1
     `).get(contactId, telegramMessageId);
