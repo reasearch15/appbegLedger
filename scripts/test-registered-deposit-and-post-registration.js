@@ -102,7 +102,12 @@ function createRegistrationStore() {
   };
 }
 
-function createDepositStore({ paymentName = 'Amy Fei', currentFlow = null, currentStep = null } = {}) {
+function createDepositStore({
+  paymentName = 'Amy Fei',
+  currentFlow = null,
+  currentStep = null,
+  registrationInfo = {}
+} = {}) {
   let state = {
     current_flow: currentFlow,
     current_step: currentStep,
@@ -110,11 +115,17 @@ function createDepositStore({ paymentName = 'Amy Fei', currentFlow = null, curre
       payment_display_name: paymentName,
       payment_name: paymentName,
       appbeg_player_uid: 'playeruid123456',
-      appbeg_creation_complete: true
+      appbeg_creation_complete: true,
+      ...registrationInfo
     }
   };
+  const calls = { resetBotState: 0 };
   return {
     state,
+    calls,
+    _state() {
+      return state;
+    },
     async ensureAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
     },
@@ -135,6 +146,10 @@ function createDepositStore({ paymentName = 'Amy Fei', currentFlow = null, curre
     async updateRegistrationInfo(_id, info = {}) {
       state.registration_info = { ...state.registration_info, ...info };
       return this.ensureAutomationState();
+    },
+    async resetBotState() {
+      calls.resetBotState += 1;
+      return { current_screen: 'Home' };
     },
     async getActiveRegistrationPaymentWindow() {
       return null;
@@ -349,6 +364,106 @@ async function run() {
   });
   assert.notEqual(ordinary.kind, 'registered_deposit_discovery');
   console.log('ok arbitrary registered text is not treated as deposit');
+
+  // Help → Deposit → amount must switch session to deposit and accept the amount.
+  const helpThenDepositStore = createDepositStore();
+  const helpHome = await decideBotReply({
+    store: helpThenDepositStore,
+    contact: registeredContact(),
+    action: 'bot:how_it_works'
+  });
+  assert.equal(helpHome.statePatch, null);
+  const depositAfterHelp = await decideBotReply({
+    store: helpThenDepositStore,
+    contact: registeredContact(),
+    action: 'menu:deposit'
+  });
+  assert.equal(depositAfterHelp.kind, 'deposit_ask_amount');
+  assert.equal(depositAfterHelp.statePatch.currentFlow, 'registered_deposit');
+  assert.equal(depositAfterHelp.statePatch.currentStep, 'deposit_amount');
+  assert.equal(depositAfterHelp.statePatch.registrationInfo.deposit_in_progress, true);
+  assert.ok(helpThenDepositStore.calls.resetBotState >= 1);
+  await helpThenDepositStore.updateAutomationState(77, depositAfterHelp.statePatch);
+  const amountAfterHelp = await decideBotReply({
+    store: helpThenDepositStore,
+    contact: registeredContact(),
+    messageText: '25'
+  });
+  assert.equal(amountAfterHelp.kind, 'registration_send_payment_qr');
+  assert.equal(amountAfterHelp.sendPaymentQr.firstDepositAmount, 25);
+  assert.equal(amountAfterHelp.sendPaymentQr.flowType, PAYMENT_WINDOW_FLOW.DEPOSIT);
+  console.log('ok Help → Deposit → amount starts deposit window');
+
+  // Account → Deposit → amount
+  const accountThenDepositStore = createDepositStore();
+  await decideBotReply({
+    store: accountThenDepositStore,
+    contact: registeredContact(),
+    action: 'bot:my_account'
+  });
+  const depositAfterAccount = await decideBotReply({
+    store: accountThenDepositStore,
+    contact: registeredContact(),
+    action: 'menu:deposit'
+  });
+  assert.equal(depositAfterAccount.statePatch.currentFlow, 'registered_deposit');
+  assert.equal(depositAfterAccount.statePatch.currentStep, 'deposit_amount');
+  await accountThenDepositStore.updateAutomationState(77, depositAfterAccount.statePatch);
+  const amountAfterAccount = await decideBotReply({
+    store: accountThenDepositStore,
+    contact: registeredContact(),
+    messageText: '15'
+  });
+  assert.equal(amountAfterAccount.kind, 'registration_send_payment_qr');
+  assert.equal(amountAfterAccount.sendPaymentQr.firstDepositAmount, 15);
+  console.log('ok Account → Deposit → amount starts deposit window');
+
+  // Cancel old flow → Deposit → amount
+  const cancelThenDepositStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_amount',
+    registrationInfo: { deposit_in_progress: true }
+  });
+  const cancelled = await decideBotReply({
+    store: cancelThenDepositStore,
+    contact: registeredContact(),
+    action: 'deposit:cancel'
+  });
+  await cancelThenDepositStore.updateAutomationState(77, cancelled.statePatch);
+  assert.equal(cancelThenDepositStore._state().current_flow, null);
+  const depositAfterCancel = await decideBotReply({
+    store: cancelThenDepositStore,
+    contact: registeredContact(),
+    action: 'menu:deposit'
+  });
+  await cancelThenDepositStore.updateAutomationState(77, depositAfterCancel.statePatch);
+  const amountAfterCancel = await decideBotReply({
+    store: cancelThenDepositStore,
+    contact: registeredContact(),
+    messageText: '20'
+  });
+  assert.equal(amountAfterCancel.kind, 'registration_send_payment_qr');
+  assert.equal(amountAfterCancel.sendPaymentQr.firstDepositAmount, 20);
+  console.log('ok cancel → Deposit → amount starts deposit window');
+
+  // Stale wiped flow/step with deposit_in_progress must still accept amount (not Support/menu).
+  const wipedFlowStore = createDepositStore({
+    currentFlow: null,
+    currentStep: null,
+    registrationInfo: {
+      deposit_in_progress: true,
+      payment_display_name: 'Amy Fei',
+      payment_name: 'Amy Fei'
+    }
+  });
+  const amountAfterWipe = await decideBotReply({
+    store: wipedFlowStore,
+    contact: registeredContact(),
+    messageText: '30'
+  });
+  assert.equal(amountAfterWipe.kind, 'registration_send_payment_qr');
+  assert.equal(amountAfterWipe.sendPaymentQr.firstDepositAmount, 30);
+  console.log('ok amount after wiped deposit flow/step still hits deposit handler');
 
   globalThis.appbegStore = previousStore;
   console.log('All registered deposit/post-registration focused checks passed.');

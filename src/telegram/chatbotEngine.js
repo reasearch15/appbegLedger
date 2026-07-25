@@ -3,6 +3,7 @@ import {
   isUnregisteredStatus,
   chatbotWelcomeCooldownMs,
   parseFirstDepositAmount,
+  parseMoneyToCents,
   isReferralSkipInput
 } from '../registration/utils.js';
 import {
@@ -47,7 +48,8 @@ import {
 import {
   beginRegisteredDeposit,
   continueRegisteredDeposit,
-  isRegisteredDepositFlow
+  isRegisteredDepositFlow,
+  resolveRegisteredDepositStep
 } from './registeredDepositFlow.js';
 import {
   buildStateAwareEntryMenu,
@@ -313,7 +315,42 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       action = 'staff:takeover';
     } else if (command.command === 'cancel') {
       action = registrationInProgress ? 'bot:cancel_request' : 'bot:stop';
+    } else if (command.command === 'deposit') {
+      action = 'bot:deposit';
     }
+  }
+
+  // Deposit from ANY surface (Help, Account, main menu, stale flows) always wins:
+  // reset prior session and start a clean deposit amount wizard.
+  if (
+    action === 'bot:deposit'
+    && (effective.is_registered || effective.effective_status === 'Registered')
+  ) {
+    return await beginRegisteredDeposit(store, contact, info);
+  }
+
+  const depositSessionActive = Boolean(
+    isRegisteredDepositFlow(flow, normalizedStep)
+    || info.deposit_in_progress
+    || info.deposit_awaiting_payment
+  );
+  const depositContinueStep = resolveRegisteredDepositStep(normalizedStep, info);
+
+  // Amount replies must stay on deposit even if Help/Support wiped flow/step.
+  if (
+    !action
+    && depositSessionActive
+    && (effective.is_registered || effective.effective_status === 'Registered')
+    && parseMoneyToCents(text) != null
+  ) {
+    return await continueRegisteredDeposit({
+      store,
+      contact,
+      text,
+      action: null,
+      step: depositContinueStep,
+      info
+    });
   }
 
   if (!action && isGreetingEntryText(text)) {
@@ -328,11 +365,12 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
   // Shared entry menu for first interaction / empty media / forced entry (same as /start).
   // Never auto-start registration from plain text like "hello" or "register".
+  // Active deposit amount entry must not be stolen by the entry menu.
   if (shouldShowEntryMenu({
     text,
     action,
     forceEntryMenu: forceEntryMenu || isPlainRegisterText(text),
-    registrationInProgress
+    registrationInProgress: registrationInProgress || depositSessionActive
   })) {
     return await buildStateAwareEntryMenu({
       store,
@@ -491,7 +529,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       || info.deposit_in_progress
       || info.deposit_awaiting_payment
     ) {
-      // Always normalize on Deposit: expired windows must not block a fresh amount session.
+      // bot:deposit is handled early above; keep cancel/retry/continue here.
       if (action === 'bot:deposit') {
         return await beginRegisteredDeposit(store, contact, info);
       }
@@ -500,7 +538,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         contact,
         text,
         action,
-        step: normalizedStep,
+        step: resolveRegisteredDepositStep(normalizedStep, info),
         info
       });
     }
@@ -900,8 +938,14 @@ function reviewDecision(info) {
 
 function normalizeStep(step, flow) {
   const canonical = canonicalizeRegistrationStep(step);
-  if (isRegisteredDepositFlow(flow, step)) {
-    return String(step || canonical);
+  if (flow === 'registered_deposit' || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(String(step || ''))) {
+    const raw = String(step || '').trim();
+    if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(raw)) {
+      return raw;
+    }
+    // Missing/stale step under an active deposit flow should resume amount entry,
+    // not collapse to registration "welcome".
+    return 'deposit_amount';
   }
   if (flow === 'registration_info') {
     if (canonical === 'username' || step === 'appbeg_username') return 'username';

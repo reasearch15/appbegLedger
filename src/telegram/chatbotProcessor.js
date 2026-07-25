@@ -258,9 +258,14 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     if (!forceEntryMenu && job.job_type === 'inbound_message' && !job.action) {
       const flow = beforeState.current_flow || beforeState.currentFlow;
       const step = beforeState.current_step || beforeState.currentStep || 'welcome';
-      const inProgress = (flow === 'bot_registration' || flow === 'registration_info')
-        && step
-        && step !== 'welcome';
+      const info = beforeState.registration_info || beforeState.registrationInfo || {};
+      const inProgress = (
+        ((flow === 'bot_registration' || flow === 'registration_info') && step && step !== 'welcome')
+        || flow === 'registered_deposit'
+        || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(String(step || ''))
+        || info.deposit_in_progress
+        || info.deposit_awaiting_payment
+      );
       if (!inProgress && store.countIncomingMessages) {
         const inboundCount = await store.countIncomingMessages(contact.id);
         forceEntryMenu = inboundCount <= 1;

@@ -43,6 +43,23 @@ export function isRegisteredDepositFlow(flow, step) {
   ].includes(String(step || ''));
 }
 
+/**
+ * Resolve the active deposit wizard step even when flow/step were partially wiped
+ * (Help/Support/main-menu read-only surfaces leave deposit_in_progress behind).
+ */
+export function resolveRegisteredDepositStep(step, info = {}) {
+  const raw = String(step || '').trim();
+  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(raw)) {
+    return raw;
+  }
+  if (info.deposit_awaiting_payment) return 'deposit_await_payment';
+  const knownName = String(info.payment_display_name || info.payment_name || '').trim();
+  if (info.deposit_in_progress || knownName) {
+    return knownName ? 'deposit_amount' : 'deposit_payment_name';
+  }
+  return raw || 'deposit_payment_name';
+}
+
 /** Temporary wizard fields that must not block a fresh deposit after expiry/cancel. */
 export function clearStaleDepositSessionFields(info = {}) {
   const next = { ...(info || {}) };
@@ -154,9 +171,15 @@ function resumeActiveDepositDecision(activeWindow, info = {}) {
 
 /**
  * Start or restart a registered deposit after normalizing any expired attempt.
+ * Always replaces prior bot flow/session state with a clean deposit wizard.
  * Persists a fresh amount-entry session (caller must apply statePatch before/with the prompt).
  */
 export async function beginRegisteredDeposit(store, contact, info = {}) {
+  // Clear legacy bot_sessions screen stack so Help/Account/menu screens cannot linger.
+  if (typeof store.resetBotState === 'function') {
+    await store.resetBotState(contact.id, { actorName: 'Bot', action: 'deposit' }).catch(() => null);
+  }
+
   const normalized = await normalizeRegisteredDepositAttempt(store, contact.id, info);
   if (normalized.activeWindow) {
     return resumeActiveDepositDecision(normalized.activeWindow, normalized.info);
@@ -220,7 +243,7 @@ export async function continueRegisteredDeposit({
   step,
   info
 }) {
-  const normalizedStep = String(step || 'deposit_payment_name');
+  const normalizedStep = resolveRegisteredDepositStep(step, info);
 
   if (action === 'deposit:cancel' || action === 'bot:stop') {
     if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
