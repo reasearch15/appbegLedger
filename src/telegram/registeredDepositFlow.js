@@ -348,17 +348,35 @@ export async function continueRegisteredDeposit({
   text,
   action,
   step,
-  info
+  info,
+  callbackMessageId = null
 }) {
   const normalizedStep = resolveRegisteredDepositStep(step, info);
 
   if (action === 'deposit:cancel' || action === 'bot:stop') {
+    let qrMessageId = Number(info.payment_qr_telegram_message_id || 0) || null;
+    if (!qrMessageId && typeof store.getBotSession === 'function') {
+      const botSession = await store.getBotSession(contact.id).catch(() => null);
+      let sessionContext = botSession?.context || null;
+      if (!sessionContext && botSession?.context_json) {
+        try {
+          sessionContext = JSON.parse(botSession.context_json);
+        } catch {
+          sessionContext = null;
+        }
+      }
+      qrMessageId = Number(sessionContext?.qr_telegram_message_id || 0) || null;
+    }
     if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
       await store.expireRegistrationPaymentWindow(info.deposit_payment_window_id, { suppressNotification: true }).catch(() => null);
     }
     await clearDepositBotSession(store, contact.id);
     return {
       kind: 'deposit_cancelled',
+      removeDepositPaymentMessage: {
+        messageId: qrMessageId,
+        callbackMessageId: Number(callbackMessageId || 0) || null
+      },
       replies: [{
         text: 'Deposit cancelled. Press Deposit when you are ready to try again.',
         buttons: registeredMenuButtons()
@@ -372,7 +390,8 @@ export async function continueRegisteredDeposit({
           deposit_awaiting_payment: false
         })
       },
-      escalate: false
+      escalate: false,
+      logEvent: { event: 'deposit_cancelled', qrMessageId }
     };
   }
 

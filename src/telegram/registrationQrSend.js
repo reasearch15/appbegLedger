@@ -179,6 +179,22 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `message_id=${photoResult?.messageId || 'n/a'} amount=${amount ?? 'n/a'}`
   );
 
+  // Keep the QR telegram message id on the deposit bot session so Cancel can remove it
+  // even if automation registration_info is partially overwritten later.
+  if (isDeposit && typeof store.setBotScreen === 'function' && photoResult?.messageId) {
+    await store.setBotScreen(contactId, 'Deposit', {
+      actorName: 'Bot',
+      pushCurrent: false,
+      workflowKey: 'deposit',
+      workflowStep: 'await_payment',
+      context: {
+        payment_name: sendPaymentQr.paymentDisplayName || null,
+        amount,
+        qr_telegram_message_id: Number(photoResult.messageId) || null
+      }
+    }).catch(() => null);
+  }
+
   let paymentWindow = await store.getActiveRegistrationPaymentWindow?.(contactId, { flowType }).catch(() => null);
   let windowCreated = false;
 

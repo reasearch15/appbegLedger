@@ -611,6 +611,132 @@ async function run() {
   assert.equal(skippedAmount.decision?.kind, 'registration_send_payment_qr');
   console.log('ok deposit amount is not silently skipped when eligibility fails');
 
+  // Cancel Deposit after QR: delete QR message, clear cancel button, return to menu.
+  const cancelCleanupStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_await_payment',
+    registrationInfo: {
+      deposit_in_progress: true,
+      deposit_awaiting_payment: true,
+      deposit_requested_amount: 10,
+      deposit_payment_window_id: 88,
+      payment_qr_telegram_message_id: 4242,
+      payment_display_name: 'Amy Fei',
+      payment_name: 'Amy Fei'
+    }
+  });
+  await cancelCleanupStore.setBotScreen(77, 'Deposit', {
+    workflowKey: 'deposit',
+    workflowStep: 'await_payment',
+    context: { qr_telegram_message_id: 4242, amount: 10 }
+  });
+  cancelCleanupStore.getUserProfile = async () => registeredContact();
+  cancelCleanupStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
+  cancelCleanupStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true, reason: 'eligible' });
+  cancelCleanupStore.completeBotJob = async () => {};
+  cancelCleanupStore.logAutomationDecision = async () => {};
+  cancelCleanupStore.storeOutgoingMessage = async (msg) => ({ id: 1, ...msg });
+  cancelCleanupStore.getContactPreferredMessageSource = async () => 'bot_api';
+  let expiredWindowId = null;
+  cancelCleanupStore.expireRegistrationPaymentWindow = async (id) => {
+    expiredWindowId = id;
+    return { id, status: 'expired' };
+  };
+  const telegramCalls = { deleted: [], editedCaption: [], clearedMarkup: [], sent: [] };
+  const cancelBot = {
+    telegram: {
+      async deleteMessage(chatId, messageId) {
+        telegramCalls.deleted.push({ chatId, messageId });
+        return true;
+      },
+      async editMessageCaption(chatId, messageId, _inline, caption, extra) {
+        telegramCalls.editedCaption.push({ chatId, messageId, caption, extra });
+        return true;
+      },
+      async editMessageReplyMarkup(chatId, messageId, _inline, markup) {
+        telegramCalls.clearedMarkup.push({ chatId, messageId, markup });
+        return true;
+      },
+      async sendMessage(chatId, text, opts = {}) {
+        telegramCalls.sent.push({ chatId, text, opts });
+        return { message_id: 9301, reply_markup: opts.reply_markup };
+      },
+      async editMessageText() {}
+    }
+  };
+  const cancelResult = await processBotJob(cancelCleanupStore, {
+    id: 502,
+    contact_id: 77,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:cancel',
+    incoming_telegram_message_id: 4242,
+    created_at: new Date().toISOString()
+  }, { bot: cancelBot });
+  assert.equal(cancelResult.decision?.kind, 'deposit_cancelled');
+  assert.equal(expiredWindowId, 88);
+  assert.deepEqual(telegramCalls.deleted, [{ chatId: 9077, messageId: 4242 }]);
+  assert.equal(telegramCalls.editedCaption.length, 0);
+  assert.equal(cancelCleanupStore._state().current_flow, null);
+  assert.equal(cancelCleanupStore._state().registration_info.deposit_in_progress, undefined);
+  assert.equal(cancelCleanupStore._botSession().workflow_key, null);
+  assert.match(String(telegramCalls.sent[0]?.text || ''), /Deposit cancelled/i);
+  assert.ok((telegramCalls.sent[0]?.opts?.reply_markup?.inline_keyboard || []).flat().some((b) => /deposit/i.test(b.callback_data || b.text || '')));
+  console.log('ok Cancel Deposit deletes QR message and returns to menu');
+
+  // If Telegram cannot delete the QR, edit caption and strip Cancel Deposit.
+  const cancelEditStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_await_payment',
+    registrationInfo: {
+      deposit_in_progress: true,
+      deposit_awaiting_payment: true,
+      payment_qr_telegram_message_id: 5252,
+      deposit_payment_window_id: 89
+    }
+  });
+  cancelEditStore.getUserProfile = async () => registeredContact();
+  cancelEditStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
+  cancelEditStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true, reason: 'eligible' });
+  cancelEditStore.completeBotJob = async () => {};
+  cancelEditStore.logAutomationDecision = async () => {};
+  cancelEditStore.storeOutgoingMessage = async (msg) => ({ id: 1, ...msg });
+  cancelEditStore.getContactPreferredMessageSource = async () => 'bot_api';
+  cancelEditStore.expireRegistrationPaymentWindow = async () => null;
+  const editCalls = { deleted: [], editedCaption: [], sent: [] };
+  const editBot = {
+    telegram: {
+      async deleteMessage() {
+        throw new Error('message can\'t be deleted');
+      },
+      async editMessageCaption(chatId, messageId, _inline, caption, extra) {
+        editCalls.editedCaption.push({ chatId, messageId, caption, extra });
+        return true;
+      },
+      async editMessageReplyMarkup() {},
+      async sendMessage(chatId, text, opts = {}) {
+        editCalls.sent.push({ chatId, text, opts });
+        return { message_id: 9302, reply_markup: opts.reply_markup };
+      }
+    }
+  };
+  const editCancelResult = await processBotJob(cancelEditStore, {
+    id: 503,
+    contact_id: 77,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:cancel',
+    incoming_telegram_message_id: 5252,
+    created_at: new Date().toISOString()
+  }, { bot: editBot });
+  assert.equal(editCancelResult.decision?.kind, 'deposit_cancelled');
+  assert.equal(editCalls.editedCaption.length, 1);
+  assert.equal(editCalls.editedCaption[0].messageId, 5252);
+  assert.equal(editCalls.editedCaption[0].caption, 'Deposit cancelled.');
+  assert.deepEqual(editCalls.editedCaption[0].extra?.reply_markup, { inline_keyboard: [] });
+  assert.match(String(editCalls.sent[0]?.text || ''), /Deposit cancelled/i);
+  console.log('ok Cancel Deposit edits QR when delete fails');
+
   globalThis.appbegStore = previousStore;
   console.log('All registered deposit/post-registration focused checks passed.');
 }

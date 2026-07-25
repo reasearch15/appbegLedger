@@ -362,6 +362,14 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       });
     }
 
+    if (decision.removeDepositPaymentMessage) {
+      await handleDepositCancelCleanup({
+        contact,
+        cleanup: decision.removeDepositPaymentMessage,
+        bot: bot || globalThis.telegramBot || null
+      });
+    }
+
     if (decision.completeRegistration) {
       const info = decision.statePatch?.registrationInfo
         || (await store.getAutomationState(contact.id))?.registration_info
@@ -615,6 +623,95 @@ function formatLogExtra(logEvent = {}) {
     .filter(([key]) => key !== 'event')
     .map(([key, value]) => ` ${key}=${value}`)
     .join('');
+}
+
+/**
+ * After Cancel Deposit: delete the QR/payment message when possible.
+ * If Telegram refuses delete, edit caption/text to "Deposit cancelled" and strip buttons.
+ * Also strip Cancel Deposit from the pressed callback message when it is a different message.
+ */
+async function handleDepositCancelCleanup({ contact, cleanup = {}, bot = null }) {
+  if (!bot?.telegram || !contact?.telegram_id) return;
+
+  const chatId = contact.telegram_id;
+  const qrMessageId = Number(cleanup.messageId || 0) || null;
+  const callbackMessageId = Number(cleanup.callbackMessageId || 0) || null;
+  let qrRemoved = false;
+
+  if (qrMessageId && bot.telegram.deleteMessage) {
+    try {
+      await bot.telegram.deleteMessage(chatId, qrMessageId);
+      qrRemoved = true;
+      console.log(`[chatbot] deposit_qr_message_deleted contact=${contact.id} message_id=${qrMessageId}`);
+    } catch (error) {
+      console.log(
+        `[chatbot] deposit_qr_message_delete_failed contact=${contact.id} ` +
+        `message_id=${qrMessageId} reason=${error.message}`
+      );
+    }
+  }
+
+  if (qrMessageId && !qrRemoved) {
+    const emptyMarkup = { reply_markup: { inline_keyboard: [] } };
+    try {
+      if (bot.telegram.editMessageCaption) {
+        await bot.telegram.editMessageCaption(
+          chatId,
+          qrMessageId,
+          undefined,
+          'Deposit cancelled.',
+          emptyMarkup
+        );
+      } else if (bot.telegram.editMessageText) {
+        await bot.telegram.editMessageText(
+          chatId,
+          qrMessageId,
+          undefined,
+          'Deposit cancelled.',
+          emptyMarkup
+        );
+      } else if (bot.telegram.editMessageReplyMarkup) {
+        await bot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
+      }
+      console.log(`[chatbot] deposit_qr_message_cancelled_inplace contact=${contact.id} message_id=${qrMessageId}`);
+    } catch (error) {
+      console.log(
+        `[chatbot] deposit_qr_message_edit_failed contact=${contact.id} ` +
+        `message_id=${qrMessageId} reason=${error.message}`
+      );
+      if (bot.telegram.editMessageReplyMarkup) {
+        try {
+          await bot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
+        } catch (markupError) {
+          console.log(
+            `[chatbot] deposit_qr_button_clear_failed contact=${contact.id} ` +
+            `message_id=${qrMessageId} reason=${markupError.message}`
+          );
+        }
+      }
+    }
+  }
+
+  // Clear Cancel Deposit on the pressed message when it was not already deleted as the QR photo.
+  const shouldClearCallbackButtons = Boolean(
+    callbackMessageId
+    && bot.telegram.editMessageReplyMarkup
+    && !(qrRemoved && callbackMessageId === qrMessageId)
+    && !(qrMessageId && !qrRemoved && callbackMessageId === qrMessageId)
+  );
+  if (shouldClearCallbackButtons) {
+    try {
+      await bot.telegram.editMessageReplyMarkup(chatId, callbackMessageId, undefined, { inline_keyboard: [] });
+      console.log(
+        `[chatbot] deposit_cancel_button_cleared contact=${contact.id} message_id=${callbackMessageId}`
+      );
+    } catch (error) {
+      console.log(
+        `[chatbot] deposit_cancel_button_clear_failed contact=${contact.id} ` +
+        `message_id=${callbackMessageId} reason=${error.message}`
+      );
+    }
+  }
 }
 
 async function reinforceDepositAmountSession(store, contact, decision) {

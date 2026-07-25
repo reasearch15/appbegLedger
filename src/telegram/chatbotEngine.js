@@ -361,7 +361,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       text,
       action: null,
       step: depositContinueStep,
-      info
+      info,
+      callbackMessageId
     });
   }
 
@@ -552,7 +553,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
         text,
         action,
         step: depositContinueStep,
-        info
+        info,
+        callbackMessageId
       });
     }
     return decideRegisteredSupport({ text, action, contact, effective });
@@ -571,7 +573,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       text,
       action,
       step: depositContinueStep,
-      info
+      info,
+      callbackMessageId
     });
   }
 
