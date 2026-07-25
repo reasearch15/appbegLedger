@@ -150,6 +150,7 @@ export function clearStaleDepositSessionFields(info = {}) {
   delete next.payment_window_expires_at;
   delete next.payment_qr_code_id;
   delete next.payment_qr_telegram_message_id;
+  delete next.deposit_qr_telegram_message_id;
   return next;
 }
 
@@ -354,7 +355,16 @@ export async function continueRegisteredDeposit({
   const normalizedStep = resolveRegisteredDepositStep(step, info);
 
   if (action === 'deposit:cancel' || action === 'bot:stop') {
-    let qrMessageId = Number(info.payment_qr_telegram_message_id || 0) || null;
+    const awaitingPayment = Boolean(
+      info.deposit_awaiting_payment
+      || normalizedStep === 'deposit_await_payment'
+      || normalizedStep === DEPOSIT_BOT_SESSION_STEP_AWAIT
+    );
+    let qrMessageId = Number(
+      info.deposit_qr_telegram_message_id
+      || info.payment_qr_telegram_message_id
+      || 0
+    ) || null;
     if (!qrMessageId && typeof store.getBotSession === 'function') {
       const botSession = await store.getBotSession(contact.id).catch(() => null);
       let sessionContext = botSession?.context || null;
@@ -365,17 +375,34 @@ export async function continueRegisteredDeposit({
           sessionContext = null;
         }
       }
-      qrMessageId = Number(sessionContext?.qr_telegram_message_id || 0) || null;
+      qrMessageId = Number(
+        sessionContext?.qr_telegram_message_id
+        || sessionContext?.deposit_qr_telegram_message_id
+        || 0
+      ) || null;
     }
+    const pressedMessageId = Number(callbackMessageId || 0) || null;
+    // Cancel Deposit on the QR photo: the callback message IS the photo to remove.
+    // Prefer stored id, but always include the pressed QR message when awaiting payment.
+    if (!qrMessageId && awaitingPayment && pressedMessageId) {
+      qrMessageId = pressedMessageId;
+    }
+
     if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
       await store.expireRegistrationPaymentWindow(info.deposit_payment_window_id, { suppressNotification: true }).catch(() => null);
     }
     await clearDepositBotSession(store, contact.id);
+    console.log(
+      `[chatbot] deposit_cancel_requested contact=${contact.id} ` +
+      `qr_message_id=${qrMessageId || 'none'} callback_message_id=${pressedMessageId || 'none'} ` +
+      `awaiting_payment=${awaitingPayment}`
+    );
     return {
       kind: 'deposit_cancelled',
       removeDepositPaymentMessage: {
         messageId: qrMessageId,
-        callbackMessageId: Number(callbackMessageId || 0) || null
+        callbackMessageId: pressedMessageId,
+        awaitingPayment
       },
       replies: [{
         text: 'Deposit cancelled. Press Deposit when you are ready to try again.',
@@ -391,7 +418,7 @@ export async function continueRegisteredDeposit({
         })
       },
       escalate: false,
-      logEvent: { event: 'deposit_cancelled', qrMessageId }
+      logEvent: { event: 'deposit_cancelled', qrMessageId, callbackMessageId: pressedMessageId }
     };
   }
 

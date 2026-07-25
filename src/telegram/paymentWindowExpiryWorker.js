@@ -83,6 +83,7 @@ export async function processPaymentWindowExpiryTick({
         delete info.payment_window_expires_at;
         delete info.payment_qr_code_id;
         delete info.payment_qr_telegram_message_id;
+        delete info.deposit_qr_telegram_message_id;
         await store.updateAutomationState(window.contact_id, {
           currentFlow: null,
           currentStep: null,

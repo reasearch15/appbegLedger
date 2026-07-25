@@ -179,9 +179,17 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `message_id=${photoResult?.messageId || 'n/a'} amount=${amount ?? 'n/a'}`
   );
 
-  // Keep the QR telegram message id on the deposit bot session so Cancel can remove it
+  const qrTelegramMessageId = Number(photoResult?.messageId || 0) || null;
+  if (!qrTelegramMessageId) {
+    console.log(
+      `[chatbot] registration_qr_message_id_missing contact=${contactId} ` +
+      `payment_method_id=${paymentMethodId} qr_id=${qr.id} flow=${flowType}`
+    );
+  }
+
+  // Keep the QR telegram photo message id on the deposit bot session so Cancel can remove it
   // even if automation registration_info is partially overwritten later.
-  if (isDeposit && typeof store.setBotScreen === 'function' && photoResult?.messageId) {
+  if (isDeposit && typeof store.setBotScreen === 'function' && qrTelegramMessageId) {
     await store.setBotScreen(contactId, 'Deposit', {
       actorName: 'Bot',
       pushCurrent: false,
@@ -190,7 +198,8 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       context: {
         payment_name: sendPaymentQr.paymentDisplayName || null,
         amount,
-        qr_telegram_message_id: Number(photoResult.messageId) || null
+        qr_telegram_message_id: qrTelegramMessageId,
+        deposit_qr_telegram_message_id: qrTelegramMessageId
       }
     }).catch(() => null);
   }
@@ -254,7 +263,8 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       ...currentInfo,
       payment_qr_code_id: qr.id,
       payment_window_id: paymentWindow.id,
-      payment_qr_telegram_message_id: photoResult?.messageId || null,
+      payment_qr_telegram_message_id: qrTelegramMessageId,
+      ...(isDeposit ? { deposit_qr_telegram_message_id: qrTelegramMessageId } : {}),
       payment_window_expires_at: paymentWindow.expires_at,
       ...(isDeposit
         ? {
@@ -281,7 +291,7 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     windowCreated,
     paymentWindow,
     qr,
-    messageId: photoResult?.messageId || null,
+    messageId: qrTelegramMessageId,
     caption,
     flowType
   };

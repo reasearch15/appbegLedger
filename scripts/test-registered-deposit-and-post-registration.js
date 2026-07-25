@@ -737,6 +737,152 @@ async function run() {
   assert.match(String(editCalls.sent[0]?.text || ''), /Deposit cancelled/i);
   console.log('ok Cancel Deposit edits QR when delete fails');
 
+  // Even if stored QR message id was lost, Cancel Deposit on the photo must still delete it.
+  const lostIdStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_await_payment',
+    registrationInfo: {
+      deposit_in_progress: true,
+      deposit_awaiting_payment: true,
+      deposit_payment_window_id: 90,
+      payment_display_name: 'Amy Fei'
+      // intentionally no payment_qr_telegram_message_id / deposit_qr_telegram_message_id
+    }
+  });
+  lostIdStore.getUserProfile = async () => registeredContact();
+  lostIdStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
+  lostIdStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true, reason: 'eligible' });
+  lostIdStore.completeBotJob = async () => {};
+  lostIdStore.logAutomationDecision = async () => {};
+  lostIdStore.storeOutgoingMessage = async (msg) => ({ id: 1, ...msg });
+  lostIdStore.getContactPreferredMessageSource = async () => 'bot_api';
+  lostIdStore.expireRegistrationPaymentWindow = async () => null;
+  const lostIdCalls = { deleted: [], sent: [] };
+  const lostIdBot = {
+    telegram: {
+      async deleteMessage(chatId, messageId) {
+        lostIdCalls.deleted.push({ chatId, messageId });
+        return true;
+      },
+      async editMessageCaption() {},
+      async editMessageReplyMarkup() {},
+      async sendMessage(chatId, text, opts = {}) {
+        lostIdCalls.sent.push({ chatId, text, opts });
+        return { message_id: 9303, reply_markup: opts.reply_markup };
+      }
+    }
+  };
+  const lostIdResult = await processBotJob(lostIdStore, {
+    id: 504,
+    contact_id: 77,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:cancel',
+    incoming_telegram_message_id: 8888,
+    created_at: new Date().toISOString()
+  }, { bot: lostIdBot });
+  assert.equal(lostIdResult.decision?.kind, 'deposit_cancelled');
+  assert.deepEqual(lostIdCalls.deleted, [{ chatId: 9077, messageId: 8888 }]);
+  assert.match(String(lostIdCalls.sent[0]?.text || ''), /Deposit cancelled/i);
+  console.log('ok Cancel Deposit deletes QR via callback message id when stored id is missing');
+
+  // Full path: amount → QR photo send persists message_id → Cancel deletes that photo.
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const qrDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deposit-cancel-qr-'));
+  const qrPath = path.join(qrDir, 'qr.png');
+  fs.writeFileSync(qrPath, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  ));
+  const e2eStore = createDepositStore({
+    currentFlow: 'registered_deposit',
+    currentStep: 'deposit_amount',
+    registrationInfo: {
+      deposit_in_progress: true,
+      payment_display_name: 'Amy Fei',
+      payment_name: 'Amy Fei'
+    }
+  });
+  await e2eStore.setBotScreen(77, 'Deposit', {
+    workflowKey: 'deposit',
+    workflowStep: 'waiting_amount',
+    context: { payment_name: 'Amy Fei' }
+  });
+  e2eStore.getUserProfile = async () => registeredContact();
+  e2eStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
+  e2eStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true, reason: 'eligible' });
+  e2eStore.completeBotJob = async () => {};
+  e2eStore.logAutomationDecision = async () => {};
+  e2eStore.storeOutgoingMessage = async (msg) => ({ id: 1, ...msg });
+  e2eStore.getContactPreferredMessageSource = async () => 'bot_api';
+  e2eStore.getRegistrationDefaultPaymentQr = async () => ({
+    paymentMethodId: 1,
+    paymentMethodName: 'Chime',
+    paymentMethodKey: 'chime',
+    qr: { id: 10, file_path: qrPath }
+  });
+  e2eStore.getActivePaymentQrForRegistration = async () => ({ id: 10, file_path: qrPath });
+  e2eStore.getActiveDefaultPaymentQr = async () => ({ id: 10, file_path: qrPath });
+  e2eStore.createRegistrationPaymentWindow = async (payload) => ({
+    id: 91,
+    ...payload,
+    status: 'active',
+    expires_at: new Date(Date.now() + 7 * 60 * 1000).toISOString()
+  });
+  e2eStore.getActiveRegistrationPaymentWindow = async () => null;
+  e2eStore.expireRegistrationPaymentWindow = async () => null;
+  const e2eCalls = { photos: [], deleted: [], sent: [] };
+  const e2eBot = {
+    telegram: {
+      async sendPhoto(chatId, _photo, opts = {}) {
+        const messageId = 7777;
+        e2eCalls.photos.push({ chatId, caption: opts.caption, messageId });
+        return { message_id: messageId, reply_markup: opts.reply_markup };
+      },
+      async deleteMessage(chatId, messageId) {
+        e2eCalls.deleted.push({ chatId, messageId });
+        return true;
+      },
+      async editMessageCaption() {},
+      async editMessageReplyMarkup() {},
+      async sendMessage(chatId, text, opts = {}) {
+        e2eCalls.sent.push({ chatId, text, opts });
+        return { message_id: 9304, reply_markup: opts.reply_markup };
+      }
+    }
+  };
+  const amountJob = await processBotJob(e2eStore, {
+    id: 505,
+    contact_id: 77,
+    job_type: 'inbound_message',
+    input_text: '10',
+    action: null,
+    incoming_telegram_message_id: 6001,
+    created_at: new Date().toISOString()
+  }, { bot: e2eBot });
+  assert.equal(amountJob.decision?.kind, 'registration_send_payment_qr');
+  assert.equal(e2eCalls.photos.length, 1);
+  assert.equal(e2eStore._state().registration_info.payment_qr_telegram_message_id, 7777);
+  assert.equal(e2eStore._state().registration_info.deposit_qr_telegram_message_id, 7777);
+  assert.equal(e2eStore._state().current_step, 'deposit_await_payment');
+
+  const cancelAfterQr = await processBotJob(e2eStore, {
+    id: 506,
+    contact_id: 77,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:cancel',
+    incoming_telegram_message_id: 7777,
+    created_at: new Date().toISOString()
+  }, { bot: e2eBot });
+  assert.equal(cancelAfterQr.decision?.kind, 'deposit_cancelled');
+  assert.deepEqual(e2eCalls.deleted, [{ chatId: 9077, messageId: 7777 }]);
+  assert.match(String(e2eCalls.sent.at(-1)?.text || ''), /Deposit cancelled/i);
+  assert.equal(e2eStore._state().registration_info.deposit_qr_telegram_message_id, undefined);
+  console.log('ok Deposit → amount → QR → Cancel Deposit deletes QR photo');
+
   globalThis.appbegStore = previousStore;
   console.log('All registered deposit/post-registration focused checks passed.');
 }

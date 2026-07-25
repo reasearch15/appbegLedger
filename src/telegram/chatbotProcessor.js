@@ -363,9 +363,14 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     }
 
     if (decision.removeDepositPaymentMessage) {
+      const cleanup = {
+        ...decision.removeDepositPaymentMessage,
+        callbackMessageId: decision.removeDepositPaymentMessage.callbackMessageId
+          || (job.job_type === 'callback_action' ? Number(job.incoming_telegram_message_id || 0) || null : null)
+      };
       await handleDepositCancelCleanup({
         contact,
-        cleanup: decision.removeDepositPaymentMessage,
+        cleanup,
         bot: bot || globalThis.telegramBot || null
       });
     }
@@ -626,85 +631,111 @@ function formatLogExtra(logEvent = {}) {
 }
 
 /**
- * After Cancel Deposit: delete the QR/payment message when possible.
- * If Telegram refuses delete, edit caption/text to "Deposit cancelled" and strip buttons.
- * Also strip Cancel Deposit from the pressed callback message when it is a different message.
+ * After Cancel Deposit: delete the QR photo message when possible.
+ * If Telegram refuses delete, edit caption to "Deposit cancelled" and strip buttons.
+ * When awaiting payment, the Cancel button is on the QR photo itself — delete that
+ * callback message even if the stored message id was lost.
  */
 async function handleDepositCancelCleanup({ contact, cleanup = {}, bot = null }) {
-  if (!bot?.telegram || !contact?.telegram_id) return;
-
-  const chatId = contact.telegram_id;
-  const qrMessageId = Number(cleanup.messageId || 0) || null;
-  const callbackMessageId = Number(cleanup.callbackMessageId || 0) || null;
-  let qrRemoved = false;
-
-  if (qrMessageId && bot.telegram.deleteMessage) {
-    try {
-      await bot.telegram.deleteMessage(chatId, qrMessageId);
-      qrRemoved = true;
-      console.log(`[chatbot] deposit_qr_message_deleted contact=${contact.id} message_id=${qrMessageId}`);
-    } catch (error) {
-      console.log(
-        `[chatbot] deposit_qr_message_delete_failed contact=${contact.id} ` +
-        `message_id=${qrMessageId} reason=${error.message}`
-      );
-    }
+  const activeBot = bot || globalThis.telegramBot || null;
+  if (!activeBot?.telegram || !contact?.telegram_id) {
+    console.log(
+      `[chatbot] deposit_qr_cleanup_skipped contact=${contact?.id || 'n/a'} ` +
+      `reason=${!activeBot?.telegram ? 'missing_bot' : 'missing_telegram_id'}`
+    );
+    return;
   }
 
-  if (qrMessageId && !qrRemoved) {
-    const emptyMarkup = { reply_markup: { inline_keyboard: [] } };
-    try {
-      if (bot.telegram.editMessageCaption) {
-        await bot.telegram.editMessageCaption(
-          chatId,
-          qrMessageId,
-          undefined,
-          'Deposit cancelled.',
-          emptyMarkup
+  const chatId = contact.telegram_id;
+  const storedQrMessageId = Number(cleanup.messageId || 0) || null;
+  const callbackMessageId = Number(cleanup.callbackMessageId || 0) || null;
+  const awaitingPayment = Boolean(cleanup.awaitingPayment);
+  const messageIds = new Set();
+  if (storedQrMessageId) messageIds.add(storedQrMessageId);
+  // Cancel Deposit on the QR photo: callback message is the photo to remove.
+  if (awaitingPayment && callbackMessageId) messageIds.add(callbackMessageId);
+
+  if (!messageIds.size) {
+    console.log(
+      `[chatbot] deposit_qr_cleanup_no_message_id contact=${contact.id} ` +
+      `callback_message_id=${callbackMessageId || 'none'} awaiting_payment=${awaitingPayment}`
+    );
+    if (callbackMessageId && activeBot.telegram.editMessageReplyMarkup) {
+      try {
+        await activeBot.telegram.editMessageReplyMarkup(chatId, callbackMessageId, undefined, { inline_keyboard: [] });
+        console.log(`[chatbot] deposit_cancel_button_cleared contact=${contact.id} message_id=${callbackMessageId}`);
+      } catch (error) {
+        console.log(
+          `[chatbot] deposit_cancel_button_clear_failed contact=${contact.id} ` +
+          `message_id=${callbackMessageId} reason=${error.message}`
         );
-      } else if (bot.telegram.editMessageText) {
-        await bot.telegram.editMessageText(
-          chatId,
-          qrMessageId,
-          undefined,
-          'Deposit cancelled.',
-          emptyMarkup
-        );
-      } else if (bot.telegram.editMessageReplyMarkup) {
-        await bot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
       }
-      console.log(`[chatbot] deposit_qr_message_cancelled_inplace contact=${contact.id} message_id=${qrMessageId}`);
-    } catch (error) {
-      console.log(
-        `[chatbot] deposit_qr_message_edit_failed contact=${contact.id} ` +
-        `message_id=${qrMessageId} reason=${error.message}`
-      );
-      if (bot.telegram.editMessageReplyMarkup) {
-        try {
-          await bot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
-        } catch (markupError) {
-          console.log(
-            `[chatbot] deposit_qr_button_clear_failed contact=${contact.id} ` +
-            `message_id=${qrMessageId} reason=${markupError.message}`
+    }
+    return;
+  }
+
+  for (const qrMessageId of messageIds) {
+    let qrRemoved = false;
+    if (activeBot.telegram.deleteMessage) {
+      try {
+        await activeBot.telegram.deleteMessage(chatId, qrMessageId);
+        qrRemoved = true;
+        console.log(`[chatbot] deposit_qr_message_deleted contact=${contact.id} message_id=${qrMessageId}`);
+      } catch (error) {
+        console.log(
+          `[chatbot] deposit_qr_message_delete_failed contact=${contact.id} ` +
+          `message_id=${qrMessageId} reason=${error.message}`
+        );
+      }
+    }
+
+    if (!qrRemoved) {
+      const emptyMarkup = { reply_markup: { inline_keyboard: [] } };
+      try {
+        if (activeBot.telegram.editMessageCaption) {
+          await activeBot.telegram.editMessageCaption(
+            chatId,
+            qrMessageId,
+            undefined,
+            'Deposit cancelled.',
+            emptyMarkup
           );
+        } else if (activeBot.telegram.editMessageText) {
+          await activeBot.telegram.editMessageText(
+            chatId,
+            qrMessageId,
+            undefined,
+            'Deposit cancelled.',
+            emptyMarkup
+          );
+        } else if (activeBot.telegram.editMessageReplyMarkup) {
+          await activeBot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
+        }
+        console.log(`[chatbot] deposit_qr_message_cancelled_inplace contact=${contact.id} message_id=${qrMessageId}`);
+      } catch (error) {
+        console.log(
+          `[chatbot] deposit_qr_message_edit_failed contact=${contact.id} ` +
+          `message_id=${qrMessageId} reason=${error.message}`
+        );
+        if (activeBot.telegram.editMessageReplyMarkup) {
+          try {
+            await activeBot.telegram.editMessageReplyMarkup(chatId, qrMessageId, undefined, { inline_keyboard: [] });
+          } catch (markupError) {
+            console.log(
+              `[chatbot] deposit_qr_button_clear_failed contact=${contact.id} ` +
+              `message_id=${qrMessageId} reason=${markupError.message}`
+            );
+          }
         }
       }
     }
   }
 
-  // Clear Cancel Deposit on the pressed message when it was not already deleted as the QR photo.
-  const shouldClearCallbackButtons = Boolean(
-    callbackMessageId
-    && bot.telegram.editMessageReplyMarkup
-    && !(qrRemoved && callbackMessageId === qrMessageId)
-    && !(qrMessageId && !qrRemoved && callbackMessageId === qrMessageId)
-  );
-  if (shouldClearCallbackButtons) {
+  // Pre-QR cancel: clear Cancel Deposit on the amount/name prompt message.
+  if (!awaitingPayment && callbackMessageId && !messageIds.has(callbackMessageId) && activeBot.telegram.editMessageReplyMarkup) {
     try {
-      await bot.telegram.editMessageReplyMarkup(chatId, callbackMessageId, undefined, { inline_keyboard: [] });
-      console.log(
-        `[chatbot] deposit_cancel_button_cleared contact=${contact.id} message_id=${callbackMessageId}`
-      );
+      await activeBot.telegram.editMessageReplyMarkup(chatId, callbackMessageId, undefined, { inline_keyboard: [] });
+      console.log(`[chatbot] deposit_cancel_button_cleared contact=${contact.id} message_id=${callbackMessageId}`);
     } catch (error) {
       console.log(
         `[chatbot] deposit_cancel_button_clear_failed contact=${contact.id} ` +
