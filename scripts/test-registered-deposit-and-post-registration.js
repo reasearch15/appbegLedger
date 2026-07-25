@@ -118,7 +118,34 @@ function createDepositStore({ paymentName = 'Amy Fei', currentFlow = null, curre
     async ensureAutomationState() {
       return { ...state, registration_info: { ...state.registration_info } };
     },
+    async getAutomationState() {
+      return this.ensureAutomationState();
+    },
+    async updateAutomationState(_id, patch = {}) {
+      state = {
+        ...state,
+        current_flow: patch.currentFlow === undefined ? state.current_flow : patch.currentFlow,
+        current_step: patch.currentStep === undefined ? state.current_step : patch.currentStep,
+        registration_info: patch.registrationInfo
+          ? { ...patch.registrationInfo }
+          : state.registration_info
+      };
+      return this.ensureAutomationState();
+    },
+    async updateRegistrationInfo(_id, info = {}) {
+      state.registration_info = { ...state.registration_info, ...info };
+      return this.ensureAutomationState();
+    },
     async getActiveRegistrationPaymentWindow() {
+      return null;
+    },
+    async expireRegistrationPaymentWindowIfDue() {
+      return null;
+    },
+    async listRegistrationPaymentWindowsForExpiryWorker() {
+      return [];
+    },
+    async expireRegistrationPaymentWindow() {
       return null;
     },
     async getRegistrationDefaultPaymentQr() {

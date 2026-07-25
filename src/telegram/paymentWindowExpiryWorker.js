@@ -69,18 +69,32 @@ export async function processPaymentWindowExpiryTick({
     }
 
     if (isDeposit) {
-      await store.updateAutomationState(window.contact_id, {
-        currentFlow: null,
-        currentStep: null,
-        registrationInfo: {
-          ...(automationState?.registration_info || {}),
-          deposit_in_progress: false,
-          deposit_awaiting_payment: false,
-          deposit_requested_amount: undefined,
-          deposit_payment_window_id: undefined
-        }
-      }).catch(() => null);
-      console.log(`[chatbot] deposit_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
+      const info = { ...(automationState?.registration_info || {}) };
+      const sessionWindowId = info.deposit_payment_window_id ?? info.payment_window_id ?? null;
+      // Only clear the bot session when it still points at this expired window (or has no newer attempt).
+      const shouldClearSession = sessionWindowId == null
+        || Number(sessionWindowId) === Number(window.id);
+      if (shouldClearSession) {
+        delete info.deposit_in_progress;
+        delete info.deposit_awaiting_payment;
+        delete info.deposit_requested_amount;
+        delete info.deposit_payment_window_id;
+        delete info.payment_window_id;
+        delete info.payment_window_expires_at;
+        delete info.payment_qr_code_id;
+        delete info.payment_qr_telegram_message_id;
+        await store.updateAutomationState(window.contact_id, {
+          currentFlow: null,
+          currentStep: null,
+          registrationInfo: info
+        }).catch(() => null);
+        console.log(`[chatbot] deposit_cancelled_due_to_timeout contact=${window.contact_id} window=${window.id}`);
+      } else {
+        console.log(
+          `[chatbot] deposit_expiry_session_preserved contact=${window.contact_id} ` +
+          `expired_window=${window.id} session_window=${sessionWindowId}`
+        );
+      }
     }
 
     const autoBot = await store.getAutoRegistrationBotSettings();

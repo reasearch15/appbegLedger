@@ -23,6 +23,11 @@ export function shouldUseRegistrationBot(job, automationState = {}, contact = nu
   if (job.force_entry_menu) return true;
   const flow = automationState.current_flow || automationState.currentFlow;
   if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
+  const step = String(automationState.current_step || automationState.currentStep || '');
+  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(step)) return true;
+  const info = automationState.registration_info || automationState.registrationInfo || {};
+  // Keep amount entry on the deposit bot even if flow was wiped while the prompt was shown.
+  if (info.deposit_in_progress || info.deposit_awaiting_payment) return true;
   const text = String(job.input_text || '').trim();
   if (/^\/(start|register|status|support|cancel|deposit)(@\w+)?(\s|$)/i.test(text)) return true;
   if (isGreetingEntryText(text)) return true;

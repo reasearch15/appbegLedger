@@ -3,7 +3,10 @@ import {
   REGISTRATION_QR_LOAD_FAILED_MESSAGE,
   resolvePaymentQrTelegramInput
 } from '../payments/methodUtils.js';
-import { PAYMENT_WINDOW_FLOW, paymentWindowMinutes } from '../payments/constants.js';
+import {
+  PAYMENT_WINDOW_FLOW, paymentWindowMinutes
+} from '../payments/constants.js';
+import { parseMoneyToCents } from '../registration/utils.js';
 import { paymentQrRetryButtons, registeredMenuButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
 import { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
 
@@ -178,6 +181,30 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
 
   let paymentWindow = await store.getActiveRegistrationPaymentWindow?.(contactId, { flowType }).catch(() => null);
   let windowCreated = false;
+
+  // Never reuse an expired/soft-expired window. For deposits, never reuse when the amount changed.
+  if (paymentWindow) {
+    const expiresAtMs = new Date(paymentWindow.expires_at).getTime();
+    const stillOpen = Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
+    const statusActive = String(paymentWindow.status || '').toLowerCase() === 'active';
+    let amountMatches = true;
+    if (isDeposit) {
+      const existingCents = Number.isSafeInteger(Number(paymentWindow.expected_payment_cents))
+        ? Number(paymentWindow.expected_payment_cents)
+        : parseMoneyToCents(String(paymentWindow.first_deposit_amount));
+      const requestedCents = parseMoneyToCents(String(amount));
+      amountMatches = Number.isSafeInteger(existingCents)
+        && Number.isSafeInteger(requestedCents)
+        && existingCents === requestedCents;
+    }
+    if (!statusActive || !stillOpen || !amountMatches) {
+      if (statusActive && store.expireRegistrationPaymentWindow) {
+        await store.expireRegistrationPaymentWindow(paymentWindow.id, { suppressNotification: true }).catch(() => null);
+      }
+      paymentWindow = null;
+    }
+  }
+
   if (!paymentWindow) {
     paymentWindow = await store.createRegistrationPaymentWindow({
       contactId,

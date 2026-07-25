@@ -45,10 +45,9 @@ import {
   reviewDecision as royalVipReviewDecision
 } from './royalVipBotRegistration.js';
 import {
+  beginRegisteredDeposit,
   continueRegisteredDeposit,
-  isRegisteredDepositFlow,
-  startRegisteredDeposit,
-  REGISTERED_DEPOSIT_FLOW
+  isRegisteredDepositFlow
 } from './registeredDepositFlow.js';
 import {
   buildStateAwareEntryMenu,
@@ -489,9 +488,12 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       || action === 'deposit:cancel'
       || action === 'deposit:retry_qr'
       || isRegisteredDepositFlow(flow, normalizedStep)
+      || info.deposit_in_progress
+      || info.deposit_awaiting_payment
     ) {
-      if (action === 'bot:deposit' && !isRegisteredDepositFlow(flow, normalizedStep)) {
-        return await startRegisteredDeposit(contact, info);
+      // Always normalize on Deposit: expired windows must not block a fresh amount session.
+      if (action === 'bot:deposit') {
+        return await beginRegisteredDeposit(store, contact, info);
       }
       return await continueRegisteredDeposit({
         store,

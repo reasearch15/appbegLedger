@@ -5461,10 +5461,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         ON c.telegram_user_id = u.id AND c.channel = 'telegram_private'
       LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
       WHERE w.status = 'active'
+        AND w.expires_at > ?
         AND w.matched_payment_event_id IS NULL
         AND COALESCE(w.flow_type, 'registration') IN ('registration', 'deposit')
       ORDER BY w.expires_at ASC, w.id ASC
-    `).all();
+    `).all(now);
 
     const expiredTodayRow = await db.prepare(`
       SELECT COUNT(*) AS ${sql.quoteAlias('expiredToday')}
