@@ -4,6 +4,7 @@ function zeroFinancial() {
     total_out: 0,
     net: 0,
     last_activity: null,
+    active_today: false,
     financial_available: true,
     financial_unavailable_reason: null
   };
@@ -23,6 +24,7 @@ function normalizeFinancial(financial = {}) {
       total_out: null,
       net: null,
       last_activity: null,
+      active_today: false,
       financial_available: false,
       financial_unavailable_reason: financial.financial_unavailable_reason || financial.financialUnavailableReason || 'Financial reporting is unavailable.'
     };
@@ -34,6 +36,7 @@ function normalizeFinancial(financial = {}) {
     total_out: Number.isFinite(totalOut) ? totalOut : 0,
     net: Number.isFinite(totalIn - totalOut) ? totalIn - totalOut : 0,
     last_activity: financial.last_activity ?? financial.lastActivity ?? null,
+    active_today: financial.active_today === true || financial.activeToday === true || financial.active_today === 1 || financial.activeToday === 1,
     financial_available: true,
     financial_unavailable_reason: null
   };
@@ -42,12 +45,13 @@ function normalizeFinancial(financial = {}) {
 function publicFinancial(financial = {}) {
   const normalized = normalizeFinancial(financial);
   const commissionPercentage = Number(financial.commission_percentage ?? financial.commissionPercentage ?? 0);
-  const settlementTotal = Number(financial.settlement_total ?? financial.settlementTotal ?? 0);
+  const settlementAvailable = (financial.settlement_available ?? financial.settlementAvailable ?? true) !== false;
+  const settlementTotal = settlementAvailable ? Number(financial.settlement_total ?? financial.settlementTotal ?? 0) : null;
   const lastSettlement = financial.last_settlement ?? financial.lastSettlement ?? null;
   const receivable = normalized.financial_available === false || normalized.net == null
     ? null
     : roundCurrency(normalized.net * ((Number.isFinite(commissionPercentage) ? commissionPercentage : 0) / 100));
-  const outstanding = receivable == null
+  const outstanding = receivable == null || settlementAvailable === false
     ? null
     : roundCurrency(receivable - (Number.isFinite(settlementTotal) ? settlementTotal : 0));
   return {
@@ -58,14 +62,16 @@ function publicFinancial(financial = {}) {
     net: normalized.net,
     lastActivity: normalized.last_activity,
     last_activity: normalized.last_activity,
+    activeToday: normalized.active_today,
+    active_today: normalized.active_today,
     financialAvailable: normalized.financial_available,
     financial_available: normalized.financial_available,
     financialUnavailableReason: normalized.financial_unavailable_reason,
     financial_unavailable_reason: normalized.financial_unavailable_reason,
     settlementTotal,
     settlement_total: settlementTotal,
-    settlementTotalCents: Number(financial.settlement_total_cents || 0),
-    settlement_total_cents: Number(financial.settlement_total_cents || 0),
+    settlementTotalCents: settlementAvailable ? Number(financial.settlement_total_cents || 0) : null,
+    settlement_total_cents: settlementAvailable ? Number(financial.settlement_total_cents || 0) : null,
     lastSettlement,
     last_settlement: lastSettlement,
     receivable,
@@ -73,8 +79,24 @@ function publicFinancial(financial = {}) {
   };
 }
 
+function publicSettlementAvailability(vendor) {
+  const available = vendor.settlement_available ?? vendor.settlementAvailable ?? true;
+  return {
+    settlementAvailable: available !== false,
+    settlement_available: available !== false,
+    settlementUnavailableReason: available === false
+      ? (vendor.settlement_unavailable_reason || vendor.settlementUnavailableReason || 'Settlement reporting is unavailable.')
+      : null,
+    settlement_unavailable_reason: available === false
+      ? (vendor.settlement_unavailable_reason || vendor.settlementUnavailableReason || 'Settlement reporting is unavailable.')
+      : null
+  };
+}
+
 function vendorPayload(vendor) {
   const financial = publicFinancial(vendor.financial || vendor);
+  const settlementAvailability = publicSettlementAvailability(vendor);
+  const financialAvailable = financial.financialAvailable !== false;
   return {
     id: vendor.id,
     vendorCode: vendor.vendor_code,
@@ -88,6 +110,17 @@ function vendorPayload(vendor) {
     notes: vendor.notes,
     playerCount: vendor.player_count || 0,
     player_count: vendor.player_count || 0,
+    activePlayersToday: financialAvailable ? (vendor.active_players_today ?? 0) : null,
+    active_players_today: financialAvailable ? (vendor.active_players_today ?? 0) : null,
+    hasSettlements: settlementAvailability.settlementAvailable ? vendor.has_settlements === true : null,
+    has_settlements: settlementAvailability.settlementAvailable ? vendor.has_settlements === true : null,
+    latestSettlementAmount: vendor.latest_settlement_amount ?? null,
+    latest_settlement_amount: vendor.latest_settlement_amount ?? null,
+    latestSettlementAmountCents: vendor.latest_settlement_amount_cents ?? null,
+    latest_settlement_amount_cents: vendor.latest_settlement_amount_cents ?? null,
+    latestSettlementDate: vendor.latest_settlement_date ?? null,
+    latest_settlement_date: vendor.latest_settlement_date ?? null,
+    ...settlementAvailability,
     ...financial,
     created_at: vendor.created_at,
     updated_at: vendor.updated_at
@@ -163,6 +196,7 @@ async function loadFinancialByUid(appbegStore, players) {
       configured: report.configured !== false,
       source: report.source || null,
       reason: report.reason || null,
+      activeDay: report.activeDay || null,
       players: new Map((report.players || []).map((row) => [String(row.uid), normalizeFinancial(row)]))
     };
   } catch (error) {
@@ -206,6 +240,9 @@ function summarizePlayersFinancial(players, financialByUid) {
     if (financial.last_activity && (!summary.last_activity || new Date(financial.last_activity) > new Date(summary.last_activity))) {
       summary.last_activity = financial.last_activity;
     }
+    if (financial.active_today) {
+      summary.active_today = true;
+    }
     return summary;
   }, zeroFinancial());
 }
@@ -224,10 +261,19 @@ function summarizeSettlements(settlements = []) {
   }, { settlement_total_cents: 0, settlement_total: 0, last_settlement: null });
 }
 
+function latestSettlement(settlements = []) {
+  return settlements[0] || null;
+}
+
 function applyVendorSettlementSummary(vendor, settlements = []) {
   const summary = summarizeSettlements(settlements);
+  const latest = latestSettlement(settlements);
   return {
     ...vendor,
+    has_settlements: settlements.length > 0,
+    latest_settlement_amount: latest?.settlement_amount ?? null,
+    latest_settlement_amount_cents: latest?.settlement_amount_cents ?? null,
+    latest_settlement_date: latest?.settlement_date ?? null,
     financial: {
       ...(vendor.financial || {}),
       commission_percentage: vendor.commission_percentage,
@@ -236,6 +282,43 @@ function applyVendorSettlementSummary(vendor, settlements = []) {
       last_settlement: summary.last_settlement
     }
   };
+}
+
+function applyVendorSettlementUnavailable(vendor, reason = 'Settlement reporting is unavailable.') {
+  return {
+    ...vendor,
+    settlement_available: false,
+    settlement_unavailable_reason: reason,
+    has_settlements: null,
+    latest_settlement_amount: null,
+    latest_settlement_amount_cents: null,
+    latest_settlement_date: null,
+    financial: {
+      ...(vendor.financial || {}),
+      commission_percentage: vendor.commission_percentage,
+      settlement_available: false,
+      settlement_total: null,
+      settlement_total_cents: null,
+      last_settlement: null
+    }
+  };
+}
+
+function activePlayersToday(players = [], financialByUid) {
+  if (financialByUid.configured === false) return null;
+  return players.reduce((count, player) => (
+    financialForPlayer(player, financialByUid).active_today ? count + 1 : count
+  ), 0);
+}
+
+function playerGroups(players = []) {
+  const byVendor = new Map();
+  for (const player of players) {
+    const vendorId = Number(player.vendor_id);
+    if (!byVendor.has(vendorId)) byVendor.set(vendorId, []);
+    byVendor.get(vendorId).push(player);
+  }
+  return byVendor;
 }
 
 function applyVendorSettlementSummaries(vendors = [], settlements = []) {
@@ -249,12 +332,7 @@ function applyVendorSettlementSummaries(vendors = [], settlements = []) {
 }
 
 export function buildVendorFinancialPayload({ vendors = [], players = [], financialByUid = { players: new Map() } } = {}) {
-  const playersByVendor = new Map();
-  for (const player of players) {
-    const vendorId = Number(player.vendor_id);
-    if (!playersByVendor.has(vendorId)) playersByVendor.set(vendorId, []);
-    playersByVendor.get(vendorId).push(player);
-  }
+  const playersByVendor = playerGroups(players);
 
   return vendors.map((vendor) => {
     const vendorPlayers = playersByVendor.get(Number(vendor.id)) || [];
@@ -265,30 +343,116 @@ export function buildVendorFinancialPayload({ vendors = [], players = [], financ
     return {
       ...vendor,
       player_count: vendorPlayers.length,
+      active_players_today: financial.financial_available === false ? null : activePlayersToday(vendorPlayers, financialByUid),
       financial
     };
+  });
+}
+
+const VENDOR_SORTS = new Set(['name', 'total_in', 'net', 'outstanding', 'player_count', 'latest_settlement_date']);
+
+function filterVendors(vendors, { query = '', status = 'all' } = {}) {
+  const term = String(query || '').trim().toLowerCase();
+  const wantedStatus = String(status || 'all').toLowerCase();
+  return vendors.filter((vendor) => {
+    if ((wantedStatus === 'active' || wantedStatus === 'suspended') && String(vendor.status || '').toLowerCase() !== wantedStatus) {
+      return false;
+    }
+    if (!term) return true;
+    return String(vendor.name || '').toLowerCase().includes(term)
+      || String(vendor.vendor_code || '').toLowerCase().includes(term);
+  });
+}
+
+function sortValue(vendor, sort) {
+  const financial = publicFinancial(vendor.financial || vendor);
+  switch (sort) {
+    case 'name':
+      return String(vendor.name || '').toLowerCase();
+    case 'total_in':
+      return financial.total_in;
+    case 'outstanding':
+      return financial.outstanding;
+    case 'player_count':
+      return Number(vendor.player_count || 0);
+    case 'latest_settlement_date':
+      return vendor.latest_settlement_date || null;
+    case 'net':
+    default:
+      return financial.net;
+  }
+}
+
+function compareNullable(a, b, dir) {
+  const aMissing = a == null || a === '' || Number.isNaN(a);
+  const bMissing = b == null || b === '' || Number.isNaN(b);
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  if (typeof a === 'string' || typeof b === 'string') {
+    return String(a).localeCompare(String(b)) * dir;
+  }
+  return (Number(a) - Number(b)) * dir;
+}
+
+function sortVendors(vendors, { sort = 'net', dir = 'desc' } = {}) {
+  const sortBy = VENDOR_SORTS.has(sort) ? sort : 'net';
+  const sortDir = String(dir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+  return [...vendors].sort((left, right) => {
+    const primary = compareNullable(sortValue(left, sortBy), sortValue(right, sortBy), sortDir);
+    if (primary !== 0) return primary;
+    return String(left.vendor_code || '').localeCompare(String(right.vendor_code || ''));
   });
 }
 
 export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = null }) {
   const adminOnly = requireAdmin || ((_req, _res, next) => next());
 
-  app.get('/api/vendors', adminOnly, async (_req, res) => {
+  app.get('/api/vendors', adminOnly, async (req, res) => {
     const vendors = await store.listVendors();
     const players = typeof store.listAllVendorPlayers === 'function'
       ? await store.listAllVendorPlayers()
       : [];
     const financialByUid = await loadFinancialByUid(appbegStore, players);
-    const settlements = typeof store.listAllVendorSettlements === 'function'
-      ? await store.listAllVendorSettlements()
-      : [];
+    let settlements = [];
+    let settlementsAvailable = true;
+    if (typeof store.listAllVendorSettlements === 'function') {
+      try {
+        settlements = await store.listAllVendorSettlements();
+      } catch (error) {
+        settlementsAvailable = false;
+        console.error('[vendors] settlement reporting query failed');
+      }
+    }
     const vendorsWithFinancial = buildVendorFinancialPayload({ vendors, players, financialByUid });
+    const withSettlements = settlementsAvailable
+      ? applyVendorSettlementSummaries(vendorsWithFinancial, settlements)
+      : vendorsWithFinancial.map((vendor) => applyVendorSettlementUnavailable(vendor));
+    const filtered = filterVendors(withSettlements, {
+      query: req.query?.query ?? req.query?.q,
+      status: req.query?.status
+    });
+    const sorted = sortVendors(filtered, {
+      sort: req.query?.sort,
+      dir: req.query?.dir
+    });
     res.json({
-      vendors: applyVendorSettlementSummaries(vendorsWithFinancial, settlements).map(vendorPayload),
+      vendors: sorted.map(vendorPayload),
       financial: {
         configured: financialByUid.configured,
         source: financialByUid.source,
-        reason: financialByUid.reason
+        reason: financialByUid.reason,
+        activeDay: financialByUid.activeDay || null
+      },
+      settlementReporting: {
+        configured: settlementsAvailable,
+        reason: settlementsAvailable ? null : 'Settlement reporting is temporarily unavailable.'
+      },
+      filters: {
+        query: String(req.query?.query ?? req.query?.q ?? ''),
+        status: String(req.query?.status || 'all'),
+        sort: VENDOR_SORTS.has(req.query?.sort) ? req.query.sort : 'net',
+        dir: String(req.query?.dir || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc'
       }
     });
   });
@@ -306,11 +470,27 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     if (financial.financial_available !== false) {
       financial.net = financial.total_in - financial.total_out;
     }
-    const settlements = typeof store.listVendorSettlements === 'function'
-      ? await store.listVendorSettlements(id)
-      : [];
+    let settlements = [];
+    let settlementsAvailable = true;
+    if (typeof store.listVendorSettlements === 'function') {
+      try {
+        settlements = await store.listVendorSettlements(id);
+      } catch (error) {
+        settlementsAvailable = false;
+        console.error('[vendors] settlement reporting query failed');
+      }
+    }
+    const withDashboardSummary = {
+      ...vendor,
+      player_count: players.length,
+      active_players_today: financial.financial_available === false ? null : activePlayersToday(players, financialByUid),
+      financial
+    };
+    const vendorWithSettlementSummary = settlementsAvailable
+      ? applyVendorSettlementSummary(withDashboardSummary, settlements)
+      : applyVendorSettlementUnavailable(withDashboardSummary);
     res.json({
-      vendor: vendorPayload(applyVendorSettlementSummary({ ...vendor, player_count: players.length, financial }, settlements)),
+      vendor: vendorPayload(vendorWithSettlementSummary),
       players: players.map((player) => vendorPlayerPayload({
         ...player,
         financial: financialForPlayer(player, financialByUid)
@@ -319,7 +499,12 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
       financial: {
         configured: financialByUid.configured,
         source: financialByUid.source,
-        reason: financialByUid.reason
+        reason: financialByUid.reason,
+        activeDay: financialByUid.activeDay || null
+      },
+      settlementReporting: {
+        configured: settlementsAvailable,
+        reason: settlementsAvailable ? null : 'Settlement reporting is temporarily unavailable.'
       }
     });
   });

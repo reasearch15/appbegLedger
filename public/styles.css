@@ -246,17 +246,29 @@ h1 {
 }
 
 .vendors-table {
-  min-width: 1180px;
+  min-width: 1500px;
 }
 
 .vendors-table-header,
 .vendors-row {
   display: grid;
-  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px 80px 90px 90px 90px 110px minmax(180px, 1fr) 110px;
+  grid-template-columns: 120px minmax(160px, 1fr) 110px 80px 100px 90px 90px 90px 110px 100px 110px minmax(180px, 1fr) 150px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.vendor-dashboard-filters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 150px 180px 140px auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.vendor-dashboard-actions {
+  margin-top: 0;
 }
 
 .vendors-row {
@@ -298,7 +310,7 @@ h1 {
 
 .vendor-detail-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 140px;
+  grid-template-columns: minmax(0, 1fr) 140px 140px;
   gap: 12px;
   margin-bottom: 14px;
   padding-bottom: 12px;
@@ -2634,6 +2646,18 @@ textarea {
 
   .vendor-detail-card {
     grid-column: auto;
+  }
+
+  .vendor-dashboard-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vendor-dashboard-actions {
+    grid-column: 1 / -1;
+  }
+
+  .vendor-detail-summary {
+    grid-template-columns: 1fr;
   }
 
   .vendor-financial-card {

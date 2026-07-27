@@ -146,6 +146,10 @@ let state = {
   vendorDetailLoading: false,
   vendorCommissionSaving: false,
   vendorSettlementSaving: false,
+  vendorDashboardQuery: '',
+  vendorDashboardStatus: 'all',
+  vendorDashboardSort: 'net',
+  vendorDashboardDir: 'desc',
   appbegPlayers: [],
   appbegPlayersLoading: false,
   appbegPlayersError: null,
@@ -273,6 +277,14 @@ function fmtFinancialMoney(item, key, snakeKey = key) {
 function fmtFinancialDate(item) {
   if (!financialAvailable(item)) return 'Unavailable';
   return fmtDate(item?.lastActivity || item?.last_activity);
+}
+
+function fmtFinancialCount(item, key, snakeKey = key) {
+  if (!financialAvailable(item)) return 'Unavailable';
+  const value = item?.[key] ?? item?.[snakeKey];
+  if (value == null || value === '') return 'Unavailable';
+  const count = Number(value);
+  return Number.isFinite(count) ? String(count) : 'Unavailable';
 }
 
 function dayKey(value) {
@@ -466,7 +478,12 @@ async function refreshVendors() {
   if (!isAdmin()) return;
   state.vendorsLoading = true;
   try {
-    const payload = await api('/api/vendors');
+    const params = new URLSearchParams();
+    if (state.vendorDashboardQuery) params.set('query', state.vendorDashboardQuery);
+    if (state.vendorDashboardStatus && state.vendorDashboardStatus !== 'all') params.set('status', state.vendorDashboardStatus);
+    params.set('sort', state.vendorDashboardSort || 'net');
+    params.set('dir', state.vendorDashboardDir || 'desc');
+    const payload = await api(`/api/vendors?${params.toString()}`);
     state.vendors = payload.vendors || [];
     if (state.selectedVendorId && !state.vendors.some((vendor) => Number(vendor.id) === Number(state.selectedVendorId))) {
       state.selectedVendorId = null;
@@ -2643,6 +2660,14 @@ function vendorCommission(value) {
   return `${amount.toFixed(amount % 1 === 0 ? 0 : 2)}%`;
 }
 
+function vendorLatestSettlement(vendor) {
+  if ((vendor?.settlementAvailable ?? vendor?.settlement_available) === false) return 'Unavailable';
+  if ((vendor?.hasSettlements ?? vendor?.has_settlements) !== true) return 'No settlements';
+  const amount = fmtMoney(vendor?.latestSettlementAmount ?? vendor?.latest_settlement_amount);
+  const date = fmtDate(vendor?.latestSettlementDate ?? vendor?.latest_settlement_date);
+  return `${amount} / ${date}`;
+}
+
 function vendorsWorkspace() {
   const selected = state.selectedVendor;
   return `
@@ -2651,7 +2676,7 @@ function vendorsWorkspace() {
         <div>
           <div class="eyebrow">Vendor Foundation</div>
           <h1>Vendors</h1>
-          <div class="subtle">Admin-only vendor records and read-only financial reporting. No settlements or money movement.</div>
+          <div class="subtle">Admin-only vendor records, read-only financial reporting, and manual settlement history.</div>
         </div>
       </header>
       <section class="vendors-layout">
@@ -2683,7 +2708,42 @@ function vendorsWorkspace() {
           </form>
         </section>
         <section class="card vendors-list-card">
-          <div class="card-title">Vendor List</div>
+          <div class="card-title">Vendor Dashboard</div>
+          <form id="vendorDashboardFilters" class="vendor-dashboard-filters">
+            <label class="field-label">
+              <span>Search</span>
+              <input id="vendorDashboardQuery" value="${escapeHtml(state.vendorDashboardQuery)}" placeholder="Vendor name or code" />
+            </label>
+            <label class="field-label">
+              <span>Status</span>
+              <select id="vendorDashboardStatus">
+                <option value="all" ${state.vendorDashboardStatus === 'all' ? 'selected' : ''}>All Vendors</option>
+                <option value="active" ${state.vendorDashboardStatus === 'active' ? 'selected' : ''}>Active Vendors</option>
+                <option value="suspended" ${state.vendorDashboardStatus === 'suspended' ? 'selected' : ''}>Suspended Vendors</option>
+              </select>
+            </label>
+            <label class="field-label">
+              <span>Sort by</span>
+              <select id="vendorDashboardSort">
+                <option value="net" ${state.vendorDashboardSort === 'net' ? 'selected' : ''}>Net</option>
+                <option value="name" ${state.vendorDashboardSort === 'name' ? 'selected' : ''}>Vendor Name</option>
+                <option value="total_in" ${state.vendorDashboardSort === 'total_in' ? 'selected' : ''}>Total In</option>
+                <option value="outstanding" ${state.vendorDashboardSort === 'outstanding' ? 'selected' : ''}>Outstanding</option>
+                <option value="player_count" ${state.vendorDashboardSort === 'player_count' ? 'selected' : ''}>Player Count</option>
+                <option value="latest_settlement_date" ${state.vendorDashboardSort === 'latest_settlement_date' ? 'selected' : ''}>Latest Settlement Date</option>
+              </select>
+            </label>
+            <label class="field-label">
+              <span>Direction</span>
+              <select id="vendorDashboardDir">
+                <option value="desc" ${state.vendorDashboardDir === 'desc' ? 'selected' : ''}>Descending</option>
+                <option value="asc" ${state.vendorDashboardDir === 'asc' ? 'selected' : ''}>Ascending</option>
+              </select>
+            </label>
+            <div class="settings-actions vendor-dashboard-actions">
+              <button class="button secondary" type="submit">Apply</button>
+            </div>
+          </form>
           ${state.vendorsLoading ? '<div class="subtle">Loading vendors...</div>' : ''}
           ${state.vendors.length ? `
             <div class="vendors-table">
@@ -2691,35 +2751,39 @@ function vendorsWorkspace() {
                 <span>Code</span>
                 <span>Name</span>
                 <span>Status</span>
-                <span>Commission</span>
                 <span>Players</span>
+                <span>Active Today</span>
                 <span>Total In</span>
                 <span>Total Out</span>
                 <span>Net</span>
-                <span>Last Activity</span>
+                <span>Commission</span>
+                <span>Receivable</span>
+                <span>Outstanding</span>
                 <span>Linked Staff UID</span>
-                <span>Created</span>
+                <span>Latest Settlement</span>
               </div>
               ${state.vendors.map((vendor) => `
                 <button class="vendors-row ${Number(state.selectedVendorId) === Number(vendor.id) ? 'active' : ''}" type="button" data-vendor-id="${escapeHtml(vendor.id)}">
                   <span class="mono">${escapeHtml(vendor.vendorCode || vendor.vendor_code || '')}</span>
                   <span class="strong">${escapeHtml(vendor.name || '')}</span>
                   <span>${vendorStatusBadge(vendor.status)}</span>
-                  <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
                   <span>${escapeHtml(vendor.playerCount ?? vendor.player_count ?? 0)}</span>
+                  <span>${escapeHtml(fmtFinancialCount(vendor, 'activePlayersToday', 'active_players_today'))}</span>
                   <span>${escapeHtml(fmtFinancialMoney(vendor, 'totalIn', 'total_in'))}</span>
                   <span>${escapeHtml(fmtFinancialMoney(vendor, 'totalOut', 'total_out'))}</span>
                   <span>${escapeHtml(fmtFinancialMoney(vendor, 'net', 'net'))}</span>
-                  <span>${escapeHtml(fmtFinancialDate(vendor))}</span>
+                  <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
+                  <span>${escapeHtml(fmtFinancialMoney(vendor, 'receivable', 'receivable'))}</span>
+                  <span>${escapeHtml(fmtFinancialMoney(vendor, 'outstanding', 'outstanding'))}</span>
                   <span>
                     <span class="mono">${escapeHtml(vendor.linkedStaffUid || vendor.linked_staff_uid || '-')}</span>
                     <span class="subtle vendor-reporting-only">Reporting only</span>
                   </span>
-                  <span>${fmtDate(vendor.created_at)}</span>
+                  <span>${escapeHtml(vendorLatestSettlement(vendor))}</span>
                 </button>
               `).join('')}
             </div>
-          ` : (!state.vendorsLoading ? '<div class="subtle">No vendors created yet.</div>' : '')}
+          ` : (!state.vendorsLoading ? '<div class="subtle">No vendors match the current dashboard view.</div>' : '')}
         </section>
         <section class="card vendor-detail-card">
           <div class="card-title">Vendor Detail</div>
@@ -2733,6 +2797,10 @@ function vendorsWorkspace() {
               <div>
                 <div class="subtle">Player Count</div>
                 <div class="strong">${escapeHtml(selected.playerCount ?? selected.player_count ?? state.vendorPlayers.length)}</div>
+              </div>
+              <div>
+                <div class="subtle">Active Today</div>
+                <div class="strong">${escapeHtml(fmtFinancialCount(selected, 'activePlayersToday', 'active_players_today'))}</div>
               </div>
             </div>
             <div class="vendor-financial-card">
@@ -2757,8 +2825,8 @@ function vendorsWorkspace() {
                 <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'receivable', 'receivable'))}</div>
               </div>
               <div>
-                <div class="subtle">Last Settlement</div>
-                <div class="strong">${escapeHtml(fmtDate(selected.lastSettlement || selected.last_settlement))}</div>
+                <div class="subtle">Latest Settlement</div>
+                <div class="strong">${escapeHtml(vendorLatestSettlement(selected))}</div>
               </div>
               <div>
                 <div class="subtle">Outstanding</div>
@@ -3435,6 +3503,23 @@ function bindEvents() {
   document.querySelector('#createVendorForm')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void createVendor(event.target);
+  });
+
+  document.querySelector('#vendorDashboardFilters')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    state.vendorDashboardQuery = form.querySelector('#vendorDashboardQuery')?.value?.trim() || '';
+    state.vendorDashboardStatus = form.querySelector('#vendorDashboardStatus')?.value || 'all';
+    state.vendorDashboardSort = form.querySelector('#vendorDashboardSort')?.value || 'net';
+    state.vendorDashboardDir = form.querySelector('#vendorDashboardDir')?.value || 'desc';
+    await refreshVendors();
+    render();
+  });
+
+  document.querySelectorAll('#vendorDashboardStatus, #vendorDashboardSort, #vendorDashboardDir').forEach((control) => {
+    control.addEventListener('change', () => {
+      control.form?.requestSubmit();
+    });
   });
 
   document.querySelectorAll('[data-vendor-id]').forEach((button) => {

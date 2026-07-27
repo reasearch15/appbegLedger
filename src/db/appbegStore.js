@@ -43,6 +43,7 @@ const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
 const FINANCIAL_OUT_TYPES = ['cashout', 'redeem'];
 const FINANCIAL_COMPLETED_STATUSES = ['completed'];
 const FINANCIAL_QUERY_CHUNK_SIZE = 500;
+const DEFAULT_BUSINESS_TIME_ZONE = 'Asia/Kathmandu';
 
 function quoteIdent(name) {
   return `"${String(name).replaceAll('"', '""')}"`;
@@ -267,7 +268,8 @@ function zeroFinancialRow(uid) {
     total_in: 0,
     total_out: 0,
     net: 0,
-    last_activity: null
+    last_activity: null,
+    active_today: false
   };
 }
 
@@ -279,7 +281,8 @@ function normalizeFinancialRow(row) {
     total_in: Number.isFinite(totalIn) ? totalIn : 0,
     total_out: Number.isFinite(totalOut) ? totalOut : 0,
     net: Number.isFinite(totalIn - totalOut) ? totalIn - totalOut : 0,
-    last_activity: row?.last_activity || null
+    last_activity: row?.last_activity || null,
+    active_today: row?.active_today === true || row?.active_today === 1 || row?.active_today === '1'
   };
 }
 
@@ -290,8 +293,11 @@ function summarizeFinancialRows(rows) {
     if (row.last_activity && (!acc.last_activity || new Date(row.last_activity) > new Date(acc.last_activity))) {
       acc.last_activity = row.last_activity;
     }
+    if (row.active_today) {
+      acc.active_today = true;
+    }
     return acc;
-  }, { total_in: 0, total_out: 0, net: 0, last_activity: null });
+  }, { total_in: 0, total_out: 0, net: 0, last_activity: null, active_today: false });
   summary.net = summary.total_in - summary.total_out;
   return summary;
 }
@@ -306,6 +312,54 @@ function chunkArray(items, size) {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+function timeZoneParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).formatToParts(date);
+  return Object.fromEntries(parts
+    .filter((part) => part.type !== 'literal')
+    .map((part) => [part.type, Number(part.value)]));
+}
+
+function timeZoneOffsetMs(timeZone, date) {
+  const parts = timeZoneParts(date, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return asUtc - date.getTime();
+}
+
+function zonedWallTimeToUtc({ year, month, day, hour = 0, minute = 0, second = 0 }, timeZone) {
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - timeZoneOffsetMs(timeZone, new Date(utcMs));
+  }
+  return new Date(utcMs);
+}
+
+function businessDayBounds(now = new Date(), timeZone = DEFAULT_BUSINESS_TIME_ZONE) {
+  let safeZone = String(timeZone || DEFAULT_BUSINESS_TIME_ZONE);
+  let parts;
+  try {
+    parts = timeZoneParts(now, safeZone);
+  } catch (_error) {
+    safeZone = DEFAULT_BUSINESS_TIME_ZONE;
+    parts = timeZoneParts(now, DEFAULT_BUSINESS_TIME_ZONE);
+  }
+  const start = zonedWallTimeToUtc(parts, safeZone);
+  const end = zonedWallTimeToUtc({ ...parts, day: parts.day + 1 }, safeZone);
+  return {
+    timeZone: safeZone,
+    start,
+    end
+  };
 }
 
 export async function createAppBegStore(env = process.env) {
@@ -437,7 +491,10 @@ export async function createAppBegStore(env = process.env) {
     return result.players;
   }
 
-  async function getFinancialReportForPlayerUids(playerUids = []) {
+  async function getFinancialReportForPlayerUids(playerUids = [], {
+    today = new Date(),
+    timeZone = env.VENDOR_DASHBOARD_TIME_ZONE || env.TZ || DEFAULT_BUSINESS_TIME_ZONE
+  } = {}) {
     const uids = [...new Set((Array.isArray(playerUids) ? playerUids : [])
       .map((uid) => String(uid || '').trim())
       .filter(Boolean))];
@@ -470,10 +527,16 @@ export async function createAppBegStore(env = process.env) {
     const inTypes = quotedList(FINANCIAL_IN_TYPES);
     const outTypes = quotedList(FINANCIAL_OUT_TYPES);
     const completedStatuses = quotedList(FINANCIAL_COMPLETED_STATUSES);
+    const activeDay = Number.isNaN(new Date(today).getTime()) ? new Date() : new Date(today);
+    const activeBounds = businessDayBounds(activeDay, timeZone);
 
     const dedupeKeyExpr = cols.dedupe
       ? `COALESCE(NULLIF(f.${quoteIdent(cols.dedupe)}::text, ''), f.ctid::text)`
       : 'f.ctid::text';
+    const activityInstantExpr = `CASE
+      WHEN i.activity_at ~ '(Z|[+-][0-9]{2}:?[0-9]{2})$' THEN i.activity_at::timestamptz
+      ELSE i.activity_at::timestamp AT TIME ZONE $4
+    END`;
 
     const players = [];
     for (const chunk of chunkArray(uids, FINANCIAL_QUERY_CHUNK_SIZE)) {
@@ -498,17 +561,28 @@ export async function createAppBegStore(env = process.env) {
         r.uid,
         COALESCE(SUM(CASE WHEN i.event_type IN (${inTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_in,
         COALESCE(SUM(CASE WHEN i.event_type IN (${outTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_out,
-        MAX(i.activity_at) AS last_activity
+        MAX(i.activity_at) AS last_activity,
+        COALESCE(MAX(CASE
+          WHEN i.activity_at ~ '^\\d{4}-\\d{2}-\\d{2}'
+            AND ${activityInstantExpr} >= $2::timestamptz
+            AND ${activityInstantExpr} < $3::timestamptz
+          THEN 1 ELSE 0
+        END), 0)::int AS active_today
       FROM requested r
       LEFT JOIN included i ON i.uid = r.uid
       GROUP BY r.uid
-    `, [chunk]);
+    `, [chunk, activeBounds.start.toISOString(), activeBounds.end.toISOString(), activeBounds.timeZone]);
       const byUid = new Map(result.rows.map((row) => [String(row.uid), normalizeFinancialRow(row)]));
       players.push(...chunk.map((uid) => byUid.get(uid) || zeroFinancialRow(uid)));
     }
     return {
       configured: true,
       source: financialPlan.table,
+      activeDay: {
+        timeZone: activeBounds.timeZone,
+        start: activeBounds.start.toISOString(),
+        end: activeBounds.end.toISOString()
+      },
       players,
       summary: summarizeFinancialRows(players)
     };
