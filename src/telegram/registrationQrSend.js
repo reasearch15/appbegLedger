@@ -6,6 +6,7 @@ import {
 import {
   PAYMENT_WINDOW_FLOW, paymentWindowMinutes
 } from '../payments/constants.js';
+import { matchEligiblePaymentsForWindow } from '../payments/router.js';
 import { parseMoneyToCents } from '../registration/utils.js';
 import { paymentQrRetryButtons, registeredMenuButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
 import { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
@@ -285,6 +286,14 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `[chatbot] registration_payment_window_started contact=${contactId} ` +
     `window=${paymentWindow.id} expires_at=${paymentWindow.expires_at} created=${windowCreated} flow=${flowType}`
   );
+  if (isDeposit) {
+    await matchEligiblePaymentsForWindow(store, paymentWindow.id, { bot }).catch((error) => {
+      console.warn(
+        `[chatbot] deposit_window_reconcile_failed contact=${contactId} ` +
+        `window=${paymentWindow.id} error=${error.message}`
+      );
+    });
+  }
 
   return {
     ok: true,

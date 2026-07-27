@@ -81,7 +81,7 @@ export async function continueRegisteredDepositAfterPayment(store, {
 
   // Existing AppBeg credit integration hook (no separate auto-credit API in-repo).
   if (typeof store.creditRegisteredDeposit === 'function') {
-    await store.creditRegisteredDeposit({
+    const creditResult = await store.creditRegisteredDeposit({
       contactId,
       amount: window.first_deposit_amount,
       paymentEventId,
@@ -89,6 +89,20 @@ export async function continueRegisteredDepositAfterPayment(store, {
       actorName,
       flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
     });
+    console.log('[payment-router] deposit_credit_result', JSON.stringify({
+      contactId,
+      windowId,
+      paymentEventId,
+      status: creditResult?.status || creditResult?.ok || 'unknown'
+    }));
+    if (paymentEventId && typeof store.logPaymentRouting === 'function') {
+      await store.logPaymentRouting(paymentEventId, 'deposit_credit_result', 'Registered deposit credit completed or returned idempotently.', {
+        contactId,
+        windowId,
+        status: creditResult?.status || null,
+        ok: creditResult?.ok ?? null
+      });
+    }
   }
 
   const autoBot = await store.getAutoRegistrationBotSettings?.() || { enabled: true };

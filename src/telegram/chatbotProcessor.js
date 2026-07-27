@@ -270,6 +270,9 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       && typeof store.hasPendingDepositStartJob === 'function'
       && await store.hasPendingDepositStartJob(contact.id).catch(() => false)
     );
+    // Amount belongs to deposit when session is active OR Deposit callback is still
+    // persisting the session (race: amount arrives before depositActive flips true).
+    const depositAmountOwned = depositActive || pendingDepositStartAmount;
     console.log(
       `[chatbot] inbound_lifecycle contact=${contact.id} telegram_id=${contact.telegram_id} ` +
       `update_id=${job.update_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'} ` +
@@ -278,13 +281,14 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       `automation_flow=${beforeState.current_flow || 'none'} automation_step=${beforeState.current_step || 'none'} ` +
       `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
       `deposit_active=${depositActive} parsed_amount_cents=${parseMoneyToCents(job.input_text || '') ?? 'invalid'} ` +
-      `pending_deposit_start_amount=${pendingDepositStartAmount} status=${contact.registration_status}`
+      `pending_deposit_start_amount=${pendingDepositStartAmount} deposit_amount_owned=${depositAmountOwned} ` +
+      `status=${contact.registration_status}`
     );
 
     const registrationJob = pendingDepositStartAmount || shouldUseRegistrationBot(job, beforeState, contact, botSession);
     console.log(
       `[chatbot] inbound_router contact=${contact.id} handler=${registrationJob ? 'deposit_or_registration_bot' : 'support_ai'} ` +
-      `deposit_active=${depositActive}`
+      `deposit_active=${depositActive} deposit_amount_owned=${depositAmountOwned}`
     );
     if (!registrationJob) {
       return await processSupportAiJob({ store, contact, job, io, bot, supportAiGenerator });
@@ -295,13 +299,16 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       jobCreatedAt: job.created_at
     });
     if (!eligibility.eligible) {
-      // Active deposit amount entry must never be silently dropped by eligibility gates.
-      // (Support inbound is enqueued without eligibility; registration path would otherwise
-      // complete the job with no user-visible reply — the "send 10, nothing happens" bug.)
-      if (depositActive) {
+      // Owned deposit amount must never be silently dropped by eligibility gates.
+      // Includes the race where Deposit callback is still pending and depositActive
+      // is not written yet — otherwise the first "5" is Skipped with no reply.
+      if (depositAmountOwned) {
         console.log(
-          `[chatbot] deposit_session_eligibility_bypass contact=${contact.id} job=${job.id} ` +
-          `reason=${eligibility.reason} bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'}`
+          `[chatbot] deposit amount bypassed chatbot eligibility gate ` +
+          `jobId=${job.id} contactId=${contact.id} ` +
+          `telegramMessageId=${job.incoming_telegram_message_id || 'n/a'} ` +
+          `depositActive=${depositActive} pendingDepositStartAmount=${pendingDepositStartAmount} ` +
+          `eligibilityReason=${eligibility.reason}`
         );
       } else {
         await store.completeBotJob(job.id, {
@@ -318,14 +325,18 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
     }
 
     const autoBot = await store.getAutoRegistrationBotSettings();
-    if (!autoBot.enabled && !depositActive) {
+    if (!autoBot.enabled && !depositAmountOwned) {
       await store.completeBotJob(job.id, { status: 'completed', errorText: 'Auto registration bot disabled' });
       console.log(`[chatbot] auto_reply_skipped_bot_disabled contact=${contact.id} job=${job.id}`);
       return { ok: true, skipped: true, reason: 'bot_disabled' };
     }
-    if (!autoBot.enabled && depositActive) {
+    if (!autoBot.enabled && depositAmountOwned) {
       console.log(
-        `[chatbot] deposit_session_bot_disabled_bypass contact=${contact.id} job=${job.id}`
+        `[chatbot] deposit amount bypassed chatbot eligibility gate ` +
+        `jobId=${job.id} contactId=${contact.id} ` +
+        `telegramMessageId=${job.incoming_telegram_message_id || 'n/a'} ` +
+        `depositActive=${depositActive} pendingDepositStartAmount=${pendingDepositStartAmount} ` +
+        `eligibilityReason=bot_disabled`
       );
     }
 

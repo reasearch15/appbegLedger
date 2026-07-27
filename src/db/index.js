@@ -25,7 +25,7 @@ import {
   normalizeCustomerMessage,
   selectBestTrainingMatch
 } from '../telegram/supportAiTrainingRetrieval.js';
-import { depositWindowMinutes, paymentWindowMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY, computePaymentFreezeAt, ROUTING_STATUS, ROUTING_REASON, UNMATCHED_REASON, ROUTING_OWNER } from '../payments/constants.js';
+import { depositWindowMinutes, paymentWindowMinutes, paymentSearchMinutes, PAYMENT_WINDOW_FLOW, enrichPaymentQueueFields, MATCHING_STATUS_SORT_PRIORITY, computePaymentFreezeAt, ROUTING_STATUS, ROUTING_REASON, UNMATCHED_REASON, ROUTING_OWNER } from '../payments/constants.js';
 import { formatWorkflowStepLabel } from '../ongoing/stepLabels.js';
 import { remainingSecondsUntil, resolveOngoingUrgency, ONGOING_URGENCY } from '../ongoing/urgency.js';
 import { manualReviewReasonLabel, normalizeManualReviewReason } from '../payments/messageClassifier.js';
@@ -5281,6 +5281,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return rows.map(hydratePaymentWindow).filter((window) => window?.status === 'active');
   }
 
+  async function listPaymentEventsForWindowReconciliation({ now = new Date(), limit = 200 } = {}) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+    const base = now instanceof Date ? now : new Date(now);
+    const nowDate = Number.isNaN(base.getTime()) ? new Date() : base;
+    const cutoff = new Date(nowDate.getTime() - paymentSearchMinutes() * 60 * 1000).toISOString();
+    const rows = await db.prepare(`
+      SELECT *
+      FROM payment_events
+      WHERE parsed_amount IS NOT NULL
+        AND TRIM(COALESCE(parsed_sender_name, '')) != ''
+        AND COALESCE(message_date, created_at) >= ?
+        AND routing_status IN ('unrouted', 'searching', 'frozen')
+      ORDER BY message_date ASC, id ASC
+      LIMIT ?
+    `).all(cutoff, safeLimit);
+    return rows.map(hydratePaymentEvent);
+  }
+
   async function listExpiredRegistrationPaymentWindowsForMatch(limit = 200) {
     const now = nowIso();
     const rows = await db.prepare(`
@@ -5319,6 +5337,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ? null
       : parseMoneyToCents(String(payment.parsed_amount));
     const currentWindow = await getRegistrationPaymentWindow(windowId);
+    if (currentWindow && (currentWindow.status === 'matched' || currentWindow.status_raw === 'completed')
+      && Number(currentWindow.matched_payment_event_id) === Number(paymentEventId)) {
+      return { ok: true, reason: 'already_matched', window: currentWindow };
+    }
     const windowFlow = currentWindow?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
     const receivedPaymentAmount = receivedPaymentCents == null ? null : centsToDollars(receivedPaymentCents);
     const creditedDepositCents = windowFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
@@ -5326,44 +5348,85 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       : null;
     const creditedDepositAmount = creditedDepositCents == null ? null : centsToDollars(creditedDepositCents);
 
-    const result = await db.prepare(`
-      UPDATE registration_payment_windows
-      SET status = 'completed',
-          matched_payment_event_id = ?,
-          received_payment_amount = COALESCE(received_payment_amount, ?),
-          received_payment_cents = COALESCE(received_payment_cents, ?),
-          credited_deposit_amount = COALESCE(credited_deposit_amount, ?),
-          credited_deposit_cents = COALESCE(credited_deposit_cents, ?),
-          completed_at = ?,
-          updated_at = ?
-      WHERE id = ?
-        AND status IN ('active', 'manual_review')
-        AND (status = 'manual_review' OR expires_at > ?)
-        AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
-        AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
-    `).run(
-      paymentEventId,
-      receivedPaymentAmount,
-      receivedPaymentCents,
-      creditedDepositAmount,
-      creditedDepositCents,
-      now,
-      now,
-      windowId,
-      now,
-      paymentEventId
-    );
+    await db.exec('BEGIN');
+    try {
+      const paymentClaim = await db.prepare(`
+        UPDATE payment_events
+        SET contact_id = ?,
+            registration_payment_window_id = ?,
+            matched_at = COALESCE(matched_at, ?),
+            updated_at = ?
+        WHERE id = ?
+          AND (registration_payment_window_id IS NULL OR registration_payment_window_id = ?)
+          AND routing_status NOT IN (
+            'registration_payment_matched', 'appbeg_owned',
+            'deposit_window_matched', 'registered_player_deposit',
+            'ignored', 'duplicate_ignored', 'expired_deposit',
+            'parse_failed', 'route_failed'
+          )
+      `).run(
+        currentWindow?.contact_id ?? null,
+        windowId,
+        now,
+        now,
+        paymentEventId,
+        windowId
+      );
 
-    if (!result.changes) {
-      const current = await getRegistrationPaymentWindow(windowId);
-      if (current && (current.status === 'matched' || current.status_raw === 'completed')
-        && Number(current.matched_payment_event_id) === Number(paymentEventId)) {
-        return { ok: true, reason: 'already_matched', window: current };
+      if (!paymentClaim.changes) {
+        await db.exec('ROLLBACK');
+        const refreshedPayment = await getPaymentEvent(paymentEventId);
+        if (refreshedPayment?.registration_payment_window_id
+          && Number(refreshedPayment.registration_payment_window_id) !== Number(windowId)) {
+          return { ok: false, reason: 'payment_already_linked_other_window', window: null };
+        }
+        return { ok: false, reason: 'payment_claim_failed', window: currentWindow };
       }
-      return { ok: false, reason: 'claim_failed', window: current };
-    }
 
-    return { ok: true, reason: 'matched', window: await getRegistrationPaymentWindow(windowId) };
+      const result = await db.prepare(`
+        UPDATE registration_payment_windows
+        SET status = 'completed',
+            matched_payment_event_id = ?,
+            received_payment_amount = COALESCE(received_payment_amount, ?),
+            received_payment_cents = COALESCE(received_payment_cents, ?),
+            credited_deposit_amount = COALESCE(credited_deposit_amount, ?),
+            credited_deposit_cents = COALESCE(credited_deposit_cents, ?),
+            completed_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status IN ('active', 'manual_review')
+          AND (status = 'manual_review' OR expires_at > ?)
+          AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
+          AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
+      `).run(
+        paymentEventId,
+        receivedPaymentAmount,
+        receivedPaymentCents,
+        creditedDepositAmount,
+        creditedDepositCents,
+        now,
+        now,
+        windowId,
+        now,
+        paymentEventId
+      );
+
+      if (!result.changes) {
+        await db.exec('ROLLBACK');
+        const current = await getRegistrationPaymentWindow(windowId);
+        if (current && (current.status === 'matched' || current.status_raw === 'completed')
+          && Number(current.matched_payment_event_id) === Number(paymentEventId)) {
+          return { ok: true, reason: 'already_matched', window: current };
+        }
+        return { ok: false, reason: 'claim_failed', window: current };
+      }
+
+      await db.exec('COMMIT');
+      return { ok: true, reason: 'matched', window: await getRegistrationPaymentWindow(windowId) };
+    } catch (error) {
+      await db.exec('ROLLBACK').catch(() => null);
+      throw error;
+    }
   }
 
   async function completeRegistrationPaymentWindow(windowId, { paymentEventId = null } = {}) {
@@ -6753,6 +6816,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getActiveRegistrationPaymentWindow,
     getRegistrationPaymentWindow,
     listActiveRegistrationPaymentWindows,
+    listPaymentEventsForWindowReconciliation,
     listOngoingWorkflows,
     listExpiredRegistrationPaymentWindowsForMatch,
     claimPaymentWindowMatch,

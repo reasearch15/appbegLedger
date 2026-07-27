@@ -6,6 +6,7 @@ import {
   DEPOSIT_STATUS,
   HANDLED_BY_APPBEG_BOT,
   PAYMENT_WINDOW_FLOW,
+  paymentSearchMinutes,
   ROUTING_OWNER,
   ROUTING_REASON,
   ROUTING_STATUS,
@@ -173,6 +174,242 @@ function hasSearchExpired(payment, now = new Date()) {
   return now.getTime() >= freezeAt;
 }
 
+function parsedFromPaymentEvent(payment) {
+  if (payment?.parsed_amount == null || !payment?.parsed_sender_name) return null;
+  return {
+    amount: Number(payment.parsed_amount),
+    payment_sender_name: payment.parsed_sender_name,
+    payment_app: payment.parsed_payment_app || null
+  };
+}
+
+function reconciliationRejectionReason(payment, { now = new Date() } = {}) {
+  if (!payment) return 'missing_payment';
+  if (payment.registration_payment_window_id != null && payment.registration_payment_window_id !== '') {
+    return 'already_claimed';
+  }
+  if (payment.deposit_event_id != null && payment.deposit_event_id !== '') return 'already_linked_deposit_event';
+  const status = String(payment.routing_status || '').toLowerCase();
+  if (![ROUTING_STATUS.UNROUTED, ROUTING_STATUS.SEARCHING, ROUTING_STATUS.FROZEN].includes(status)) {
+    return `status_${status || 'unknown'}_not_waiting`;
+  }
+  if (String(payment.processing_status || '').toLowerCase() === 'completed') return 'processing_completed';
+  const freezeAt = payment.freeze_at ? new Date(payment.freeze_at).getTime() : null;
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (Number.isFinite(freezeAt) && Number.isFinite(nowMs) && freezeAt <= nowMs) {
+    return 'outside_payment_search_window';
+  }
+  const receivedAt = new Date(payment.message_date || payment.created_at || 0).getTime();
+  const cutoff = nowMs - paymentSearchMinutes() * 60 * 1000;
+  if (!Number.isFinite(receivedAt) || receivedAt < cutoff) return 'outside_payment_lookback';
+  if (!parsedFromPaymentEvent(payment)) return 'missing_parsed_payment_fields';
+  return null;
+}
+
+async function completePaymentWindowMatch(store, {
+  payment,
+  parsed,
+  activeWindow,
+  match,
+  bot = null,
+  io = null
+}) {
+  const baseMatchLog = {
+    paymentEventId: payment.id,
+    paymentSenderName: parsed.payment_sender_name,
+    normalizedSenderName: match.match?.normalizedParsedName || normalizePaymentName(parsed.payment_sender_name),
+    amount: parsed.amount,
+    matchingMethod: match.matchMethod || 'exact_name'
+  };
+
+  console.log('[payment-router] payment_window_match_candidate', JSON.stringify({
+    ...baseMatchLog,
+    candidateWindowId: activeWindow.id,
+    expectedPaymentTag: activeWindow.payment_display_name,
+    normalizedExpectedName: match.match?.normalizedExpectedName || null,
+    matchingMethod: match.matchMethod || 'exact_name',
+    result: 'candidate'
+  }));
+  const claim = typeof store.claimPaymentWindowMatch === 'function'
+    ? await store.claimPaymentWindowMatch(activeWindow.id, payment.id)
+    : { ok: true, reason: 'matched', window: activeWindow };
+  console.log('[payment-router] payment_window_atomic_claim_result', JSON.stringify({
+    paymentEventId: payment.id,
+    windowId: activeWindow.id,
+    ok: claim.ok,
+    reason: claim.reason
+  }));
+
+  if (!claim.ok) {
+    if (hasSearchExpired(payment, new Date()) || hasSearchExpired({ freeze_at: payment.freeze_at || computePaymentFreezeAt(payment.message_date || new Date()) }, new Date())) {
+      return freezePayment(store, payment, {
+        reason: `Payment window claim failed (${claim.reason}).`,
+        unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+        metadata: { windowId: activeWindow.id, claimReason: claim.reason }
+      });
+    }
+    return keepSearching(store, payment, {
+      freezeAt: payment.freeze_at,
+      unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+      metadata: { claimReason: claim.reason, windowId: activeWindow.id }
+    });
+  }
+
+  const flowType = activeWindow.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+  const isDeposit = isDepositWindow(activeWindow);
+  const routingStatus = isDeposit
+    ? ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
+    : ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED;
+  const routingReason = isDeposit
+    ? ROUTING_REASON.MATCHED_DEPOSIT_WINDOW
+    : ROUTING_REASON.MATCHED_REGISTRATION_WINDOW;
+
+  console.log(
+    `[payment-router] payment_window_matched payment=${payment.id} window=${activeWindow.id} ` +
+    `flow=${flowType} contact=${activeWindow.contact_id}`
+  );
+
+  await store.updatePaymentRouting(payment.id, {
+    routing_status: routingStatus,
+    routing_owner: ROUTING_OWNER.APPBEG,
+    routing_reason: routingReason,
+    contact_id: activeWindow.contact_id,
+    registration_payment_window_id: activeWindow.id,
+    routed_at: new Date().toISOString(),
+    matched_at: new Date().toISOString(),
+    handled_by: HANDLED_BY_APPBEG_BOT,
+    unmatched_reason: null
+  });
+  await store.logPaymentRouting(payment.id, 'payment_window_matched', `Payment matched an active ${flowType} payment window.`, {
+    contactId: activeWindow.contact_id,
+    windowId: activeWindow.id,
+    flowType,
+    claimReason: claim.reason,
+    matchingMethod: match.matchMethod || 'exact_name',
+    senderName: parsed.payment_sender_name,
+    normalizedSenderName: match.match?.normalizedParsedName || null,
+    expectedPaymentTag: activeWindow.payment_display_name,
+    normalizedExpectedName: match.match?.normalizedExpectedName || null,
+    amount: parsed.amount
+  });
+
+  if (isDeposit) {
+    await continueRegisteredDepositAfterPayment(store, {
+      contactId: activeWindow.contact_id,
+      windowId: activeWindow.id,
+      paymentEventId: payment.id,
+      bot,
+      io,
+      alreadyClaimed: true
+    });
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: routingStatus,
+      flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
+    };
+  }
+
+  await continueBotRegistrationAfterPayment(store, {
+    contactId: activeWindow.contact_id,
+    windowId: activeWindow.id,
+    paymentEventId: payment.id,
+    bot,
+    io,
+    alreadyClaimed: true,
+    matchingMethod: match.matchMethod || 'exact_name'
+  });
+
+  return {
+    ok: true,
+    payment: await store.getPaymentEvent(payment.id),
+    outcome: routingStatus,
+    flowType: PAYMENT_WINDOW_FLOW.REGISTRATION
+  };
+}
+
+export async function matchEligiblePaymentsForWindow(store, windowId, { bot = null, io = null, now = new Date(), limit = 200 } = {}) {
+  const activeWindow = await store.getRegistrationPaymentWindow?.(windowId);
+  console.log('[payment-router] payment_window_reconcile_start', JSON.stringify({
+    windowId,
+    contactId: activeWindow?.contact_id ?? null,
+    flowType: activeWindow?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION,
+    startedAt: activeWindow?.created_at || null,
+    expiresAt: activeWindow?.expires_at || null
+  }));
+  if (!activeWindow || String(activeWindow.status || '').toLowerCase() !== 'active') {
+    return { ok: false, outcome: 'window_not_active', window: activeWindow || null };
+  }
+
+  const candidates = typeof store.listPaymentEventsForWindowReconciliation === 'function'
+    ? await store.listPaymentEventsForWindowReconciliation({ now, limit })
+    : [];
+  const matches = [];
+  for (const candidate of candidates) {
+    const parsed = parsedFromPaymentEvent(candidate);
+    const rejectionReason = reconciliationRejectionReason(candidate, { now });
+    const nameMatch = parsed
+      ? {
+          expected: normalizePaymentName(activeWindow.payment_display_name),
+          actual: normalizePaymentName(parsed.payment_sender_name)
+        }
+      : { expected: normalizePaymentName(activeWindow.payment_display_name), actual: null };
+    const amountMatch = parsed
+      ? Number(activeWindow.expected_payment_cents ?? Math.round(Number(activeWindow.first_deposit_amount) * 100)) === Math.round(Number(parsed.amount) * 100)
+      : false;
+    console.log('[payment-router] payment_window_reconcile_candidate', JSON.stringify({
+      windowId,
+      candidatePaymentId: candidate.id,
+      receivedAt: candidate.message_date || candidate.created_at || null,
+      candidateStatus: candidate.routing_status || null,
+      normalizedNameComparison: nameMatch,
+      amountComparison: {
+        expectedCents: activeWindow.expected_payment_cents ?? null,
+        parsedAmount: parsed?.amount ?? null,
+        exact: amountMatch
+      },
+      rejectionReason
+    }));
+    if (rejectionReason || !parsed) continue;
+    const match = findMatchingActivePaymentWindow([activeWindow], parsed, { now });
+    if (match.result === 'exact_match') {
+      matches.push({ payment: candidate, parsed, match });
+    }
+  }
+
+  if (matches.length > 1) {
+    const paymentIds = matches.map((item) => item.payment.id);
+    console.log('[payment-router] payment_window_reconcile_collision', JSON.stringify({ windowId, paymentIds }));
+    if (typeof store.holdPaymentWindowsForManualReview === 'function') {
+      await store.holdPaymentWindowsForManualReview(matches[0].payment.id, {
+        windowIds: [windowId],
+        reason: UNMATCHED_REASON.AMBIGUOUS_MATCH
+      });
+    }
+    for (const item of matches) {
+      await freezePayment(store, item.payment, {
+        reason: ROUTING_REASON.AMBIGUOUS_MATCH,
+        unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
+        metadata: { windowId, collisionPaymentIds: paymentIds }
+      });
+    }
+    return { ok: true, outcome: ROUTING_STATUS.MANUAL_REVIEW, paymentIds };
+  }
+
+  if (matches.length === 1) {
+    return completePaymentWindowMatch(store, {
+      payment: matches[0].payment,
+      parsed: matches[0].parsed,
+      activeWindow,
+      match: matches[0].match,
+      bot,
+      io
+    });
+  }
+
+  return { ok: true, outcome: 'no_eligible_payment', window: activeWindow };
+}
+
 export async function routePaymentEvent(store, paymentId, { force = false, bot = null, io = null, now = new Date() } = {}) {
   let payment = await store.getPaymentEvent(paymentId);
   if (!payment) {
@@ -321,106 +558,14 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   }
 
   if (match.result === 'exact_match') {
-    const activeWindow = match.window;
-    console.log('[payment-router] payment_window_match_candidate', JSON.stringify({
-      ...baseMatchLog,
-      candidateWindowId: activeWindow.id,
-      expectedPaymentTag: activeWindow.payment_display_name,
-      normalizedExpectedName: match.match?.normalizedExpectedName || null,
-      matchingMethod: match.matchMethod || 'exact_name',
-      result: 'candidate'
-    }));
-    const claim = typeof store.claimPaymentWindowMatch === 'function'
-      ? await store.claimPaymentWindowMatch(activeWindow.id, payment.id)
-      : { ok: true, reason: 'matched', window: activeWindow };
-
-    if (!claim.ok) {
-      // Another worker may have claimed it; keep searching unless search window expired.
-      if (hasSearchExpired(payment, now) || hasSearchExpired({ freeze_at: payment.freeze_at || computePaymentFreezeAt(payment.message_date || new Date()) }, now)) {
-        return freezePayment(store, payment, {
-          reason: `Payment window claim failed (${claim.reason}).`,
-          unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
-          metadata: { windowId: activeWindow.id, claimReason: claim.reason }
-        });
-      }
-      return keepSearching(store, payment, {
-        freezeAt: payment.freeze_at,
-        unmatchedReason: UNMATCHED_REASON.AMBIGUOUS_MATCH,
-        metadata: { claimReason: claim.reason, windowId: activeWindow.id }
-      });
-    }
-
-    const flowType = activeWindow.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
-    const isDeposit = isDepositWindow(activeWindow);
-    const routingStatus = isDeposit
-      ? ROUTING_STATUS.DEPOSIT_WINDOW_MATCHED
-      : ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED;
-    const routingReason = isDeposit
-      ? ROUTING_REASON.MATCHED_DEPOSIT_WINDOW
-      : ROUTING_REASON.MATCHED_REGISTRATION_WINDOW;
-
-    console.log(
-      `[payment-router] payment_window_matched payment=${payment.id} window=${activeWindow.id} ` +
-      `flow=${flowType} contact=${activeWindow.contact_id}`
-    );
-
-    await store.updatePaymentRouting(payment.id, {
-      routing_status: routingStatus,
-      routing_owner: ROUTING_OWNER.APPBEG,
-      routing_reason: routingReason,
-      contact_id: activeWindow.contact_id,
-      registration_payment_window_id: activeWindow.id,
-      routed_at: new Date().toISOString(),
-      matched_at: new Date().toISOString(),
-      handled_by: HANDLED_BY_APPBEG_BOT,
-      unmatched_reason: null
-    });
-    await store.logPaymentRouting(payment.id, 'payment_window_matched', `Payment matched an active ${flowType} payment window.`, {
-      contactId: activeWindow.contact_id,
-      windowId: activeWindow.id,
-      flowType,
-      claimReason: claim.reason,
-      matchingMethod: match.matchMethod || 'exact_name',
-      senderName: parsed.payment_sender_name,
-      normalizedSenderName: match.match?.normalizedParsedName || null,
-      expectedPaymentTag: activeWindow.payment_display_name,
-      normalizedExpectedName: match.match?.normalizedExpectedName || null,
-      amount: parsed.amount
-    });
-
-    if (isDeposit) {
-      await continueRegisteredDepositAfterPayment(store, {
-        contactId: activeWindow.contact_id,
-        windowId: activeWindow.id,
-        paymentEventId: payment.id,
-        bot,
-        io,
-        alreadyClaimed: true
-      });
-      return {
-        ok: true,
-        payment: await store.getPaymentEvent(payment.id),
-        outcome: routingStatus,
-        flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
-      };
-    }
-
-    await continueBotRegistrationAfterPayment(store, {
-      contactId: activeWindow.contact_id,
-      windowId: activeWindow.id,
-      paymentEventId: payment.id,
+    return completePaymentWindowMatch(store, {
+      payment,
+      parsed,
+      activeWindow: match.window,
+      match,
       bot,
-      io,
-      alreadyClaimed: true,
-      matchingMethod: match.matchMethod || 'exact_name'
+      io
     });
-
-    return {
-      ok: true,
-      payment: await store.getPaymentEvent(payment.id),
-      outcome: routingStatus,
-      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION
-    };
   }
 
   // No eligible active window. Keep searching until freeze_at; never auto-match expired/history.

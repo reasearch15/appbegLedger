@@ -335,18 +335,12 @@ async function run() {
     contact: registeredContact(),
     messageText: 'Hello!'
   });
-  assert.equal(activeDepositGreeting.kind, 'menu_registered');
+  assert.equal(activeDepositGreeting.kind, 'deposit_ask_amount');
   assert.equal(activeDepositGreeting.sendPaymentQr, undefined);
   assert.equal(activeDepositGreeting.statePatch.currentFlow, 'registered_deposit');
   assert.equal(activeDepositGreeting.statePatch.currentStep, 'deposit_amount');
-  assert.deepEqual(activeDepositGreeting.replies[0].buttons.flat().map((button) => button.text), [
-    '🟢 Deposit',
-    '🔴 Royal VIP',
-    'My Account',
-    'Help',
-    'Support'
-  ]);
-  console.log('ok greeting during active deposit restores menu without starting a second timer');
+  assert.match(activeDepositGreeting.replies[0].text, /valid deposit amount/);
+  console.log('ok greeting during active deposit validates as amount input without starting a second timer');
 
   const window = {
     id: 1,
