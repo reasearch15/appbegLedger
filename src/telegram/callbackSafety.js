@@ -10,6 +10,19 @@ const READ_ONLY_CALLBACKS = new Set([
   'bot:how_it_works'
 ]);
 
+const PERSISTENT_NAVIGATION_CALLBACKS = new Set([
+  'staff:takeover',
+  'bot:deposit',
+  'bot:main_menu',
+  'bot:my_account',
+  'bot:how_it_works'
+]);
+
+export function isPersistentNavigationCallbackAction(action) {
+  const normalized = normalizeCallbackAction(action);
+  return normalized ? PERSISTENT_NAVIGATION_CALLBACKS.has(normalized) : false;
+}
+
 export function hasCallbackButtons(buttons = []) {
   return normalizeRows(buttons).some((row) => row.some((button) => button.data));
 }
@@ -60,6 +73,13 @@ export async function recordActiveBotMessage({ store, user, bot = null, messageI
 export async function validateCallbackFreshness({ store, user, action, callbackMessageId }) {
   if (!isStateChangingCallbackAction(action)) {
     return { ok: true, stateChanging: false };
+  }
+  if (isPersistentNavigationCallbackAction(action)) {
+    return {
+      ok: true,
+      stateChanging: true,
+      persistentNavigation: true
+    };
   }
   const state = await store.ensureAutomationState(user.id);
   const info = state?.registration_info || {};

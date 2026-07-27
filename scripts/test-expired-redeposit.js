@@ -41,8 +41,8 @@ async function ensurePaymentFixtures(store, now) {
   if (!method) {
     const m = await store.db.prepare(`
       INSERT INTO payment_methods (name, key, is_active, display_order, created_at, updated_at)
-      VALUES ('Chime', 'chime', 1, 1, ?, ?, ?)
-    `).run(now, now, now);
+      VALUES ('Chime', 'chime', 1, 1, ?, ?)
+    `).run(now, now);
     method = { id: m.lastInsertRowid, name: 'Chime' };
   }
 
