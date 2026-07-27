@@ -508,6 +508,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return await db.prepare('SELECT * FROM bot_jobs WHERE id = ?').get(result.lastInsertRowid);
   }
 
+  async function hasPendingDepositStartJob(contactId, { withinMs = 120000 } = {}) {
+    const cutoff = new Date(Date.now() - Math.max(1000, Number(withinMs) || 120000)).toISOString();
+    const row = await db.prepare(`
+      SELECT id
+      FROM bot_jobs
+      WHERE contact_id = ?
+        AND job_type = 'callback_action'
+        AND action IN ('bot:deposit', 'menu:deposit')
+        AND status IN ('pending', 'processing')
+        AND created_at >= ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(contactId, cutoff);
+    return Boolean(row?.id);
+  }
+
   async function nudgeBotQueue(jobId) {
     await db.prepare(`
       INSERT INTO sync_state (key, value, updated_at)
@@ -6696,6 +6712,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     logPaymentListener,
     listPaymentListenerLogs,
     createBotJob,
+    hasPendingDepositStartJob,
     findExistingBotJobForTelegramMessage,
     nudgeBotQueue,
     claimNextBotJob,

@@ -261,6 +261,15 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       ? await store.getBotSession(contact.id).catch(() => null)
       : null;
     const depositActive = isActiveDepositSession(beforeState, botSession);
+    const beforeInfo = beforeState.registration_info || beforeState.registrationInfo || {};
+    const pendingDepositStartAmount = Boolean(
+      job.job_type === 'inbound_message'
+      && !job.action
+      && parseMoneyToCents(job.input_text || '') != null
+      && String(beforeInfo.payment_display_name || beforeInfo.payment_name || '').trim()
+      && typeof store.hasPendingDepositStartJob === 'function'
+      && await store.hasPendingDepositStartJob(contact.id).catch(() => false)
+    );
     console.log(
       `[chatbot] inbound_lifecycle contact=${contact.id} telegram_id=${contact.telegram_id} ` +
       `update_id=${job.update_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'} ` +
@@ -269,10 +278,10 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       `automation_flow=${beforeState.current_flow || 'none'} automation_step=${beforeState.current_step || 'none'} ` +
       `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
       `deposit_active=${depositActive} parsed_amount_cents=${parseMoneyToCents(job.input_text || '') ?? 'invalid'} ` +
-      `status=${contact.registration_status}`
+      `pending_deposit_start_amount=${pendingDepositStartAmount} status=${contact.registration_status}`
     );
 
-    const registrationJob = shouldUseRegistrationBot(job, beforeState, contact, botSession);
+    const registrationJob = pendingDepositStartAmount || shouldUseRegistrationBot(job, beforeState, contact, botSession);
     console.log(
       `[chatbot] inbound_router contact=${contact.id} handler=${registrationJob ? 'deposit_or_registration_bot' : 'support_ai'} ` +
       `deposit_active=${depositActive}`

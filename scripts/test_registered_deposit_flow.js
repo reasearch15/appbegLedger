@@ -251,9 +251,40 @@ async function testRapidDuplicateMessagesCreateOneWindow() {
   console.log('ok rapid duplicate amount messages create one payment window');
 }
 
+async function testFastAmountBeforeDepositCallbackState() {
+  const h = await createHarness('fast-amount');
+  const amountMessage = await h.storeInbound('5');
+  const amountJob = await h.store.createBotJob({
+    contactId: h.user.id,
+    telegramUserId: h.user.telegram_id,
+    messageId: amountMessage.messageId,
+    incomingTelegramMessageId: amountMessage.incomingTelegramMessageId,
+    jobType: 'inbound_message',
+    inputText: '5'
+  });
+  const depositJob = await h.store.createBotJob({
+    contactId: h.user.id,
+    telegramUserId: h.user.telegram_id,
+    incomingTelegramMessageId: amountMessage.incomingTelegramMessageId + 1,
+    jobType: 'callback_action',
+    inputText: '',
+    action: 'menu:deposit'
+  });
+
+  const amountResult = await processBotJob(h.store, amountJob, { bot: h.bot });
+  assert.equal(amountResult.decision.kind, 'registration_send_payment_qr');
+  assert.equal((await h.activeDepositWindows()).length, 1);
+
+  const callbackResult = await processBotJob(h.store, depositJob, { bot: h.bot });
+  assert.equal(callbackResult.decision.kind, 'deposit_waiting_payment');
+  assert.equal((await h.activeDepositWindows()).length, 1);
+  console.log('ok fast amount before Deposit callback state still starts one payment window');
+}
+
 await testExpiredThenDepositAmountStartsImmediately();
 await testInvalidThenValidAmount();
 await testCallbacksStayUsable();
 await testExpiryImmediateRedepositWorks();
 await testRapidDuplicateMessagesCreateOneWindow();
+await testFastAmountBeforeDepositCallbackState();
 console.log('ALL REGISTERED DEPOSIT FLOW CHECKS PASSED');

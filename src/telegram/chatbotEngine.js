@@ -374,6 +374,39 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     });
   }
 
+  const pendingDepositStartOwnsAmount = Boolean(
+    !action
+    && ledgerRegistered
+    && !depositSessionActive
+    && parseMoneyToCents(text) != null
+    && String(info.payment_display_name || info.payment_name || '').trim()
+    && typeof store.hasPendingDepositStartJob === 'function'
+    && await store.hasPendingDepositStartJob(contact.id).catch(() => false)
+  );
+  if (pendingDepositStartOwnsAmount) {
+    const paymentName = String(info.payment_display_name || info.payment_name || '').trim();
+    console.log(
+      `[chatbot] deposit_amount_route_selected contact=${contact.id} ` +
+      `reason=pending_deposit_callback automation_flow=${flow || 'none'} ` +
+      `automation_step=${normalizedStep || 'none'} parsed_cents=${parseMoneyToCents(text) ?? 'invalid'}`
+    );
+    return await continueRegisteredDeposit({
+      store,
+      contact,
+      text,
+      action: null,
+      step: 'deposit_amount',
+      info: {
+        ...info,
+        payment_display_name: paymentName,
+        payment_name: paymentName,
+        deposit_in_progress: true,
+        deposit_awaiting_payment: false
+      },
+      callbackMessageId
+    });
+  }
+
   if (!action && !registrationInProgress && !depositSessionActive && isGreetingEntryText(text)) {
     return await buildStateAwareEntryMenu({
       store,
