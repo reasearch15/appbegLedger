@@ -236,13 +236,54 @@ export async function createAppBegPlayerForContact(store, {
 
     if (typeof store.linkVendorPlayerForContact === 'function') {
       try {
-        await store.linkVendorPlayerForContact({
+        console.log('[vendor-trace]', JSON.stringify({
+          event: 'create_player_vendor_link_attempt',
+          contact_id: id,
+          appbeg_player_uid: result.playerUid || null
+        }));
+        const vendorLink = await store.linkVendorPlayerForContact({
           contactId: id,
           appbegPlayerUid: result.playerUid,
           actorName
         });
+        if (vendorLink?.linked) {
+          console.log('[vendor-trace]', JSON.stringify({
+            event: 'create_player_vendor_link_result',
+            contact_id: id,
+            appbeg_player_uid: result.playerUid || null,
+            vendor_id: vendorLink.vendor?.id || vendorLink.mapping?.vendor_id || null,
+            vendor_code: vendorLink.vendor?.vendor_code || vendorLink.mapping?.vendor_code || null,
+            linked: true,
+            reason: vendorLink.reason || 'linked'
+          }));
+        } else {
+          console.warn('[vendor-trace]', JSON.stringify({
+            event: 'create_player_vendor_link_result',
+            contact_id: id,
+            appbeg_player_uid: result.playerUid || null,
+            linked: false,
+            reason: vendorLink?.reason || 'unknown'
+          }));
+          await store.logEvent?.({
+            telegramUserId: id,
+            eventType: 'vendor_player_link_skipped',
+            title: 'Vendor Player Link Skipped',
+            body: `Vendor player ownership was not linked: ${vendorLink?.reason || 'unknown'}.`,
+            actorName,
+            metadata: {
+              playerUid: result.playerUid,
+              username: result.username || username,
+              reason: vendorLink?.reason || 'unknown'
+            }
+          }).catch(() => null);
+        }
       } catch (vendorError) {
-        console.warn('[vendor] player ownership link failed:', vendorError.message);
+        console.warn('[vendor-trace]', JSON.stringify({
+          event: 'create_player_vendor_link_failed',
+          contact_id: id,
+          appbeg_player_uid: result.playerUid || null,
+          error: vendorError.message || String(vendorError)
+        }));
         await store.logEvent?.({
           telegramUserId: id,
           eventType: 'vendor_player_link_failed',

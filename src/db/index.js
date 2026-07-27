@@ -6263,23 +6263,58 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function captureVendorReferralForContact(contactId, vendorCode, actorName = 'TelegramStart') {
     const id = Number(contactId);
-    if (!Number.isInteger(id) || id <= 0) return { captured: false, reason: 'invalid_contact' };
+    console.log('[vendor-trace]', JSON.stringify({
+      event: 'deep_link_payload_received',
+      contact_id: Number.isInteger(id) ? id : null,
+      vendor_code: String(vendorCode || '').trim() || null,
+      actor: actorName
+    }));
+    if (!Number.isInteger(id) || id <= 0) {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_attribution_skipped', reason: 'invalid_contact' }));
+      return { captured: false, reason: 'invalid_contact' };
+    }
     const code = normalizeVendorCode(vendorCode);
-    if (!code) return { captured: false, reason: 'invalid_vendor_code' };
+    if (!code) {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_attribution_skipped', contact_id: id, reason: 'invalid_vendor_code' }));
+      return { captured: false, reason: 'invalid_vendor_code' };
+    }
 
     const vendor = await getVendorByCode(code);
+    console.log('[vendor-trace]', JSON.stringify({
+      event: 'vendor_link_resolved',
+      contact_id: id,
+      vendor_code: code,
+      vendor_id: vendor?.id || null,
+      vendor_status: vendor?.status || null
+    }));
     if (!vendor || vendor.status !== 'active') {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_attribution_skipped', contact_id: id, vendor_code: code, reason: 'vendor_not_found' }));
       return { captured: false, reason: 'vendor_not_found' };
     }
 
     const existingOwner = await getVendorPlayerByContactId(id);
     if (existingOwner) {
+      console.log('[vendor-trace]', JSON.stringify({
+        event: 'vendor_attribution_skipped',
+        contact_id: id,
+        vendor_code: code,
+        reason: 'already_owned',
+        existing_vendor_id: existingOwner.vendor_id || null
+      }));
       return { captured: false, reason: 'already_owned', vendor: await getVendor(existingOwner.vendor_id) };
     }
 
     const state = await ensureAutomationState(id);
     const info = state?.registration_info || {};
     if (info.vendor_id || info.vendor_code) {
+      console.log('[vendor-trace]', JSON.stringify({
+        event: 'vendor_attribution_skipped',
+        contact_id: id,
+        vendor_code: code,
+        reason: 'referral_already_captured',
+        existing_vendor_id: info.vendor_id || null,
+        existing_vendor_code: info.vendor_code || null
+      }));
       return { captured: false, reason: 'referral_already_captured', vendor };
     }
 
@@ -6289,29 +6324,90 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       vendor_code: vendor.vendor_code,
       vendor_referral_captured_at: nowIso()
     }, actorName);
+    console.log('[vendor-trace]', JSON.stringify({
+      event: 'vendor_attribution_saved',
+      contact_id: id,
+      vendor_id: vendor.id,
+      vendor_code: vendor.vendor_code
+    }));
 
     return { captured: true, reason: 'captured', vendor };
+  }
+
+  async function findVendorReferralFromStartPayload(contactId) {
+    const id = Number(contactId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const rows = await db.prepare(`
+      SELECT text
+      FROM messages
+      WHERE telegram_user_id = ?
+        AND direction = 'incoming'
+        AND text LIKE '/start%'
+      ORDER BY sent_at ASC, id ASC
+      LIMIT 25
+    `).all(id);
+    for (const row of rows) {
+      const match = String(row.text || '').match(/^\/start(?:@\w+)?\s+(VND-\d{6})\b/i);
+      if (!match) continue;
+      const vendor = await getVendorByCode(match[1]);
+      if (vendor?.status === 'active') return vendor;
+    }
+    return null;
   }
 
   async function linkVendorPlayerForContact({ contactId, appbegPlayerUid, actorName = 'System' } = {}) {
     const id = Number(contactId);
     const uid = String(appbegPlayerUid || '').trim();
+    console.log('[vendor-trace]', JSON.stringify({
+      event: 'vendor_player_link_attempt',
+      contact_id: Number.isInteger(id) ? id : null,
+      appbeg_player_uid: uid || null,
+      actor: actorName
+    }));
     if (!Number.isInteger(id) || id <= 0 || !uid) {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_player_link_skipped', contact_id: Number.isInteger(id) ? id : null, reason: 'missing_contact_or_player' }));
       return { linked: false, reason: 'missing_contact_or_player' };
     }
 
     const byPlayer = await getVendorPlayerByAppBegUid(uid);
-    if (byPlayer) return { linked: false, reason: 'player_already_owned', mapping: byPlayer };
+    if (byPlayer) {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_player_link_skipped', contact_id: id, appbeg_player_uid: uid, reason: 'player_already_owned', existing_vendor_id: byPlayer.vendor_id || null }));
+      return { linked: false, reason: 'player_already_owned', mapping: byPlayer };
+    }
 
     const byContact = await getVendorPlayerByContactId(id);
-    if (byContact) return { linked: false, reason: 'contact_already_owned', mapping: byContact };
+    if (byContact) {
+      console.log('[vendor-trace]', JSON.stringify({ event: 'vendor_player_link_skipped', contact_id: id, appbeg_player_uid: uid, reason: 'contact_already_owned', existing_vendor_id: byContact.vendor_id || null }));
+      return { linked: false, reason: 'contact_already_owned', mapping: byContact };
+    }
 
     const state = await ensureAutomationState(id);
     const info = state?.registration_info || {};
-    const vendor = info.vendor_id
+    let vendor = info.vendor_id
       ? await getVendor(info.vendor_id)
       : await getVendorByCode(info.vendor_code);
+    let recoveredFromStartPayload = false;
     if (!vendor || vendor.status !== 'active') {
+      vendor = await findVendorReferralFromStartPayload(id);
+      recoveredFromStartPayload = Boolean(vendor);
+      if (vendor) {
+        await updateRegistrationInfo(id, {
+          ...info,
+          vendor_id: vendor.id,
+          vendor_code: vendor.vendor_code,
+          vendor_referral_recovered_at: nowIso()
+        }, actorName);
+      }
+    }
+    if (!vendor || vendor.status !== 'active') {
+      console.log('[vendor-trace]', JSON.stringify({
+        event: 'vendor_player_link_skipped',
+        contact_id: id,
+        appbeg_player_uid: uid,
+        reason: 'no_vendor_referral',
+        registration_vendor_id: info.vendor_id || null,
+        registration_vendor_code: info.vendor_code || null
+      }));
       return { linked: false, reason: 'no_vendor_referral' };
     }
 
@@ -6341,12 +6437,28 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         metadata: {
           vendorId: vendor.id,
           vendorCode: vendor.vendor_code,
+          recoveredFromStartPayload,
           appbegPlayerUid: uid
         }
       }).catch(() => null);
-      return { linked: true, reason: 'linked', vendor, mapping };
+      console.log('[vendor-trace]', JSON.stringify({
+        event: 'vendor_player_link_inserted',
+        contact_id: id,
+        vendor_id: vendor.id,
+        vendor_code: vendor.vendor_code,
+        appbeg_player_uid: uid,
+        mapping_id: mappingId,
+        recovered_from_start_payload: recoveredFromStartPayload
+      }));
+      return { linked: true, reason: recoveredFromStartPayload ? 'linked_recovered_from_start_payload' : 'linked', vendor, mapping };
     } catch (error) {
       if (/unique|constraint|duplicate/i.test(String(error.message || ''))) {
+        console.log('[vendor-trace]', JSON.stringify({
+          event: 'vendor_player_link_skipped',
+          contact_id: id,
+          appbeg_player_uid: uid,
+          reason: 'already_owned'
+        }));
         return {
           linked: false,
           reason: 'already_owned',

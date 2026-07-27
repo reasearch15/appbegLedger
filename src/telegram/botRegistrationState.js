@@ -435,8 +435,15 @@ export function clearedBotRegistrationInfo(contact, existingInfo = null) {
     telegram_username: contact?.username || previous.telegram_username || null,
     telegram_user_id: contact?.telegram_id || previous.telegram_user_id || null
   };
-  // Coadmin is assigned once at BotFather contact creation — never wipe it on restart/cancel.
-  for (const key of ['coadmin_name', 'coadmin_code', 'appbeg_coadmin_uid']) {
+  // Coadmin and vendor referral are assigned at entry and must survive restarts.
+  for (const key of [
+    'coadmin_name',
+    'coadmin_code',
+    'appbeg_coadmin_uid',
+    'vendor_id',
+    'vendor_code',
+    'vendor_referral_captured_at'
+  ]) {
     if (previous[key] != null && previous[key] !== '') {
       cleared[key] = previous[key];
     }

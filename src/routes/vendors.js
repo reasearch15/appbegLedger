@@ -521,6 +521,12 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     const vendor = await store.getVendor(id);
     if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
     const players = await store.listVendorPlayers(id);
+    console.log('[vendor-trace]', JSON.stringify({
+      event: 'vendor_detail_ownership_query_result',
+      vendor_id: id,
+      vendor_code: vendor.vendor_code || null,
+      player_count: players.length
+    }));
     const financialByUid = await loadFinancialByUid(appbegStore, players);
     const financial = summarizePlayersFinancial(players, financialByUid);
     if (financial.financial_available !== false) {
