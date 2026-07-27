@@ -162,6 +162,7 @@ function withTimeout(promise, timeoutMs) {
 export async function enqueueChatbotJob(store, {
   contactId,
   telegramUserId,
+  updateId = null,
   messageId = null,
   incomingTelegramMessageId = null,
   jobType = 'inbound_message',
@@ -200,6 +201,7 @@ export async function enqueueChatbotJob(store, {
   const job = await store.createBotJob({
     contactId,
     telegramUserId: telegramUserId || contact.telegram_id,
+    updateId,
     messageId,
     incomingTelegramMessageId,
     jobType,
@@ -215,8 +217,11 @@ export async function enqueueChatbotJob(store, {
   if (job && force_entry_menu) {
     job.force_entry_menu = true;
   }
+  if (job && updateId != null) {
+    job.update_id = updateId;
+  }
 
-  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}${incomingTelegramMessageId != null ? ` telegram_message_id=${incomingTelegramMessageId}` : ''}${force_entry_menu ? ' entry_menu=1' : ''}`);
+  console.log(`[chatbot] bot job created id=${job.id} contact=${contactId} type=${jobType}${action ? ` action=${action}` : ''}${updateId != null ? ` update_id=${updateId}` : ''}${incomingTelegramMessageId != null ? ` telegram_message_id=${incomingTelegramMessageId}` : ''}${force_entry_menu ? ' entry_menu=1' : ''}`);
   await store.nudgeBotQueue(job.id);
   return job;
 }
@@ -237,7 +242,8 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     const depositActive = isActiveDepositSession(beforeState, botSession);
     console.log(
       `[chatbot] inbound_lifecycle contact=${contact.id} telegram_id=${contact.telegram_id} ` +
-      `text=${JSON.stringify(String(job.input_text || '').slice(0, 80))} ` +
+      `update_id=${job.update_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'} ` +
+      `text=${JSON.stringify(safeRegistrationLogText(job.input_text, { beforeState }))} ` +
       `action=${job.action || 'none'} job_type=${job.job_type || 'none'} ` +
       `automation_flow=${beforeState.current_flow || 'none'} automation_step=${beforeState.current_step || 'none'} ` +
       `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
@@ -322,6 +328,7 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     });
 
     console.log(`[chatbot] bot reply generated id=${job.id} contact=${contact.id} kind=${decision.kind}`);
+    logRegistrationTrace('handler_selected', { job, contact, decision, beforeState, botSession });
     const logEvents = decision.logEvents || (decision.logEvent ? [decision.logEvent] : []);
     for (const logEvent of logEvents) {
       if (logEvent?.event) {
@@ -329,15 +336,47 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       }
     }
 
-    if (decision.setStatus) {
-      await store.updateRegistrationStatus(contact.id, decision.setStatus, 'Chatbot');
-    }
-
-    if (decision.statePatch) {
-      await store.updateAutomationState(contact.id, decision.statePatch);
-      if (decision.statePatch.registrationInfo && !decision.replaceRegistrationInfo) {
-        await store.updateRegistrationInfo(contact.id, decision.statePatch.registrationInfo, 'Chatbot');
+    const beforeStateSnapshot = cloneRegistrationState(beforeState);
+    let stateWriteAttempted = false;
+    let stateWriteResult = null;
+    try {
+      if (decision.setStatus) {
+        await store.updateRegistrationStatus(contact.id, decision.setStatus, 'Chatbot');
       }
+
+      if (decision.statePatch) {
+        stateWriteAttempted = true;
+        logRegistrationTrace('state_transition_attempted', {
+          job,
+          contact,
+          decision,
+          beforeState: beforeStateSnapshot,
+          nextFlow: decision.statePatch.currentFlow,
+          nextStep: decision.statePatch.currentStep
+        });
+        stateWriteResult = await store.updateAutomationState(contact.id, decision.statePatch);
+        if (decision.statePatch.registrationInfo && !decision.replaceRegistrationInfo) {
+          stateWriteResult = await store.updateRegistrationInfo(contact.id, decision.statePatch.registrationInfo, 'Chatbot');
+        }
+        logRegistrationTrace('state_transition_persisted', {
+          job,
+          contact,
+          decision,
+          beforeState: beforeStateSnapshot,
+          afterState: stateWriteResult
+        });
+      }
+    } catch (error) {
+      console.error('[chatbot] registration_state_write_failed', {
+        contact_id: contact.id,
+        job_id: job.id,
+        update_id: job.update_id || null,
+        telegram_message_id: job.incoming_telegram_message_id || null,
+        handler: decision.kind,
+        stack: error?.stack || String(error)
+      });
+      await sendRegistrationRecoveryReply({ store, contact, bot: bot || globalThis.telegramBot || null });
+      throw error;
     }
 
     // Time-based welcome throttle marker only — never a permanent reply block.
@@ -392,15 +431,7 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     let repliesSentBeforeCreate = false;
     let accountViewHandled = false;
     if (decision.createAppBegPlayer && decision.replies?.length) {
-      for (const reply of decision.replies) {
-        await queueBotReply({
-          store,
-          user: contact,
-          text: reply.text,
-          buttons: reply.buttons || [],
-          bot: bot || globalThis.telegramBot || null
-        });
-      }
+      await sendDecisionReplies({ store, contact, decision, job, bot: bot || globalThis.telegramBot || null, beforeStateSnapshot, stateWriteAttempted });
       repliesSentBeforeCreate = true;
     }
 
@@ -465,15 +496,7 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
 
     if (!repliesSentBeforeCreate && !accountViewHandled) {
-      for (const reply of decision.replies || []) {
-        await queueBotReply({
-          store,
-          user: contact,
-          text: reply.text,
-          buttons: reply.buttons || [],
-          bot: bot || globalThis.telegramBot || null
-        });
-      }
+      await sendDecisionReplies({ store, contact, decision, job, bot: bot || globalThis.telegramBot || null, beforeStateSnapshot, stateWriteAttempted });
     }
 
     // Re-assert deposit session AFTER outbound delivery. recordActiveBotMessage only patches
@@ -510,13 +533,156 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     emitUpdates(io, contact);
     return { ok: true, decision };
   } catch (error) {
-    console.error(`[chatbot] bot job failed id=${job.id}:`, error);
+    console.error('[chatbot] bot_job_failed', {
+      job_id: job.id,
+      contact_id: job.contact_id,
+      update_id: job.update_id || null,
+      telegram_message_id: job.incoming_telegram_message_id || null,
+      stack: error?.stack || String(error)
+    });
     await store.completeBotJob(job.id, {
       status: 'failed',
       errorText: error.message || String(error)
     });
     return { ok: false, error };
   }
+}
+
+async function sendDecisionReplies({ store, contact, decision, job, bot, beforeStateSnapshot, stateWriteAttempted }) {
+  for (const reply of decision.replies || []) {
+    try {
+      logRegistrationTrace('outgoing_send_attempted', {
+        job,
+        contact,
+        decision,
+        beforeState: beforeStateSnapshot,
+        buttonCount: (reply.buttons || []).flat?.().length || 0
+      });
+      const result = await queueBotReply({
+        store,
+        user: contact,
+        text: reply.text,
+        buttons: reply.buttons || [],
+        bot
+      });
+      logRegistrationTrace('outgoing_send_succeeded', {
+        job,
+        contact,
+        decision,
+        beforeState: beforeStateSnapshot,
+        outgoing: result
+      });
+    } catch (error) {
+      console.error('[chatbot] outgoing_send_failed', {
+        contact_id: contact.id,
+        job_id: job.id,
+        update_id: job.update_id || null,
+        telegram_message_id: job.incoming_telegram_message_id || null,
+        handler: decision.kind,
+        stack: error?.stack || String(error)
+      });
+      if (stateWriteAttempted && isRegistrationDecision(decision)) {
+        await restoreRegistrationState(store, contact.id, beforeStateSnapshot);
+        logRegistrationTrace('state_transition_rolled_back', {
+          job,
+          contact,
+          decision,
+          beforeState: beforeStateSnapshot,
+          afterState: beforeStateSnapshot
+        });
+      }
+      await sendRegistrationRecoveryReply({ store, contact, bot });
+      throw error;
+    }
+  }
+}
+
+async function sendRegistrationRecoveryReply({ store, contact, bot }) {
+  try {
+    const result = await queueBotReply({
+      store,
+      user: contact,
+      text: 'Something went wrong while saving that. Please try again.',
+      buttons: [],
+      bot
+    });
+    console.log('[chatbot] registration_recovery_reply_sent', {
+      contact_id: contact.id,
+      message_id: result?.messageId || null
+    });
+  } catch (error) {
+    console.error('[chatbot] registration_recovery_reply_failed', {
+      contact_id: contact.id,
+      stack: error?.stack || String(error)
+    });
+  }
+}
+
+async function restoreRegistrationState(store, contactId, snapshot) {
+  await store.updateAutomationState(contactId, {
+    currentFlow: snapshot.current_flow ?? null,
+    currentStep: snapshot.current_step ?? null,
+    registrationInfo: snapshot.registration_info || {}
+  });
+}
+
+function cloneRegistrationState(state = {}) {
+  return {
+    current_flow: state?.current_flow ?? null,
+    current_step: state?.current_step ?? null,
+    registration_info: { ...(state?.registration_info || {}) }
+  };
+}
+
+function isRegistrationDecision(decision = {}) {
+  return String(decision.kind || '').startsWith('registration_')
+    || decision.statePatch?.currentFlow === 'bot_registration';
+}
+
+function logRegistrationTrace(event, data = {}) {
+  const { job, contact, decision, beforeState, afterState, botSession, outgoing, buttonCount, nextFlow, nextStep } = data;
+  console.log('[registration-trace]', JSON.stringify({
+    event,
+    update_id: job?.update_id ?? null,
+    job_id: job?.id ?? null,
+    message_id: job?.incoming_telegram_message_id ?? null,
+    telegram_user_id: contact?.telegram_id ?? job?.telegram_user_id ?? null,
+    chat_id: contact?.telegram_id ?? null,
+    contact_id: contact?.id ?? job?.contact_id ?? null,
+    normalized_text: safeRegistrationLogText(job?.input_text, { beforeState, decision, nextStep }),
+    handler: decision?.kind || null,
+    session_flow: botSession?.workflow_key || null,
+    session_step: botSession?.workflow_step || null,
+    before_flow: beforeState?.current_flow || null,
+    before_step: beforeState?.current_step || null,
+    attempted_flow: nextFlow ?? decision?.statePatch?.currentFlow ?? null,
+    attempted_step: nextStep ?? decision?.statePatch?.currentStep ?? null,
+    after_flow: afterState?.current_flow || null,
+    after_step: afterState?.current_step || null,
+    outgoing_message_id: outgoing?.messageId || null,
+    outgoing_source: outgoing?.source || null,
+    button_count: buttonCount ?? outgoing?.buttons?.flat?.().length ?? null
+  }));
+}
+
+function safeRegistrationLogText(value = '', { beforeState = null, decision = null, nextStep = null } = {}) {
+  if (shouldRedactRegistrationText({ beforeState, decision, nextStep })) {
+    return '[redacted]';
+  }
+  const text = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!text) return '';
+  if (text.length > 120) return `${text.slice(0, 117)}...`;
+  return text;
+}
+
+function shouldRedactRegistrationText({ beforeState = null, decision = null, nextStep = null } = {}) {
+  const steps = [
+    beforeState?.current_step,
+    beforeState?.currentStep,
+    nextStep,
+    decision?.statePatch?.currentStep
+  ].map((value) => String(value || '').toLowerCase());
+  return steps.some((step) => step.includes('password'));
 }
 
 async function handleAccountViewDecision({ store, contact, decision, bot = null }) {

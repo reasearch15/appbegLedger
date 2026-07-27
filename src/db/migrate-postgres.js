@@ -159,6 +159,7 @@ export async function migratePostgres(driver) {
       id BIGSERIAL PRIMARY KEY,
       contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
       telegram_user_id TEXT NOT NULL,
+      update_id BIGINT,
       message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
       incoming_telegram_message_id BIGINT,
       job_type TEXT NOT NULL DEFAULT 'inbound_message',
@@ -174,9 +175,11 @@ export async function migratePostgres(driver) {
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
     );
+    ALTER TABLE bot_jobs ADD COLUMN IF NOT EXISTS update_id BIGINT;
     CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_update_id ON bot_jobs(update_id);
   `);
 
   await driver.exec(`

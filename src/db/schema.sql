@@ -385,6 +385,7 @@ CREATE TABLE IF NOT EXISTS bot_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   contact_id INTEGER NOT NULL,
   telegram_user_id TEXT NOT NULL,
+  update_id INTEGER,
   message_id INTEGER,
   incoming_telegram_message_id INTEGER,
   job_type TEXT NOT NULL DEFAULT 'inbound_message',
@@ -604,6 +605,9 @@ CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created
 
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message
   ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
+
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_update_id
+  ON bot_jobs(update_id);
 
 CREATE INDEX IF NOT EXISTS idx_settings_audit_log_created
   ON settings_audit_log(created_at DESC);

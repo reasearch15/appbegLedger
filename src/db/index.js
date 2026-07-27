@@ -431,7 +431,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     `).run(localMessageId, nowIso(), outboundId);
   }
 
-  async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message', action = null }) {
+  async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message', action = null, updateId = null }) {
+    if (updateId != null && updateId !== '') {
+      const existingByUpdate = await db.prepare(`
+        SELECT *
+        FROM bot_jobs
+        WHERE update_id = ?
+          AND status IN ('pending', 'processing', 'completed')
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(updateId);
+      if (existingByUpdate) return existingByUpdate;
+    }
     if (incomingTelegramMessageId == null || incomingTelegramMessageId === '') return null;
     const actionClause = action ? 'AND action = ?' : '';
     const params = action
@@ -453,6 +464,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function createBotJob({
     contactId,
     telegramUserId,
+    updateId = null,
     messageId = null,
     incomingTelegramMessageId = null,
     jobType = 'inbound_message',
@@ -466,7 +478,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         contactId,
         incomingTelegramMessageId,
         jobType,
-        action: jobType === 'callback_action' ? action : null
+        action: jobType === 'callback_action' ? action : null,
+        updateId
       });
       if (existing) {
         return { ...existing, duplicate: true };
@@ -476,13 +489,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const now = nowIso();
     const result = await db.prepare(`
       INSERT INTO bot_jobs (
-        contact_id, telegram_user_id, message_id, incoming_telegram_message_id,
+        contact_id, telegram_user_id, update_id, message_id, incoming_telegram_message_id,
         job_type, input_text, action, status, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     `).run(
       contactId,
       String(telegramUserId),
+      updateId,
       messageId,
       incomingTelegramMessageId,
       jobType,
@@ -7131,6 +7145,7 @@ async function migrate(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       contact_id INTEGER NOT NULL,
       telegram_user_id TEXT NOT NULL,
+      update_id INTEGER,
       message_id INTEGER,
       incoming_telegram_message_id INTEGER,
       job_type TEXT NOT NULL DEFAULT 'inbound_message',
@@ -7149,9 +7164,11 @@ async function migrate(db) {
       FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL
     )
   `);
+  await addColumnIfMissing(db, 'bot_jobs', 'update_id', 'INTEGER');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_update_id ON bot_jobs(update_id)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS coadmin_settings (

@@ -372,7 +372,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     });
   }
 
-  if (!action && isGreetingEntryText(text)) {
+  if (!action && !registrationInProgress && !depositSessionActive && isGreetingEntryText(text)) {
     return await buildStateAwareEntryMenu({
       store,
       contact,

@@ -91,6 +91,7 @@ export function isCasualOffTopicMessage(text = '') {
   if (!value) return false;
   if (isGreetingEntryText(value)) return true;
   if (/^(ok|okay|thanks|thank you|cool|sure|yes|no|yep|nope)$/i.test(value)) return true;
+  if (/^(help|support|contact|menu|main menu|cancel registration|register)$/i.test(value)) return true;
   return false;
 }
 

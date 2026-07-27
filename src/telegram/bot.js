@@ -19,6 +19,9 @@ export function startTelegramListener({ token, store, io }) {
     if (ctx.chat?.type !== 'private' || !ctx.from) return;
 
     try {
+      logTelegramUpdate('callback_received', ctx, {
+        action: ctx.callbackQuery?.data || null
+      });
       const user = await ensureBotApiPrivateContact(store, ctx.from);
       const action = ctx.callbackQuery.data;
       const fresh = await store.getUserProfile(user.id);
@@ -45,6 +48,7 @@ export function startTelegramListener({ token, store, io }) {
             enqueueParams: {
               contactId: user.id,
               telegramUserId: user.telegram_id,
+              updateId: ctx.update?.update_id,
               incomingTelegramMessageId: callbackMessageId,
               jobType: 'inbound_message',
               inputText: '',
@@ -71,6 +75,7 @@ export function startTelegramListener({ token, store, io }) {
         enqueueParams: {
           contactId: user.id,
           telegramUserId: user.telegram_id,
+          updateId: ctx.update?.update_id,
           incomingTelegramMessageId: callbackMessageId,
           jobType: 'callback_action',
           inputText: '',
@@ -91,7 +96,13 @@ export function startTelegramListener({ token, store, io }) {
 
       console.log(`[chatbot] callback_auto_send_suppressed contact=${user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
     } catch (error) {
-      console.error('Failed to handle Telegram menu action:', error);
+      console.error('[telegram] callback_update_failed', {
+        update_id: ctx.update?.update_id ?? null,
+        message_id: ctx.callbackQuery?.message?.message_id ?? null,
+        user_id: ctx.from?.id ?? null,
+        chat_id: ctx.chat?.id ?? null,
+        stack: error?.stack || String(error)
+      });
     }
   });
 
@@ -99,6 +110,9 @@ export function startTelegramListener({ token, store, io }) {
     if (ctx.chat?.type !== 'private' || !ctx.message?.from) return;
 
     try {
+      logTelegramUpdate('message_received', ctx, {
+        text_length: String(ctx.message.text || ctx.message.caption || '').trim().length
+      });
       const result = await store.storeIncomingTelegramMessage(ctx);
       console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id} first=${Boolean(result.firstMessage)}`);
       await store.ensureBotSession(result.user.id);
@@ -125,7 +139,7 @@ export function startTelegramListener({ token, store, io }) {
       const auto = await store.getAutomationState(result.user.id).catch(() => null);
       console.log(
         `[chatbot] telegram_inbound contact=${result.user.id} telegram_id=${result.user.telegram_id} ` +
-        `text=${JSON.stringify(String(inputText).slice(0, 80))} ` +
+        `text=${JSON.stringify(safeTelegramInboundText(inputText, auto))} ` +
         `bot_session=${sess?.workflow_key || 'none'}/${sess?.workflow_step || 'none'} ` +
         `automation_flow=${auto?.current_flow || 'none'} automation_step=${auto?.current_step || 'none'} ` +
         `deposit_in_progress=${Boolean(auto?.registration_info?.deposit_in_progress)}`
@@ -137,6 +151,7 @@ export function startTelegramListener({ token, store, io }) {
         enqueueParams: {
           contactId: result.user.id,
           telegramUserId: result.user.telegram_id,
+          updateId: ctx.update?.update_id,
           messageId: await store.findLatestIncomingMessageId(result.user.id, ctx.message.message_id),
           incomingTelegramMessageId: ctx.message.message_id,
           jobType: 'inbound_message',
@@ -161,7 +176,13 @@ export function startTelegramListener({ token, store, io }) {
 
       console.log(`[chatbot] direct_auto_send_suppressed contact=${result.user.id} ai_mode=${fresh?.ai_mode || 'train'}`);
     } catch (error) {
-      console.error('Failed to store Telegram message:', error);
+      console.error('[telegram] message_update_failed', {
+        update_id: ctx.update?.update_id ?? null,
+        message_id: ctx.message?.message_id ?? null,
+        user_id: ctx.message?.from?.id ?? null,
+        chat_id: ctx.chat?.id ?? null,
+        stack: error?.stack || String(error)
+      });
     }
   });
 
@@ -176,6 +197,24 @@ export function startTelegramListener({ token, store, io }) {
   process.once('SIGTERM', () => stop('SIGTERM'));
 
   return bot;
+}
+
+function logTelegramUpdate(event, ctx, extra = {}) {
+  console.log('[telegram-update]', JSON.stringify({
+    event,
+    update_id: ctx.update?.update_id ?? null,
+    message_id: ctx.message?.message_id ?? ctx.callbackQuery?.message?.message_id ?? null,
+    telegram_user_id: ctx.from?.id ?? ctx.message?.from?.id ?? null,
+    chat_id: ctx.chat?.id ?? null,
+    chat_type: ctx.chat?.type || null,
+    ...extra
+  }));
+}
+
+function safeTelegramInboundText(value = '', automationState = null) {
+  const step = String(automationState?.current_step || automationState?.currentStep || '').toLowerCase();
+  if (step.includes('password')) return '[redacted]';
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
 async function startPollingBot(bot) {

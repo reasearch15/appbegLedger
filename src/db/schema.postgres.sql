@@ -367,6 +367,7 @@ CREATE TABLE IF NOT EXISTS bot_jobs (
   id BIGSERIAL PRIMARY KEY,
   contact_id BIGINT NOT NULL REFERENCES telegram_users(id) ON DELETE CASCADE,
   telegram_user_id TEXT NOT NULL,
+  update_id BIGINT,
   message_id BIGINT REFERENCES messages(id) ON DELETE SET NULL,
   incoming_telegram_message_id BIGINT,
   job_type TEXT NOT NULL DEFAULT 'inbound_message',
@@ -557,6 +558,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_outbound_client_request
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_status_created ON bot_jobs(status, created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id);
+ALTER TABLE bot_jobs ADD COLUMN IF NOT EXISTS update_id BIGINT;
+CREATE INDEX IF NOT EXISTS idx_bot_jobs_update_id ON bot_jobs(update_id);
 
 INSERT INTO telegram_account_sync_state (id, status, updated_at)
 VALUES (1, 'disabled', NOW()::TEXT)

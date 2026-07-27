@@ -47,8 +47,7 @@ export function isRegisteredDepositFlow(flow, step) {
     'deposit_amount',
     'deposit_await_payment',
     DEPOSIT_BOT_SESSION_STEP_AMOUNT,
-    DEPOSIT_BOT_SESSION_STEP_NAME,
-    DEPOSIT_BOT_SESSION_STEP_AWAIT
+    DEPOSIT_BOT_SESSION_STEP_NAME
   ].includes(String(step || ''));
 }
 
@@ -79,8 +78,7 @@ export function isActiveDepositSession(automationState = {}, botSession = null) 
     'deposit_amount',
     'deposit_await_payment',
     DEPOSIT_BOT_SESSION_STEP_AMOUNT,
-    DEPOSIT_BOT_SESSION_STEP_NAME,
-    DEPOSIT_BOT_SESSION_STEP_AWAIT
+    DEPOSIT_BOT_SESSION_STEP_NAME
   ].includes(step)) return true;
   return Boolean(info.deposit_in_progress || info.deposit_awaiting_payment);
 }
