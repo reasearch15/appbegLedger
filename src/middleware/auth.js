@@ -79,12 +79,15 @@ export function clearLoginAttempts(req) {
 export function requireAuth(store) {
   return async function authMiddleware(req, res, next) {
     try {
-      const userId = req.session?.ledgerUserId;
-      if (!userId) {
+      const authType = req.session?.ledgerAuthType || (req.session?.ledgerVendorId ? 'vendor' : 'admin');
+      const principalId = authType === 'vendor' ? req.session?.ledgerVendorId : req.session?.ledgerUserId;
+      if (!principalId) {
         return res.status(401).json({ error: 'Authentication required.' });
       }
 
-      const user = await store.getLedgerUserById(userId);
+      const user = authType === 'vendor'
+        ? await store.getVendorAuthById(principalId)
+        : await store.getLedgerUserById(principalId);
       if (!user || !user.is_active) {
         req.session?.destroy?.(() => {});
         return res.status(401).json({ error: 'Authentication required.' });
@@ -108,6 +111,16 @@ export function requireAdmin(req, res, next) {
   return next();
 }
 
+export function requireVendor(req, res, next) {
+  if (!req.ledgerUser) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+  if (req.ledgerUser.role !== 'vendor' || !req.ledgerUser.vendorId) {
+    return res.status(403).json({ error: 'Vendor access required.' });
+  }
+  return next();
+}
+
 export function isAuthenticated(req) {
-  return Boolean(req.session?.ledgerUserId);
+  return Boolean(req.session?.ledgerUserId || req.session?.ledgerVendorId);
 }

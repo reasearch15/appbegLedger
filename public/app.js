@@ -146,11 +146,24 @@ let state = {
   vendorDetailLoading: false,
   vendorCommissionSaving: false,
   vendorSettlementSaving: false,
+  vendorProfileSaving: false,
+  vendorPasswordResetSaving: false,
   vendorDeleting: false,
   vendorDashboardQuery: '',
   vendorDashboardStatus: 'all',
   vendorDashboardSort: 'net',
   vendorDashboardDir: 'desc',
+  vendorPortal: {
+    dashboard: null,
+    players: [],
+    settlements: [],
+    pagination: { page: 1, limit: 25, total: 0, totalPages: 1 },
+    query: '',
+    sort: 'linked_at',
+    dir: 'desc',
+    loading: false,
+    error: null
+  },
   appbegPlayers: [],
   appbegPlayersLoading: false,
   appbegPlayersError: null,
@@ -443,6 +456,10 @@ function isAdmin() {
   return state.authUser?.role === 'admin';
 }
 
+function isVendor() {
+  return state.authUser?.role === 'vendor';
+}
+
 async function loadAuthUser() {
   const payload = await api('/api/auth/me');
   state.authUser = payload.user || null;
@@ -469,7 +486,7 @@ async function refreshLedgerUsers() {
     const payload = await api('/api/auth/users');
     state.ledgerUsers = payload.users || [];
   } catch (error) {
-    state.settingsError = error.message || 'Could not load staff users.';
+    state.settingsError = error.message || 'Could not load admin users.';
   } finally {
     state.ledgerUsersLoading = false;
   }
@@ -496,6 +513,56 @@ async function refreshVendors() {
     state.vendorError = error.message || 'Could not load vendors.';
   } finally {
     state.vendorsLoading = false;
+  }
+}
+
+async function refreshVendorPortalDashboard() {
+  if (!isVendor()) return;
+  state.vendorPortal.loading = true;
+  state.vendorPortal.error = null;
+  try {
+    const payload = await api('/api/vendor/dashboard');
+    state.vendorPortal.dashboard = payload.vendor || null;
+  } catch (error) {
+    state.vendorPortal.error = error.message || 'Could not load vendor dashboard.';
+  } finally {
+    state.vendorPortal.loading = false;
+  }
+}
+
+async function refreshVendorPortalPlayers() {
+  if (!isVendor()) return;
+  state.vendorPortal.loading = true;
+  state.vendorPortal.error = null;
+  try {
+    const params = new URLSearchParams({
+      page: String(state.vendorPortal.pagination?.page || 1),
+      limit: String(state.vendorPortal.pagination?.limit || 25),
+      sort: state.vendorPortal.sort || 'linked_at',
+      dir: state.vendorPortal.dir || 'desc'
+    });
+    if (state.vendorPortal.query) params.set('query', state.vendorPortal.query);
+    const payload = await api(`/api/vendor/players?${params.toString()}`);
+    state.vendorPortal.players = payload.players || [];
+    state.vendorPortal.pagination = payload.pagination || state.vendorPortal.pagination;
+  } catch (error) {
+    state.vendorPortal.error = error.message || 'Could not load players.';
+  } finally {
+    state.vendorPortal.loading = false;
+  }
+}
+
+async function refreshVendorPortalSettlements() {
+  if (!isVendor()) return;
+  state.vendorPortal.loading = true;
+  state.vendorPortal.error = null;
+  try {
+    const payload = await api('/api/vendor/settlements');
+    state.vendorPortal.settlements = payload.settlements || [];
+  } catch (error) {
+    state.vendorPortal.error = error.message || 'Could not load settlement history.';
+  } finally {
+    state.vendorPortal.loading = false;
   }
 }
 
@@ -2606,7 +2673,7 @@ function settingsWorkspace() {
           </form>
         </section>
         <section class="card settings-form-card">
-          <div class="card-title">Staff Users</div>
+          <div class="card-title">Admin Users</div>
           ${state.ledgerUsersLoading ? '<div class="subtle">Loading users…</div>' : ''}
           <div class="user-management-list">
             ${(state.ledgerUsers || []).map((user) => `
@@ -2621,10 +2688,10 @@ function settingsWorkspace() {
                   </button>
                 ` : '<span class="subtle">Current user</span>'}
               </div>
-            `).join('') || '<div class="subtle">No staff users yet.</div>'}
+            `).join('') || '<div class="subtle">No admin users yet.</div>'}
           </div>
           <form id="createLedgerUserForm" class="settings-form" style="margin-top: 16px;">
-            <div class="form-section-label">Add Staff User</div>
+            <div class="form-section-label">Add Admin User</div>
             <label class="field-label">
               <span>Username</span>
               <input id="newLedgerUsername" required minlength="3" />
@@ -2632,13 +2699,6 @@ function settingsWorkspace() {
             <label class="field-label">
               <span>Password</span>
               <input id="newLedgerPassword" type="password" required minlength="8" />
-            </label>
-            <label class="field-label">
-              <span>Role</span>
-              <select id="newLedgerRole">
-                <option value="staff">Staff</option>
-                <option value="admin">Admin</option>
-              </select>
             </label>
             <button class="button secondary" type="submit" ${state.ledgerUserSaving ? 'disabled' : ''}>
               ${state.ledgerUserSaving ? 'Creating…' : 'Create User'}
@@ -2673,6 +2733,156 @@ function vendorBotLinkValue(vendor) {
   return vendor?.vendorBotLink || vendor?.vendor_bot_link || '';
 }
 
+function vendorPortalDashboardWorkspace() {
+  const vendor = state.vendorPortal.dashboard || {};
+  const cards = [
+    ['Vendor Name', vendor.name || '-'],
+    ['Vendor Code', vendor.vendorCode || vendor.vendor_code || '-'],
+    ['Status', vendor.status || '-'],
+    ['Commission %', vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage)],
+    ['Players', vendor.playerCount ?? vendor.player_count ?? 0],
+    ['Active Today', fmtFinancialCount(vendor, 'activePlayersToday', 'active_players_today')],
+    ['Total In', fmtFinancialMoney(vendor, 'totalIn', 'total_in')],
+    ['Total Out', fmtFinancialMoney(vendor, 'totalOut', 'total_out')],
+    ['Net', fmtFinancialMoney(vendor, 'net', 'net')],
+    ['Receivable', fmtFinancialMoney(vendor, 'receivable', 'receivable')],
+    ['Settlements Paid', fmtMoney(vendor.settlementTotal ?? vendor.settlement_total ?? 0)],
+    ['Outstanding', fmtFinancialMoney(vendor, 'outstanding', 'outstanding')]
+  ];
+  return `
+    <main class="ops-main vendors-main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Vendor Portal</div>
+          <h1>Dashboard</h1>
+        </div>
+      </header>
+      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+      ${state.vendorPortal.loading ? '<div class="subtle">Loading dashboard...</div>' : ''}
+      <section class="vendor-financial-card">
+        ${cards.map(([label, value]) => `
+          <div>
+            <div class="subtle">${escapeHtml(label)}</div>
+            <div class="strong">${escapeHtml(value)}</div>
+          </div>
+        `).join('')}
+      </section>
+    </main>
+  `;
+}
+
+function vendorPortalPlayersWorkspace() {
+  const pagination = state.vendorPortal.pagination || { page: 1, totalPages: 1, total: 0 };
+  return `
+    <main class="ops-main vendors-main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Vendor Portal</div>
+          <h1>My Players</h1>
+        </div>
+      </header>
+      <form id="vendorPortalPlayerFilters" class="vendor-dashboard-filters">
+        <label class="field-label">
+          <span>Search</span>
+          <input id="vendorPortalPlayerQuery" value="${escapeHtml(state.vendorPortal.query || '')}" placeholder="Username or status" />
+        </label>
+        <label class="field-label">
+          <span>Sort by</span>
+          <select id="vendorPortalPlayerSort">
+            ${[
+              ['linked_at', 'Ownership Date'],
+              ['username', 'Username'],
+              ['status', 'Status'],
+              ['total_in', 'Total In'],
+              ['total_out', 'Total Out'],
+              ['net', 'Net'],
+              ['last_activity', 'Last Activity']
+            ].map(([value, label]) => `<option value="${value}" ${state.vendorPortal.sort === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </label>
+        <label class="field-label">
+          <span>Direction</span>
+          <select id="vendorPortalPlayerDir">
+            <option value="desc" ${state.vendorPortal.dir === 'desc' ? 'selected' : ''}>Descending</option>
+            <option value="asc" ${state.vendorPortal.dir === 'asc' ? 'selected' : ''}>Ascending</option>
+          </select>
+        </label>
+        <div class="settings-actions vendor-dashboard-actions">
+          <button class="button secondary" type="submit">Apply</button>
+        </div>
+      </form>
+      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+      ${state.vendorPortal.loading ? '<div class="subtle">Loading players...</div>' : ''}
+      <section class="card vendor-detail-card">
+        ${state.vendorPortal.players.length ? `
+          <div class="vendor-players-table">
+            <div class="vendor-players-header">
+              <span>Username</span>
+              <span>Status</span>
+              <span>Total In</span>
+              <span>Total Out</span>
+              <span>Net</span>
+              <span>Last Activity</span>
+              <span>Ownership Date</span>
+            </div>
+            ${state.vendorPortal.players.map((player) => `
+              <div class="vendor-player-row">
+                <span>${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
+                <span>${escapeHtml(player.status || '-')}</span>
+                <span>${escapeHtml(fmtFinancialMoney(player, 'totalIn', 'total_in'))}</span>
+                <span>${escapeHtml(fmtFinancialMoney(player, 'totalOut', 'total_out'))}</span>
+                <span>${escapeHtml(fmtFinancialMoney(player, 'net', 'net'))}</span>
+                <span>${escapeHtml(fmtFinancialDate(player))}</span>
+                <span>${escapeHtml(fmtDate(player.linked_at))}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : (!state.vendorPortal.loading ? '<div class="subtle">No players found.</div>' : '')}
+        <div class="settings-actions">
+          <button class="button secondary" type="button" data-vendor-portal-page="${Number(pagination.page || 1) - 1}" ${Number(pagination.page || 1) <= 1 ? 'disabled' : ''}>Previous</button>
+          <span class="subtle">Page ${escapeHtml(pagination.page || 1)} of ${escapeHtml(pagination.totalPages || 1)} / ${escapeHtml(pagination.total || 0)} players</span>
+          <button class="button secondary" type="button" data-vendor-portal-page="${Number(pagination.page || 1) + 1}" ${Number(pagination.page || 1) >= Number(pagination.totalPages || 1) ? 'disabled' : ''}>Next</button>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function vendorPortalSettlementsWorkspace() {
+  return `
+    <main class="ops-main vendors-main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Vendor Portal</div>
+          <h1>Settlement History</h1>
+        </div>
+      </header>
+      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+      ${state.vendorPortal.loading ? '<div class="subtle">Loading settlements...</div>' : ''}
+      <section class="card vendor-detail-card">
+        ${state.vendorPortal.settlements.length ? `
+          <div class="vendor-settlements-table">
+            <div class="vendor-settlements-header">
+              <span>Date</span>
+              <span>Amount</span>
+              <span>Notes</span>
+              <span>Running Outstanding</span>
+            </div>
+            ${state.vendorPortal.settlements.map((settlement) => `
+              <div class="vendor-settlement-row">
+                <span>${escapeHtml(fmtDate(settlement.settlementDate || settlement.settlement_date))}</span>
+                <span>${escapeHtml(fmtMoney(settlement.amount ?? settlement.settlementAmount ?? settlement.settlement_amount))}</span>
+                <span>${escapeHtml(settlement.notes || '-')}</span>
+                <span>${escapeHtml(fmtMoney(settlement.runningOutstanding ?? settlement.running_outstanding))}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : (!state.vendorPortal.loading ? '<div class="subtle">No settlements recorded yet.</div>' : '')}
+      </section>
+    </main>
+  `;
+}
+
 function vendorsWorkspace() {
   const selected = state.selectedVendor;
   return `
@@ -2691,6 +2901,14 @@ function vendorsWorkspace() {
             <label class="field-label">
               <span>Vendor name</span>
               <input id="vendorName" placeholder="Vendor name" ${state.vendorSaving ? 'disabled' : ''} />
+            </label>
+            <label class="field-label">
+              <span>Username</span>
+              <input id="vendorUsername" required minlength="3" autocomplete="off" ${state.vendorSaving ? 'disabled' : ''} />
+            </label>
+            <label class="field-label">
+              <span>Password</span>
+              <input id="vendorPassword" type="password" required minlength="8" autocomplete="new-password" ${state.vendorSaving ? 'disabled' : ''} />
             </label>
             <label class="field-label">
               <span>Commission percentage</span>
@@ -2846,6 +3064,41 @@ function vendorsWorkspace() {
               </div>
             </div>
             ${!financialAvailable(selected) ? `<div class="settings-error">${escapeHtml(selected.financialUnavailableReason || selected.financial_unavailable_reason || 'Financial reporting is unavailable.')}</div>` : ''}
+            <form id="vendorProfileForm" class="settings-form compact-form">
+              <div class="form-section-label">Vendor Account</div>
+              <label class="field-label">
+                <span>Vendor name</span>
+                <input id="vendorDetailName" value="${escapeHtml(selected.name || '')}" ${state.vendorProfileSaving ? 'disabled' : ''} />
+              </label>
+              <label class="field-label">
+                <span>Username</span>
+                <input id="vendorDetailUsername" value="${escapeHtml(selected.username || '')}" required minlength="3" ${state.vendorProfileSaving ? 'disabled' : ''} />
+              </label>
+              <label class="field-label">
+                <span>Status</span>
+                <select id="vendorDetailStatus" ${state.vendorProfileSaving ? 'disabled' : ''}>
+                  <option value="active" ${String(selected.status || '').toLowerCase() === 'active' ? 'selected' : ''}>Active</option>
+                  <option value="suspended" ${String(selected.status || '').toLowerCase() === 'suspended' ? 'selected' : ''}>Suspended</option>
+                </select>
+              </label>
+              <label class="field-label">
+                <span>Notes</span>
+                <textarea id="vendorDetailNotes" rows="3" ${state.vendorProfileSaving ? 'disabled' : ''}>${escapeHtml(selected.notes || '')}</textarea>
+              </label>
+              <div class="settings-actions">
+                <button class="button secondary" type="submit" ${state.vendorProfileSaving ? 'disabled' : ''}>${state.vendorProfileSaving ? 'Saving...' : 'Save Vendor'}</button>
+              </div>
+            </form>
+            <form id="vendorPasswordResetForm" class="settings-form compact-form">
+              <div class="form-section-label">Reset Password</div>
+              <label class="field-label">
+                <span>New password</span>
+                <input id="vendorResetPassword" type="password" required minlength="8" autocomplete="new-password" ${state.vendorPasswordResetSaving ? 'disabled' : ''} />
+              </label>
+              <div class="settings-actions">
+                <button class="button secondary" type="submit" ${state.vendorPasswordResetSaving ? 'disabled' : ''}>${state.vendorPasswordResetSaving ? 'Resetting...' : 'Reset Password'}</button>
+              </div>
+            </form>
             <div class="vendor-settlement-tools">
               <form id="vendorCommissionForm" class="settings-form compact-form">
                 <div class="form-section-label">Commission</div>
@@ -3030,7 +3283,11 @@ async function handlePaymentAction(action, button) {
 }
 
 function render() {
-  const items = [
+  const items = (isVendor() ? [
+    { id: 'vendor-dashboard', label: 'Dashboard', icon: 'V' },
+    { id: 'vendor-players', label: 'My Players', icon: 'P' },
+    { id: 'vendor-settlements', label: 'Settlements', icon: '$' }
+  ] : [
     { id: 'contacts', label: 'Contacts', icon: '💬' },
     { id: 'players', label: 'Players', icon: '👥' },
     { id: 'appbeg-players', label: 'AppBeg Players', icon: '📊' },
@@ -3050,7 +3307,7 @@ function render() {
     { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
     { id: 'vendors', label: 'Vendors', icon: 'V', adminOnly: true },
     { id: 'settings', label: 'Settings', icon: '⚙️', adminOnly: true }
-  ].filter((item) => !item.adminOnly || isAdmin());
+  ]).filter((item) => !item.adminOnly || isAdmin());
   const navHtml = items.map((item) => `
     <button class="nav-item ${state.section === item.id ? 'active' : ''}" data-section="${item.id}" type="button">
       <span class="nav-icon" aria-hidden="true">${item.icon}</span>
@@ -3059,7 +3316,9 @@ function render() {
   `).join('');
   const sectionTitle = items.find((item) => item.id === state.section)?.label || 'Operations';
 
-  if ((state.section === 'settings' || state.section === 'vendors') && !isAdmin()) {
+  if (isVendor() && !['vendor-dashboard', 'vendor-players', 'vendor-settlements'].includes(state.section)) {
+    state.section = 'vendor-dashboard';
+  } else if ((state.section === 'settings' || state.section === 'vendors') && !isAdmin()) {
     state.section = 'contacts';
   }
 
@@ -3067,12 +3326,12 @@ function render() {
     <div class="ops-shell section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
       <button type="button" class="nav-drawer-backdrop" data-nav-close aria-label="Close menu"></button>
       <aside class="sidebar" id="appSidebar">
-        <div class="brand">Royal VIP Coadmin</div>
+        <div class="brand">AppBeg Ledger</div>
         ${navHtml}
         <div class="user-bar">
           <div class="user-bar-meta">
-            <div class="user-bar-name">${escapeHtml(state.authUser?.username || 'Staff')}</div>
-            <div class="user-bar-role">${escapeHtml(state.authUser?.role || 'staff')}</div>
+            <div class="user-bar-name">${escapeHtml(state.authUser?.username || 'Admin')}</div>
+            <div class="user-bar-role">${escapeHtml(state.authUser?.role || 'admin')}</div>
           </div>
           <button type="button" class="button secondary small" id="logoutButton">Log out</button>
         </div>
@@ -3081,7 +3340,13 @@ function render() {
         <button type="button" class="menu-toggle" data-nav-toggle aria-label="Open menu">☰</button>
         <div class="brand-inline">${escapeHtml(sectionTitle)}</div>
       </div>
-      ${state.section === 'payments'
+      ${state.section === 'vendor-dashboard'
+    ? vendorPortalDashboardWorkspace()
+    : state.section === 'vendor-players'
+      ? vendorPortalPlayersWorkspace()
+    : state.section === 'vendor-settlements'
+      ? vendorPortalSettlementsWorkspace()
+    : state.section === 'payments'
     ? paymentsWorkspace()
     : state.section === 'ongoing'
       ? ongoingController.renderWorkspace(state)
@@ -3457,6 +3722,15 @@ function bindEvents() {
       state.section = button.dataset.section;
       state.navOpen = false;
       if (state.section === 'contacts') state.mobileContactsPane = 'list';
+      if (state.section === 'vendor-dashboard') {
+        await refreshVendorPortalDashboard();
+      }
+      if (state.section === 'vendor-players') {
+        await refreshVendorPortalPlayers();
+      }
+      if (state.section === 'vendor-settlements') {
+        await refreshVendorPortalSettlements();
+      }
       if (state.section === 'payments') state.mobilePaymentsPane = 'list';
       if (state.section === 'manual-review') state.mobileManualReviewPane = 'list';
       if (state.section === 'players') state.mobilePlayersPane = 'list';
@@ -3531,6 +3805,29 @@ function bindEvents() {
     render();
   });
 
+  document.querySelector('#vendorPortalPlayerFilters')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    state.vendorPortal.query = form.querySelector('#vendorPortalPlayerQuery')?.value?.trim() || '';
+    state.vendorPortal.sort = form.querySelector('#vendorPortalPlayerSort')?.value || 'linked_at';
+    state.vendorPortal.dir = form.querySelector('#vendorPortalPlayerDir')?.value || 'desc';
+    state.vendorPortal.pagination = { ...(state.vendorPortal.pagination || {}), page: 1 };
+    await refreshVendorPortalPlayers();
+    render();
+  });
+
+  document.querySelectorAll('[data-vendor-portal-page]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      event.preventDefault();
+      state.vendorPortal.pagination = {
+        ...(state.vendorPortal.pagination || {}),
+        page: Number(button.dataset.vendorPortalPage) || 1
+      };
+      await refreshVendorPortalPlayers();
+      render();
+    });
+  });
+
   document.querySelectorAll('#vendorDashboardStatus, #vendorDashboardSort, #vendorDashboardDir').forEach((control) => {
     control.addEventListener('change', () => {
       control.form?.requestSubmit();
@@ -3549,6 +3846,16 @@ function bindEvents() {
   document.querySelector('#vendorCommissionForm')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void updateVendorCommission(event.target);
+  });
+
+  document.querySelector('#vendorProfileForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void updateVendorProfile(event.target);
+  });
+
+  document.querySelector('#vendorPasswordResetForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void resetVendorPassword(event.target);
   });
 
   document.querySelector('#vendorSettlementForm')?.addEventListener('submit', (event) => {
@@ -4287,7 +4594,7 @@ async function createLedgerUser(form) {
   try {
     const username = form.querySelector('#newLedgerUsername')?.value?.trim();
     const password = form.querySelector('#newLedgerPassword')?.value || '';
-    const role = form.querySelector('#newLedgerRole')?.value || 'staff';
+    const role = 'admin';
     await api('/api/auth/users', {
       method: 'POST',
       body: JSON.stringify({ username, password, role })
@@ -4310,11 +4617,13 @@ async function createVendor(form) {
   render();
   try {
     const name = form.querySelector('#vendorName')?.value?.trim() || '';
+    const username = form.querySelector('#vendorUsername')?.value?.trim() || '';
+    const password = form.querySelector('#vendorPassword')?.value || '';
     const commissionPercentage = form.querySelector('#vendorCommissionPercentage')?.value ?? '0';
     const notes = form.querySelector('#vendorNotes')?.value?.trim() || '';
     const payload = await api('/api/vendors', {
       method: 'POST',
-      body: JSON.stringify({ name, commissionPercentage, notes })
+      body: JSON.stringify({ name, username, password, commissionPercentage, notes })
     });
     form.reset();
     state.selectedVendorId = Number(payload.vendor?.id) || state.selectedVendorId;
@@ -4393,6 +4702,54 @@ async function deleteSelectedVendor() {
   }
 }
 
+async function updateVendorProfile(form) {
+  if (!state.selectedVendorId || state.vendorProfileSaving) return;
+  state.vendorProfileSaving = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    const name = form.querySelector('#vendorDetailName')?.value?.trim() || '';
+    const username = form.querySelector('#vendorDetailUsername')?.value?.trim() || '';
+    const status = form.querySelector('#vendorDetailStatus')?.value || 'active';
+    const notes = form.querySelector('#vendorDetailNotes')?.value?.trim() || '';
+    await api(`/api/vendors/${state.selectedVendorId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name, username, status, notes })
+    });
+    state.vendorSuccess = 'Vendor saved.';
+    await refreshVendors();
+    await refreshSelectedVendor();
+  } catch (error) {
+    state.vendorError = error.message || 'Could not save vendor.';
+  } finally {
+    state.vendorProfileSaving = false;
+    render();
+  }
+}
+
+async function resetVendorPassword(form) {
+  if (!state.selectedVendorId || state.vendorPasswordResetSaving) return;
+  state.vendorPasswordResetSaving = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    const password = form.querySelector('#vendorResetPassword')?.value || '';
+    await api(`/api/vendors/${state.selectedVendorId}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ password })
+    });
+    form.reset();
+    state.vendorSuccess = 'Vendor password reset.';
+  } catch (error) {
+    state.vendorError = error.message || 'Could not reset password.';
+  } finally {
+    state.vendorPasswordResetSaving = false;
+    render();
+  }
+}
+
 async function updateVendorCommission(form) {
   if (!state.selectedVendorId || state.vendorCommissionSaving) return;
   state.vendorCommissionSaving = true;
@@ -4463,6 +4820,12 @@ async function boot() {
   setupMobileViewport();
   try {
     await loadAuthUser();
+    if (isVendor()) {
+      state.section = 'vendor-dashboard';
+      await refreshVendorPortalDashboard();
+      render();
+      return;
+    }
     await Promise.all([
       refreshContacts({ keepSelection: false, force: true, reason: 'startup' }),
       refreshStats({ force: true, reason: 'startup' }),

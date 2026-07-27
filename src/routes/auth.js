@@ -15,8 +15,27 @@ function normalizeUsername(value) {
 }
 
 function parseRole(value) {
-  const role = String(value || 'staff').trim().toLowerCase();
-  return role === 'admin' ? 'admin' : 'staff';
+  return 'admin';
+}
+
+function publicVendorUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    vendorId: user.vendorId,
+    vendor_id: user.vendor_id,
+    username: user.username,
+    role: 'vendor',
+    is_active: user.is_active,
+    vendorCode: user.vendorCode,
+    vendor_code: user.vendor_code,
+    name: user.name,
+    status: user.status,
+    commissionPercentage: user.commissionPercentage,
+    commission_percentage: user.commission_percentage,
+    created_at: user.created_at,
+    updated_at: user.updated_at
+  };
 }
 
 export function registerAuthRoutes(app, { store }) {
@@ -31,8 +50,13 @@ export function registerAuthRoutes(app, { store }) {
     }
 
     try {
-      const user = await store.getLedgerUserByUsername(username);
-      if (!user || !user.is_active) {
+      let user = await store.getLedgerUserByUsername(username);
+      let authType = 'admin';
+      if (!user) {
+        user = await store.getVendorAuthByUsername(username);
+        authType = 'vendor';
+      }
+      if (!user || !user.is_active || (authType === 'admin' && user.role !== 'admin')) {
         recordFailedLogin(req);
         return res.status(401).json({ error: GENERIC_LOGIN_ERROR });
       }
@@ -44,11 +68,18 @@ export function registerAuthRoutes(app, { store }) {
       }
 
       clearLoginAttempts(req);
-      req.session.ledgerUserId = user.id;
+      req.session.ledgerAuthType = authType;
+      if (authType === 'vendor') {
+        req.session.ledgerVendorId = user.vendorId;
+        delete req.session.ledgerUserId;
+      } else {
+        req.session.ledgerUserId = user.id;
+        delete req.session.ledgerVendorId;
+      }
       req.session.ledgerUsername = user.username;
       req.session.ledgerRole = user.role;
 
-      return res.json({ user: store.toPublicLedgerUser(user) });
+      return res.json({ user: authType === 'vendor' ? publicVendorUser(user) : store.toPublicLedgerUser(user) });
     } catch (error) {
       console.error('[auth] login failed:', error);
       return res.status(500).json({ error: 'Login failed.' });
@@ -70,7 +101,7 @@ export function registerAuthRoutes(app, { store }) {
   });
 
   app.get('/api/auth/me', requireAuth(store), (req, res) => {
-    res.json({ user: store.toPublicLedgerUser(req.ledgerUser) });
+    res.json({ user: req.ledgerUser.role === 'vendor' ? publicVendorUser(req.ledgerUser) : store.toPublicLedgerUser(req.ledgerUser) });
   });
 
   app.get('/api/auth/users', requireAuth(store), requireAdmin, async (_req, res) => {
@@ -92,7 +123,8 @@ export function registerAuthRoutes(app, { store }) {
       }
 
       const existing = await store.getLedgerUserByUsername(username);
-      if (existing) {
+      const existingVendor = await store.getVendorAuthByUsername(username);
+      if (existing || existingVendor) {
         return res.status(409).json({ error: 'Username already exists.' });
       }
 

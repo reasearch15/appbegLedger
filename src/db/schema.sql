@@ -633,7 +633,7 @@ CREATE TABLE IF NOT EXISTS ledger_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin')),
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -646,6 +646,8 @@ CREATE TABLE IF NOT EXISTS vendors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   vendor_code TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
+  username TEXT UNIQUE COLLATE NOCASE,
+  password_hash TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
   commission_percentage REAL NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
   notes TEXT,
@@ -655,6 +657,10 @@ CREATE TABLE IF NOT EXISTS vendors (
 
 CREATE INDEX IF NOT EXISTS idx_vendors_status_created
   ON vendors(status, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_username
+  ON vendors(username COLLATE NOCASE)
+  WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS vendor_players (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

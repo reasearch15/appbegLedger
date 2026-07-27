@@ -5590,7 +5590,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return {
       id: row.id,
       username: row.username,
-      role: row.role,
+      role: 'admin',
       is_active: row.is_active === undefined || row.is_active === null
         ? true
         : (typeof row.is_active === 'boolean' ? row.is_active : Boolean(row.is_active)),
@@ -5616,16 +5616,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const rows = await db.prepare(`
       SELECT id, username, role, is_active, created_at, updated_at
       FROM ledger_users
+      WHERE role = 'admin'
       ORDER BY username ASC
     `).all();
     return rows.map((row) => toPublicLedgerUser(row));
   }
 
-  async function createLedgerUser({ username, passwordHash, role = 'staff', isActive = true }) {
+  async function createLedgerUser({ username, passwordHash, role = 'admin', isActive = true }) {
     const normalized = String(username || '').trim().toLowerCase();
     if (!normalized) throw new Error('Username is required.');
     if (!passwordHash) throw new Error('Password hash is required.');
-    const safeRole = role === 'admin' ? 'admin' : 'staff';
+    const safeRole = 'admin';
     const timestamp = nowIso();
     const result = await db.prepare(`
       INSERT INTO ledger_users (username, password_hash, role, is_active, created_at, updated_at)
@@ -5651,7 +5652,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const values = [];
     if (patch.role !== undefined) {
       fields.push('role = ?');
-      values.push(patch.role === 'admin' ? 'admin' : 'staff');
+      values.push('admin');
     }
     if (patch.is_active !== undefined) {
       fields.push('is_active = ?');
@@ -5684,6 +5685,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       id: Number(row.id),
       vendor_code: row.vendor_code || formatVendorCode(row.id),
       name: row.name || '',
+      username: row.username || '',
       status: row.status || 'active',
       commission_percentage: Number(row.commission_percentage || 0),
       notes: row.notes || '',
@@ -5709,6 +5711,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       linked_at: row.linked_at,
       created_at: row.created_at,
       updated_at: row.updated_at,
+      status: row.registration_status || row.status || null,
       telegram_name: row.telegram_name || row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || '',
       telegram_username: row.telegram_username || null,
       appbeg_username: info.preferred_appbeg_username || info.appbeg_username || row.appbeg_username || null
@@ -5726,6 +5729,28 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       settlement_date: row.settlement_date,
       notes: row.notes || '',
       created_by: row.created_by || '',
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    };
+  }
+
+  function normalizeVendorAuth(row) {
+    if (!row) return null;
+    const active = String(row.status || 'active').toLowerCase() === 'active';
+    return {
+      id: `vendor:${row.id}`,
+      vendorId: Number(row.id),
+      vendor_id: Number(row.id),
+      username: row.username || '',
+      password_hash: row.password_hash || null,
+      role: 'vendor',
+      is_active: active,
+      vendorCode: row.vendor_code || formatVendorCode(row.id),
+      vendor_code: row.vendor_code || formatVendorCode(row.id),
+      name: row.name || '',
+      status: row.status || 'active',
+      commissionPercentage: Number(row.commission_percentage || 0),
+      commission_percentage: Number(row.commission_percentage || 0),
       created_at: row.created_at,
       updated_at: row.updated_at
     };
@@ -5787,17 +5812,53 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   function normalizeVendorInput(input = {}) {
     const name = String(input.name || '').trim();
+    const username = String(input.username || '').trim().toLowerCase();
     const rawCommission = input.commissionPercentage ?? input.commission_percentage ?? 0;
     if (!name) {
       const error = new Error('Vendor name is required.');
       error.code = 'VALIDATION_ERROR';
       throw error;
     }
+    if (username && username.length < 3) {
+      const error = new Error('Username must be at least 3 characters.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
     return {
       name,
+      username: username || null,
       commissionPercentage: normalizeVendorCommissionPercentage(rawCommission),
       notes: String(input.notes || '').trim() || null
     };
+  }
+
+  function normalizeOptionalVendorUsername(value) {
+    const username = String(value || '').trim().toLowerCase();
+    if (!username || username.length < 3) {
+      const error = new Error('Username must be at least 3 characters.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    return username;
+  }
+
+  async function usernameExistsForVendor(username, excludeVendorId = null) {
+    const normalized = String(username || '').trim().toLowerCase();
+    if (!normalized) return false;
+    const params = [normalized];
+    let excludeSql = '';
+    if (excludeVendorId) {
+      excludeSql = ' AND id <> ?';
+      params.push(Number(excludeVendorId));
+    }
+    const vendor = await db.prepare(`
+      SELECT id FROM vendors
+      WHERE username IS NOT NULL AND LOWER(username) = ?${excludeSql}
+      LIMIT 1
+    `).get(...params);
+    if (vendor) return true;
+    const user = await db.prepare('SELECT id FROM ledger_users WHERE LOWER(username) = ? LIMIT 1').get(normalized);
+    return Boolean(user);
   }
 
   async function listVendors() {
@@ -5806,6 +5867,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         v.id,
         v.vendor_code,
         v.name,
+        v.username,
         v.status,
         v.commission_percentage,
         v.notes,
@@ -5814,7 +5876,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         COUNT(vp.id) AS player_count
       FROM vendors v
       LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
-      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
+      GROUP BY v.id, v.vendor_code, v.name, v.username, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
       ORDER BY v.created_at DESC, v.id DESC
     `).all();
     return rows.map(normalizeVendor);
@@ -5828,6 +5890,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         v.id,
         v.vendor_code,
         v.name,
+        v.username,
         v.status,
         v.commission_percentage,
         v.notes,
@@ -5837,7 +5900,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM vendors v
       LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
       WHERE v.id = ?
-      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
+      GROUP BY v.id, v.vendor_code, v.name, v.username, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
     `).get(vendorId));
   }
 
@@ -5845,7 +5908,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const code = normalizeVendorCode(vendorCode);
     if (!code) return null;
     return normalizeVendor(await db.prepare(`
-      SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at, 0 AS player_count
+      SELECT id, vendor_code, name, username, status, commission_percentage, notes, created_at, updated_at, 0 AS player_count
       FROM vendors
       WHERE vendor_code = ?
       LIMIT 1
@@ -5854,6 +5917,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function createVendor(input = {}) {
     const vendor = normalizeVendorInput(input);
+    if ((vendor.username && !input.passwordHash) || (!vendor.username && input.passwordHash)) {
+      const error = new Error('Vendor username and password are required together.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (vendor.username && await usernameExistsForVendor(vendor.username)) {
+      const error = new Error('Username already exists.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
     const timestamp = nowIso();
     const pendingCode = `VND-PENDING-${crypto.randomUUID()}`;
 
@@ -5863,13 +5936,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         await client.query('BEGIN');
         const inserted = await client.query(`
           INSERT INTO vendors (
-            vendor_code, name, status, commission_percentage, notes, created_at, updated_at
+            vendor_code, name, username, password_hash, status, commission_percentage, notes, created_at, updated_at
           )
-          VALUES ($1, $2, 'active', $3, $4, $5, $5)
+          VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $7)
           RETURNING id
         `, [
           pendingCode,
           vendor.name,
+          vendor.username,
+          input.passwordHash,
           vendor.commissionPercentage,
           vendor.notes,
           timestamp
@@ -5882,7 +5957,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE id = $3
         `, [vendorCode, timestamp, id]);
         const selected = await client.query(`
-          SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at
+          SELECT id, vendor_code, name, username, status, commission_percentage, notes, created_at, updated_at
           FROM vendors
           WHERE id = $1
         `, [id]);
@@ -5903,12 +5978,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const createSqliteVendor = db.db.transaction(() => {
       const result = db.db.prepare(`
         INSERT INTO vendors (
-          vendor_code, name, status, commission_percentage, notes, created_at, updated_at
+          vendor_code, name, username, password_hash, status, commission_percentage, notes, created_at, updated_at
         )
-        VALUES (?, ?, 'active', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
       `).run(
         pendingCode,
         vendor.name,
+        vendor.username,
+        input.passwordHash,
         vendor.commissionPercentage,
         vendor.notes,
         timestamp,
@@ -5922,7 +5999,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         WHERE id = ?
       `).run(vendorCode, timestamp, id);
       const row = db.db.prepare(`
-        SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at
+        SELECT id, vendor_code, name, username, status, commission_percentage, notes, created_at, updated_at
         FROM vendors
         WHERE id = ?
       `).get(id);
@@ -5933,6 +6010,89 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     });
 
     return normalizeVendor(createSqliteVendor());
+  }
+
+  async function getVendorAuthByUsername(username) {
+    const normalized = String(username || '').trim().toLowerCase();
+    if (!normalized) return null;
+    return normalizeVendorAuth(await db.prepare(`
+      SELECT id, vendor_code, name, username, password_hash, status, commission_percentage, created_at, updated_at
+      FROM vendors
+      WHERE username IS NOT NULL AND LOWER(username) = ?
+      LIMIT 1
+    `).get(normalized));
+  }
+
+  async function getVendorAuthById(vendorId) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    return normalizeVendorAuth(await db.prepare(`
+      SELECT id, vendor_code, name, username, password_hash, status, commission_percentage, created_at, updated_at
+      FROM vendors
+      WHERE id = ?
+      LIMIT 1
+    `).get(id));
+  }
+
+  async function updateVendorAccount(vendorId, input = {}) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('Valid vendor id is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    const current = await getVendor(id);
+    if (!current) return null;
+    const fields = [];
+    const values = [];
+    if (input.username !== undefined) {
+      const username = normalizeOptionalVendorUsername(input.username);
+      if (await usernameExistsForVendor(username, id)) {
+        const error = new Error('Username already exists.');
+        error.code = 'VALIDATION_ERROR';
+        throw error;
+      }
+      fields.push('username = ?');
+      values.push(username);
+    }
+    if (input.passwordHash !== undefined) {
+      if (!input.passwordHash) {
+        const error = new Error('Password hash is required.');
+        error.code = 'VALIDATION_ERROR';
+        throw error;
+      }
+      fields.push('password_hash = ?');
+      values.push(input.passwordHash);
+    }
+    if (input.name !== undefined) {
+      const name = String(input.name || '').trim();
+      if (!name) {
+        const error = new Error('Vendor name is required.');
+        error.code = 'VALIDATION_ERROR';
+        throw error;
+      }
+      fields.push('name = ?');
+      values.push(name);
+    }
+    if (input.status !== undefined) {
+      const status = String(input.status || '').trim().toLowerCase();
+      if (!['active', 'suspended'].includes(status)) {
+        const error = new Error('Vendor status is invalid.');
+        error.code = 'VALIDATION_ERROR';
+        throw error;
+      }
+      fields.push('status = ?');
+      values.push(status);
+    }
+    if (input.notes !== undefined) {
+      fields.push('notes = ?');
+      values.push(String(input.notes || '').trim() || null);
+    }
+    if (!fields.length) return current;
+    fields.push('updated_at = ?');
+    values.push(nowIso(), id);
+    await db.prepare(`UPDATE vendors SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return getVendor(id);
   }
 
   async function deleteVendor(vendorId) {
@@ -6063,7 +6223,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const id = Number(contactId);
     if (!Number.isInteger(id) || id <= 0) return null;
     return normalizeVendorPlayer(await db.prepare(`
-      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.registration_status, u.appbeg_account_id AS appbeg_username,
              cas.registration_info_json
       FROM vendor_players vp
       LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
@@ -6077,7 +6237,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const uid = String(playerUid || '').trim();
     if (!uid) return null;
     return normalizeVendorPlayer(await db.prepare(`
-      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.registration_status, u.appbeg_account_id AS appbeg_username,
              cas.registration_info_json
       FROM vendor_players vp
       LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
@@ -6151,7 +6311,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       `).run(vendor.id, id, uid, timestamp, timestamp, timestamp);
       const mappingId = Number(result.lastInsertRowid);
       const mapping = normalizeVendorPlayer(await db.prepare(`
-        SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+        SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.registration_status, u.appbeg_account_id AS appbeg_username,
                cas.registration_info_json
         FROM vendor_players vp
         LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
@@ -6187,7 +6347,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const id = Number(vendorId);
     if (!Number.isInteger(id) || id <= 0) return [];
     const rows = await db.prepare(`
-      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.registration_status, u.appbeg_account_id AS appbeg_username,
              cas.registration_info_json
       FROM vendor_players vp
       LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
@@ -6200,7 +6360,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function listAllVendorPlayers() {
     const rows = await db.prepare(`
-      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.registration_status, u.appbeg_account_id AS appbeg_username,
              cas.registration_info_json
       FROM vendor_players vp
       LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
@@ -6466,6 +6626,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     createLedgerUser,
     updateLedgerUser,
     toPublicLedgerUser,
+    getVendorAuthByUsername,
+    getVendorAuthById,
+    updateVendorAccount,
     listVendors,
     getVendor,
     getVendorByCode,
@@ -7194,7 +7357,7 @@ async function migrate(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE COLLATE NOCASE,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+      role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin')),
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -7206,6 +7369,8 @@ async function migrate(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       vendor_code TEXT NOT NULL UNIQUE,
       name TEXT NOT NULL,
+      username TEXT UNIQUE COLLATE NOCASE,
+      password_hash TEXT,
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
       commission_percentage REAL NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
       notes TEXT,
@@ -7213,7 +7378,12 @@ async function migrate(db) {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await addColumnIfMissing(db, 'vendors', 'username', 'TEXT');
+  await addColumnIfMissing(db, 'vendors', 'password_hash', 'TEXT');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC)');
+  await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_username
+    ON vendors(username COLLATE NOCASE)
+    WHERE username IS NOT NULL`);
   await db.exec(`
     CREATE TABLE IF NOT EXISTS vendor_players (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

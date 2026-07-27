@@ -31,7 +31,7 @@ import {
 } from './payments/router.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { wrapAsyncHandlers, notFoundHandler, errorHandler } from './middleware/errorHandler.js';
-import { createSessionMiddleware, isAuthExemptPath, isAuthenticated, requireAuth, requireAdmin } from './middleware/auth.js';
+import { createSessionMiddleware, isAuthExemptPath, isAuthenticated, requireAuth, requireAdmin, requireVendor } from './middleware/auth.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
@@ -182,7 +182,16 @@ registerAuthRoutes(app, { store });
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   if (isAuthExemptPath(req.path, req.method)) return next();
-  return requireAuth(store)(req, res, next);
+  return requireAuth(store)(req, res, (error) => {
+    if (error) return next(error);
+    if (req.ledgerUser?.role === 'vendor') {
+      if (req.path === '/api/auth/me' || req.path.startsWith('/api/vendor/')) {
+        return next();
+      }
+      return res.status(403).json({ error: 'Admin access required.' });
+    }
+    return next();
+  });
 });
 
 app.get('/login', (req, res) => {
@@ -204,7 +213,7 @@ registerHealthRoutes(app, { store });
 registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
 registerAppBegPlayerRoutes(app, { appbegStore });
 registerOngoingRoutes(app, { store });
-registerVendorRoutes(app, { store, requireAdmin, appbegStore });
+registerVendorRoutes(app, { store, requireAdmin, requireVendor, appbegStore });
 registerInternalVendorOwnershipRoutes(app, { store });
 
 app.get('/api/stats', async (req, res) => {

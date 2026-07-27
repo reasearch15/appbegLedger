@@ -1,3 +1,7 @@
+import bcrypt from 'bcrypt';
+
+const BCRYPT_ROUNDS = 12;
+
 function zeroFinancial() {
   return {
     total_in: 0,
@@ -136,6 +140,7 @@ function vendorPayload(vendor) {
     vendorCode: vendor.vendor_code,
     vendor_code: vendor.vendor_code,
     name: vendor.name,
+    username: vendor.username || '',
     status: vendor.status,
     commissionPercentage: vendor.commission_percentage,
     commission_percentage: vendor.commission_percentage,
@@ -175,6 +180,8 @@ function vendorPlayerPayload(player) {
     telegram_username: player.telegram_username,
     appbegUsername: player.appbeg_username,
     appbeg_username: player.appbeg_username,
+    username: player.appbeg_username,
+    status: player.status || null,
     appbegPlayerUid: player.appbeg_player_uid,
     appbeg_player_uid: player.appbeg_player_uid,
     ...financial,
@@ -182,6 +189,18 @@ function vendorPlayerPayload(player) {
     created_at: player.created_at,
     updated_at: player.updated_at
   };
+}
+
+function settlementHistoryPayload(settlements = [], receivable = 0) {
+  let paid = 0;
+  return [...settlements].reverse().map((settlement) => {
+    paid += Number(settlement.settlement_amount || 0);
+    return {
+      ...vendorSettlementPayload(settlement),
+      runningOutstanding: roundCurrency(Number(receivable || 0) - paid),
+      running_outstanding: roundCurrency(Number(receivable || 0) - paid)
+    };
+  }).reverse();
 }
 
 function vendorSettlementPayload(settlement) {
@@ -607,8 +626,15 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
 
   app.post('/api/vendors', adminOnly, async (req, res) => {
     try {
+      const password = String(req.body?.password || '');
+      if (password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+      }
+      const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
       const vendor = await store.createVendor({
         name: req.body?.name,
+        username: req.body?.username,
+        passwordHash,
         commissionPercentage: req.body?.commissionPercentage,
         notes: req.body?.notes
       });
@@ -616,5 +642,144 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     } catch (error) {
       handleVendorError(res, error);
     }
+  });
+
+  app.patch('/api/vendors/:id', adminOnly, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid vendor id.' });
+      }
+      const vendor = await store.updateVendorAccount(id, {
+        name: req.body?.name,
+        username: req.body?.username,
+        status: req.body?.status,
+        notes: req.body?.notes
+      });
+      if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+      res.json({ vendor: vendorPayload(vendor) });
+    } catch (error) {
+      handleVendorError(res, error);
+    }
+  });
+
+  app.post('/api/vendors/:id/reset-password', adminOnly, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid vendor id.' });
+      }
+      const password = String(req.body?.password || '');
+      if (password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+      }
+      const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      const vendor = await store.updateVendorAccount(id, { passwordHash });
+      if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+      res.json({ vendor: vendorPayload(vendor) });
+    } catch (error) {
+      handleVendorError(res, error);
+    }
+  });
+
+  app.get('/api/vendor/dashboard', async (req, res) => {
+    const vendorId = req.ledgerUser?.vendorId;
+    if (!vendorId) return res.status(403).json({ error: 'Vendor access required.' });
+    const vendor = await store.getVendor(vendorId);
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+    const players = await store.listVendorPlayers(vendorId);
+    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financial = summarizePlayersFinancial(players, financialByUid);
+    if (financial.financial_available !== false) {
+      financial.net = financial.total_in - financial.total_out;
+    }
+    let settlements = [];
+    let settlementsAvailable = true;
+    try {
+      settlements = await store.listVendorSettlements(vendorId);
+    } catch {
+      settlementsAvailable = false;
+    }
+    const summaryVendor = {
+      ...vendor,
+      player_count: players.length,
+      active_players_today: financial.financial_available === false ? null : activePlayersToday(players, financialByUid),
+      financial
+    };
+    const vendorWithSettlements = settlementsAvailable
+      ? applyVendorSettlementSummary(summaryVendor, settlements)
+      : applyVendorSettlementUnavailable(summaryVendor);
+    res.json({
+      vendor: vendorPayload(vendorWithSettlements),
+      financial: {
+        configured: financialByUid.configured,
+        source: financialByUid.source,
+        reason: financialByUid.reason,
+        activeDay: financialByUid.activeDay || null
+      }
+    });
+  });
+
+  app.get('/api/vendor/players', async (req, res) => {
+    const vendorId = req.ledgerUser?.vendorId;
+    if (!vendorId) return res.status(403).json({ error: 'Vendor access required.' });
+    const page = Math.max(1, Number.parseInt(req.query?.page || '1', 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query?.limit || '25', 10) || 25));
+    const sort = new Set(['username', 'status', 'total_in', 'total_out', 'net', 'last_activity', 'linked_at']).has(req.query?.sort)
+      ? req.query.sort
+      : 'linked_at';
+    const dir = String(req.query?.dir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+    const query = String(req.query?.query ?? req.query?.q ?? '').trim().toLowerCase();
+    const players = await store.listVendorPlayers(vendorId);
+    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const payload = players.map((player) => vendorPlayerPayload({
+      ...player,
+      financial: financialForPlayer(player, financialByUid)
+    })).filter((player) => {
+      if (!query) return true;
+      return String(player.appbegUsername || player.appbeg_username || '').toLowerCase().includes(query)
+        || String(player.telegramUsername || player.telegram_username || '').toLowerCase().includes(query)
+        || String(player.status || '').toLowerCase().includes(query);
+    }).sort((left, right) => {
+      const value = (row) => {
+        if (sort === 'username') return String(row.appbegUsername || row.appbeg_username || '').toLowerCase();
+        if (sort === 'status') return String(row.status || '').toLowerCase();
+        if (sort === 'linked_at') return row.linked_at || '';
+        return row[sort] ?? null;
+      };
+      return compareNullable(value(left), value(right), dir);
+    });
+    const total = payload.length;
+    const start = (page - 1) * limit;
+    res.json({
+      players: payload.slice(start, start + limit),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit))
+      },
+      filters: {
+        query,
+        sort,
+        dir: dir === 1 ? 'asc' : 'desc'
+      }
+    });
+  });
+
+  app.get('/api/vendor/settlements', async (req, res) => {
+    const vendorId = req.ledgerUser?.vendorId;
+    if (!vendorId) return res.status(403).json({ error: 'Vendor access required.' });
+    const vendor = await store.getVendor(vendorId);
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+    const players = await store.listVendorPlayers(vendorId);
+    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financial = summarizePlayersFinancial(players, financialByUid);
+    if (financial.financial_available !== false) financial.net = financial.total_in - financial.total_out;
+    const receivable = financial.financial_available === false
+      ? 0
+      : roundCurrency(financial.net * (Number(vendor.commission_percentage || 0) / 100));
+    const settlements = await store.listVendorSettlements(vendorId);
+    res.json({ settlements: settlementHistoryPayload(settlements, receivable) });
   });
 }

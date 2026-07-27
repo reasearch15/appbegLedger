@@ -570,7 +570,7 @@ CREATE TABLE IF NOT EXISTS ledger_users (
   id BIGSERIAL PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'staff')),
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin')),
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
   updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
@@ -582,6 +582,8 @@ CREATE TABLE IF NOT EXISTS vendors (
   id BIGSERIAL PRIMARY KEY,
   vendor_code TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
+  username TEXT UNIQUE,
+  password_hash TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
   commission_percentage NUMERIC(5, 2) NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
   notes TEXT,
@@ -590,6 +592,13 @@ CREATE TABLE IF NOT EXISTS vendors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC);
+ALTER TABLE vendors
+  ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE vendors
+  ADD COLUMN IF NOT EXISTS password_hash TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_username_lower
+  ON vendors(LOWER(username))
+  WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS vendor_players (
   id BIGSERIAL PRIMARY KEY,
