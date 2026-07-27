@@ -42,6 +42,12 @@ const FINANCIAL_COLUMN_CANDIDATES = {
   paymentEventId: ['payment_event_id', 'paymentEventId'],
   actorUid: ['actor_uid', 'actorUid'],
   actorRole: ['actor_role', 'actorRole'],
+  cashoutTaskId: ['cashout_task_id', 'cashoutTaskId'],
+  requestId: ['request_id', 'requestId'],
+  firebaseId: ['firebase_id'],
+  reversedAt: ['reversed_at', 'reversedAt'],
+  refundedAt: ['refunded_at', 'refundedAt'],
+  deletedAt: ['deleted_at', 'deletedAt'],
   meta: ['meta']
 };
 const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'firebase_id', 'id'];
@@ -157,6 +163,12 @@ async function buildFinancialPlan(pool) {
   const paymentEventId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.paymentEventId);
   const actorUid = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.actorUid);
   const actorRole = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.actorRole);
+  const cashoutTaskId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.cashoutTaskId);
+  const requestId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.requestId);
+  const firebaseId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.firebaseId);
+  const reversedAt = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.reversedAt);
+  const refundedAt = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.refundedAt);
+  const deletedAt = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.deletedAt);
   const meta = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.meta);
 
   const missing = [];
@@ -191,6 +203,12 @@ async function buildFinancialPlan(pool) {
       payment_event_id: paymentEventId || null,
       actor_uid: actorUid || null,
       actor_role: actorRole || null,
+      cashout_task_id: cashoutTaskId || null,
+      request_id: requestId || null,
+      firebase_id: firebaseId || null,
+      reversed_at: reversedAt || null,
+      refunded_at: refundedAt || null,
+      deleted_at: deletedAt || null,
       meta: meta || null,
       dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES) || null
     },
@@ -212,6 +230,12 @@ async function buildFinancialPlan(pool) {
       paymentEventId,
       actorUid,
       actorRole,
+      cashoutTaskId,
+      requestId,
+      firebaseId,
+      reversedAt,
+      refundedAt,
+      deletedAt,
       meta,
       dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES)
     }
@@ -396,8 +420,34 @@ function isLedgerCreditIn(row) {
     && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
 }
 
+function hasCashoutReversalEvidence(row) {
+  return Boolean(
+    String(row.reversed_at || '').trim()
+    || String(row.refunded_at || '').trim()
+    || String(row.deleted_at || '').trim()
+    || metaValue(row, 'reversedAt')
+    || metaValue(row, 'refundedAt')
+    || metaValue(row, 'deletedAt')
+  );
+}
+
+function cashoutReference(row) {
+  return String(row.cashout_task_id || '').trim()
+    || metaValue(row, 'cashoutTaskId')
+    || String(row.request_id || '').trim()
+    || metaValue(row, 'requestId');
+}
+
+function isFinalCashoutOut(row) {
+  const type = String(row.event_type || '').trim().toLowerCase();
+  if (type !== 'cashout') return false;
+  if (hasCashoutReversalEvidence(row)) return false;
+  return Boolean(cashoutReference(row));
+}
+
 function financialDedupeKey(row, fallback) {
-  return metaValue(row, 'externalReference')
+  return cashoutReference(row)
+    || metaValue(row, 'externalReference')
     || metaValue(row, 'paymentEventId')
     || String(row.firebase_id || '').trim()
     || String(row.dedupe_key || '').trim()
@@ -424,7 +474,9 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
       continue;
     }
     const isIn = FINANCIAL_IN_TYPES.includes(type) || isLedgerCreditIn(row);
-    const isOut = FINANCIAL_OUT_TYPES.includes(type);
+    const isOut = type === 'cashout'
+      ? isFinalCashoutOut(row)
+      : FINANCIAL_OUT_TYPES.includes(type);
     if (!isIn && !isOut) {
       counts.excluded_type += 1;
       continue;
@@ -438,7 +490,7 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
     seen.add(key);
 
     const player = byUid.get(uid);
-    const amount = Math.abs(Number(row.amount || 0));
+    const amount = Math.abs(Number(row.amount_npr ?? row.amountNpr ?? row.amount ?? 0));
     if (Number.isFinite(amount)) {
       if (isIn) player.total_in += amount;
       if (isOut) player.total_out += amount;
@@ -687,15 +739,26 @@ export async function createAppBegStore(env = process.env) {
     const paymentEventExpr = cols.paymentEventId ? `f.${quoteIdent(cols.paymentEventId)}::text` : 'NULL::text';
     const actorUidExpr = cols.actorUid ? `f.${quoteIdent(cols.actorUid)}::text` : 'NULL::text';
     const actorRoleExpr = cols.actorRole ? `f.${quoteIdent(cols.actorRole)}::text` : 'NULL::text';
+    const cashoutTaskExpr = cols.cashoutTaskId ? `f.${quoteIdent(cols.cashoutTaskId)}::text` : 'NULL::text';
+    const requestIdExpr = cols.requestId ? `f.${quoteIdent(cols.requestId)}::text` : 'NULL::text';
+    const firebaseIdExpr = cols.firebaseId ? `f.${quoteIdent(cols.firebaseId)}::text` : 'NULL::text';
+    const reversedAtExpr = cols.reversedAt ? `f.${quoteIdent(cols.reversedAt)}::text` : 'NULL::text';
+    const refundedAtExpr = cols.refundedAt ? `f.${quoteIdent(cols.refundedAt)}::text` : 'NULL::text';
+    const deletedAtExpr = cols.deletedAt ? `f.${quoteIdent(cols.deletedAt)}::text` : 'NULL::text';
     const metaExpr = cols.meta ? `f.${quoteIdent(cols.meta)}` : 'NULL::jsonb';
     const metaSourceFlowExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'sourceFlow'` : 'NULL::text';
     const metaPaymentEventExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'paymentEventId'` : 'NULL::text';
     const metaExternalRefExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'externalReference'` : 'NULL::text';
+    const metaCashoutTaskExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'cashoutTaskId'` : 'NULL::text';
+    const metaRequestIdExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'requestId'` : 'NULL::text';
+    const metaReversedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'reversedAt'` : 'NULL::text';
+    const metaRefundedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'refundedAt'` : 'NULL::text';
+    const metaDeletedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'deletedAt'` : 'NULL::text';
     const dedupeTextExpr = cols.dedupe ? `NULLIF(f.${quoteIdent(cols.dedupe)}::text, '')` : 'NULL::text';
     const activeDay = Number.isNaN(new Date(today).getTime()) ? new Date() : new Date(today);
     const activeBounds = businessDayBounds(activeDay, timeZone);
 
-    const dedupeKeyExpr = `COALESCE(NULLIF(${metaExternalRefExpr}, ''), NULLIF(${metaPaymentEventExpr}, ''), ${dedupeTextExpr}, ${paymentEventExpr}, f.ctid::text)`;
+    const dedupeKeyExpr = `COALESCE(NULLIF(${cashoutTaskExpr}, ''), NULLIF(${metaCashoutTaskExpr}, ''), NULLIF(${requestIdExpr}, ''), NULLIF(${metaRequestIdExpr}, ''), NULLIF(${metaExternalRefExpr}, ''), NULLIF(${metaPaymentEventExpr}, ''), NULLIF(${firebaseIdExpr}, ''), ${dedupeTextExpr}, ${paymentEventExpr}, f.ctid::text)`;
     logFinancialTrace('vendor_totals_query', {
       configured: true,
       source: financialPlan.table,
@@ -729,10 +792,21 @@ export async function createAppBegStore(env = process.env) {
           ${paymentEventExpr} AS payment_event_id,
           ${actorUidExpr} AS actor_uid,
           ${actorRoleExpr} AS actor_role,
+          ${cashoutTaskExpr} AS cashout_task_id,
+          ${requestIdExpr} AS request_id,
+          ${firebaseIdExpr} AS firebase_id,
+          ${reversedAtExpr} AS reversed_at,
+          ${refundedAtExpr} AS refunded_at,
+          ${deletedAtExpr} AS deleted_at,
           ${metaExpr} AS meta,
           ${metaSourceFlowExpr} AS "meta_sourceFlow",
           ${metaPaymentEventExpr} AS "meta_paymentEventId",
           ${metaExternalRefExpr} AS "meta_externalReference",
+          ${metaCashoutTaskExpr} AS "meta_cashoutTaskId",
+          ${metaRequestIdExpr} AS "meta_requestId",
+          ${metaReversedAtExpr} AS "meta_reversedAt",
+          ${metaRefundedAtExpr} AS "meta_refundedAt",
+          ${metaDeletedAtExpr} AS "meta_deletedAt",
           ${dedupeKeyExpr} AS dedupe_key
         FROM ${quoteIdent(financialPlan.table)} f
         JOIN requested r ON f.${quoteIdent(cols.playerUid)}::text = r.uid

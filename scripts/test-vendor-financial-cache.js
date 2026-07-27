@@ -185,7 +185,7 @@ async function testRegistrationCreditInclusionAndExclusionRules() {
       dedupe_key: 'appbegledger-payment-event:1278',
       activity_at: '2026-07-27T13:00:00+05:45'
     },
-    { uid: 'linked_uid', event_type: 'cashout', status: 'completed', amount: 5, dedupe_key: 'cashout-1', activity_at: '2026-07-27T02:00:00+05:45' },
+    { uid: 'linked_uid', event_type: 'cashout', status: 'completed', amount: 5, cashout_task_id: 'cashout-1', activity_at: '2026-07-27T02:00:00+05:45' },
     { uid: 'linked_uid', event_type: 'deposit', status: 'completed', amount: 10, dedupe_key: 'deposit-1', activity_at: '2026-07-27T03:00:00+05:45' },
     { uid: 'linked_uid', event_type: 'deposit', status: 'pending', amount: 100, dedupe_key: 'pending-1', activity_at: '2026-07-27T03:00:00+05:45' },
     { uid: 'linked_uid', event_type: 'deposit', status: 'failed', amount: 100, dedupe_key: 'failed-1', activity_at: '2026-07-27T03:00:00+05:45' },
@@ -252,6 +252,45 @@ async function testProductionLedgerDepositCreditShapeCountsOnce() {
   assert.equal(counts.excluded_type, 1);
 }
 
+async function testProductionStaffCashoutCompletionShapeCountsOnce() {
+  const activeBounds = appBegFinancialTesting.businessDayBounds(TEST_NOW, 'Asia/Kathmandu');
+  const playerUid = 'o6XdSdLND0g8odmeoYaMXyG5uRn2';
+  const completedCashout = {
+    uid: playerUid,
+    firebase_id: 'cashout-financial-event-1',
+    event_type: 'cashout',
+    amount_npr: 4,
+    amount: 4,
+    cashout_task_id: 'cashout-task-1278',
+    activity_at: '2026-07-27T14:00:00+05:45'
+  };
+  const { players, counts } = appBegFinancialTesting.aggregateFinancialEventsForUids([
+    playerUid
+  ], [
+    completedCashout,
+    { ...completedCashout, firebase_id: 'cashout-financial-event-duplicate' },
+    { uid: playerUid, event_type: 'cashout_request_deduct', amount_npr: 4, cashout_task_id: 'cashout-task-1278', activity_at: '2026-07-27T13:50:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', status: 'pending', amount_npr: 4, cashout_task_id: 'cashout-task-pending', activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', status: 'cancelled', amount_npr: 4, cashout_task_id: 'cashout-task-cancelled-status', activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', status: 'failed', amount_npr: 4, cashout_task_id: 'cashout-task-failed', activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', amount_npr: 4, cashout_task_id: 'cashout-task-reversed', reversed_at: '2026-07-27T15:00:00+05:45', activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', amount_npr: 4, meta: { cashoutTaskId: 'cashout-task-cancelled', deletedAt: '2026-07-27T15:00:00+05:45' }, activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: playerUid, event_type: 'cashout', amount_npr: 4, activity_at: '2026-07-27T14:00:00+05:45' },
+    { uid: 'other-player', event_type: 'cashout', amount_npr: 99, cashout_task_id: 'cashout-task-other', activity_at: '2026-07-27T14:00:00+05:45' }
+  ], {
+    activeBounds,
+    timeZone: activeBounds.timeZone
+  });
+
+  assert.equal(players[0].total_in, 0);
+  assert.equal(players[0].total_out, 4);
+  assert.equal(players[0].net, -4);
+  assert.equal(counts.included, 1);
+  assert.equal(counts.deduped, 1);
+  assert.equal(counts.excluded_status, 3);
+  assert.equal(counts.excluded_type, 4);
+}
+
 async function testVendorDetailUsesRegistrationDepositAndZeroTransactions() {
   await withStore('vendor-financial-cache', async (store) => {
     const vendor = await store.createVendor({ name: 'Charlie', commissionPercentage: 20 });
@@ -271,6 +310,13 @@ async function testVendorDetailUsesRegistrationDepositAndZeroTransactions() {
           payment_event_id: '1278',
           dedupe_key: 'appbegledger-payment-event:1278',
           activity_at: '2026-07-27T01:00:00+05:45'
+        },
+        {
+          uid: 'o6XdSdLND0g8odmeoYaMXyG5uRn2',
+          event_type: 'cashout',
+          amount_npr: 10,
+          cashout_task_id: 'cashout-task-charlie-1',
+          activity_at: '2026-07-27T14:00:00+05:45'
         }
       ])
     });
@@ -280,10 +326,10 @@ async function testVendorDetailUsesRegistrationDepositAndZeroTransactions() {
     });
     assert.equal(res.statusCode, 200);
     assert.equal(res.payload.vendor.totalIn, 30);
-    assert.equal(res.payload.vendor.totalOut, 0);
-    assert.equal(res.payload.vendor.net, 30);
-    assert.equal(res.payload.vendor.receivable, 6);
-    assert.equal(res.payload.vendor.outstanding, 6);
+    assert.equal(res.payload.vendor.totalOut, 10);
+    assert.equal(res.payload.vendor.net, 20);
+    assert.equal(res.payload.vendor.receivable, 4);
+    assert.equal(res.payload.vendor.outstanding, 4);
     assert.equal(res.payload.vendor.financialAvailable, true);
 
     const zeroVendor = await store.createVendor({ name: 'No Transactions', commissionPercentage: 20 });
@@ -339,6 +385,7 @@ async function main() {
   await testSchemaValidationAllowsAuthoritativeCacheWithoutStatus();
   await testRegistrationCreditInclusionAndExclusionRules();
   await testProductionLedgerDepositCreditShapeCountsOnce();
+  await testProductionStaffCashoutCompletionShapeCountsOnce();
   await testVendorDetailUsesRegistrationDepositAndZeroTransactions();
   await testMissingRequiredSchemaStaysUnavailable();
   console.log('Vendor financial cache tests passed.');
