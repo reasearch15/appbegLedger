@@ -6165,6 +6165,38 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return rows.map(normalizeVendorPlayer);
   }
 
+  async function listVendorOwnershipByPlayerUids(playerUids = []) {
+    const uids = [...new Set((Array.isArray(playerUids) ? playerUids : [])
+      .map((uid) => String(uid || '').trim())
+      .filter(Boolean))];
+    if (!uids.length) return [];
+    const rows = [];
+    const chunkSize = 250;
+    for (let start = 0; start < uids.length; start += chunkSize) {
+      const chunk = uids.slice(start, start + chunkSize);
+      const placeholders = chunk.map(() => '?').join(', ');
+      rows.push(...await db.prepare(`
+        SELECT
+          vp.appbeg_player_uid,
+          vp.linked_at AS ownership_date,
+          v.name AS vendor_name,
+          v.vendor_code,
+          v.status AS vendor_status,
+          v.linked_staff_uid
+        FROM vendor_players vp
+        JOIN vendors v ON v.id = vp.vendor_id
+        WHERE vp.appbeg_player_uid IN (${placeholders})
+        ORDER BY vp.appbeg_player_uid ASC, vp.linked_at DESC, vp.id DESC
+      `).all(...chunk));
+    }
+    const rowsByUid = new Map();
+    for (const row of rows) {
+      const uid = String(row.appbeg_player_uid || '').trim();
+      if (uid && !rowsByUid.has(uid)) rowsByUid.set(uid, row);
+    }
+    return [...rowsByUid.values()];
+  }
+
   async function normalizePaymentDeadlinesOnBoot() {
     try {
       // Backfill freeze_at from message_date/created_at + configured search window, then freeze overdue unmatched rows.
@@ -6400,6 +6432,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getVendorPlayerByAppBegUid,
     listVendorPlayers,
     listAllVendorPlayers,
+    listVendorOwnershipByPlayerUids,
     updateVendorCommissionPercentage,
     listVendorSettlements,
     listAllVendorSettlements,
