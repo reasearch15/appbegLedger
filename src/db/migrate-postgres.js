@@ -389,5 +389,20 @@ export async function migratePostgres(driver) {
     CREATE INDEX IF NOT EXISTS idx_ledger_users_username ON ledger_users(username);
   `);
 
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS vendors (
+      id BIGSERIAL PRIMARY KEY,
+      vendor_code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+      commission_percentage NUMERIC(5, 2) NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
+      linked_staff_uid TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC);
+  `);
+
   await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
 }

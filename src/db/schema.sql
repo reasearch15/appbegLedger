@@ -641,3 +641,18 @@ CREATE TABLE IF NOT EXISTS ledger_users (
 
 CREATE INDEX IF NOT EXISTS idx_ledger_users_username
   ON ledger_users(username);
+
+CREATE TABLE IF NOT EXISTS vendors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  vendor_code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+  commission_percentage REAL NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
+  linked_staff_uid TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendors_status_created
+  ON vendors(status, created_at DESC);

@@ -134,6 +134,11 @@ let state = {
   ledgerUsersLoading: false,
   ledgerUserForm: null,
   ledgerUserSaving: false,
+  vendors: [],
+  vendorsLoading: false,
+  vendorSaving: false,
+  vendorError: null,
+  vendorSuccess: null,
   appbegPlayers: [],
   appbegPlayersLoading: false,
   appbegPlayersError: null,
@@ -420,6 +425,19 @@ async function refreshLedgerUsers() {
     state.settingsError = error.message || 'Could not load staff users.';
   } finally {
     state.ledgerUsersLoading = false;
+  }
+}
+
+async function refreshVendors() {
+  if (!isAdmin()) return;
+  state.vendorsLoading = true;
+  try {
+    const payload = await api('/api/vendors');
+    state.vendors = payload.vendors || [];
+  } catch (error) {
+    state.vendorError = error.message || 'Could not load vendors.';
+  } finally {
+    state.vendorsLoading = false;
   }
 }
 
@@ -2556,6 +2574,89 @@ function settingsWorkspace() {
   `;
 }
 
+function vendorStatusBadge(status) {
+  const normalized = String(status || 'active').toLowerCase();
+  return `<span class="badge vendor-status ${escapeHtml(normalized)}">${escapeHtml(normalized)}</span>`;
+}
+
+function vendorCommission(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount)) return '0%';
+  return `${amount.toFixed(amount % 1 === 0 ? 0 : 2)}%`;
+}
+
+function vendorsWorkspace() {
+  return `
+    <main class="ops-main vendors-main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Vendor Foundation</div>
+          <h1>Vendors</h1>
+          <div class="subtle">Admin-only vendor records. No players, payments, cashouts, or settlements are connected in Phase 1.</div>
+        </div>
+      </header>
+      <section class="vendors-layout">
+        <section class="card vendor-form-card">
+          <div class="card-title">Create Vendor</div>
+          <form id="createVendorForm" class="settings-form">
+            <label class="field-label">
+              <span>Vendor name</span>
+              <input id="vendorName" placeholder="Vendor name" ${state.vendorSaving ? 'disabled' : ''} />
+            </label>
+            <label class="field-label">
+              <span>Commission percentage</span>
+              <input id="vendorCommissionPercentage" type="number" min="0" max="100" step="0.01" value="0" ${state.vendorSaving ? 'disabled' : ''} />
+            </label>
+            <label class="field-label">
+              <span>Linked Staff UID, optional</span>
+              <input id="vendorLinkedStaffUid" placeholder="Reporting only" ${state.vendorSaving ? 'disabled' : ''} />
+            </label>
+            <label class="field-label">
+              <span>Notes, optional</span>
+              <textarea id="vendorNotes" rows="4" ${state.vendorSaving ? 'disabled' : ''}></textarea>
+            </label>
+            <p class="subtle">Linked Staff UID is Reporting only. It does not affect routing, permissions, ownership, claims, or assignments.</p>
+            ${state.vendorError ? `<div class="settings-error">${escapeHtml(state.vendorError)}</div>` : ''}
+            ${state.vendorSuccess ? `<div class="settings-success">${escapeHtml(state.vendorSuccess)}</div>` : ''}
+            <div class="settings-actions">
+              <button class="button" type="submit" ${state.vendorSaving ? 'disabled' : ''}>${state.vendorSaving ? 'Creating...' : 'Create Vendor'}</button>
+            </div>
+          </form>
+        </section>
+        <section class="card vendors-list-card">
+          <div class="card-title">Vendor List</div>
+          ${state.vendorsLoading ? '<div class="subtle">Loading vendors...</div>' : ''}
+          ${state.vendors.length ? `
+            <div class="vendors-table">
+              <div class="vendors-table-header">
+                <span>Code</span>
+                <span>Name</span>
+                <span>Status</span>
+                <span>Commission</span>
+                <span>Linked Staff UID</span>
+                <span>Created</span>
+              </div>
+              ${state.vendors.map((vendor) => `
+                <div class="vendors-row">
+                  <span class="mono">${escapeHtml(vendor.vendorCode || vendor.vendor_code || '')}</span>
+                  <span class="strong">${escapeHtml(vendor.name || '')}</span>
+                  <span>${vendorStatusBadge(vendor.status)}</span>
+                  <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
+                  <span>
+                    <span class="mono">${escapeHtml(vendor.linkedStaffUid || vendor.linked_staff_uid || '-')}</span>
+                    <span class="subtle vendor-reporting-only">Reporting only</span>
+                  </span>
+                  <span>${fmtDate(vendor.created_at)}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : (!state.vendorsLoading ? '<div class="subtle">No vendors created yet.</div>' : '')}
+        </section>
+      </section>
+    </main>
+  `;
+}
+
 function settingsAuditRows() {
   if (!state.settingsAuditLog?.length) {
     return '<div class="subtle">No settings changes recorded yet.</div>';
@@ -2664,6 +2765,7 @@ function render() {
       badge: Number(state.manualReviewStats?.unresolved || state.paymentStats?.manualReview || 0) || 0
     },
     { id: 'payment-info', label: 'Payment Info', icon: '🏦' },
+    { id: 'vendors', label: 'Vendors', icon: 'V', adminOnly: true },
     { id: 'settings', label: 'Settings', icon: '⚙️', adminOnly: true }
   ].filter((item) => !item.adminOnly || isAdmin());
   const navHtml = items.map((item) => `
@@ -2674,7 +2776,7 @@ function render() {
   `).join('');
   const sectionTitle = items.find((item) => item.id === state.section)?.label || 'Operations';
 
-  if (state.section === 'settings' && !isAdmin()) {
+  if ((state.section === 'settings' || state.section === 'vendors') && !isAdmin()) {
     state.section = 'contacts';
   }
 
@@ -2708,6 +2810,8 @@ function render() {
       ? appbegPlayersController.renderAppBegPlayersWorkspace(state)
     : state.section === 'players'
       ? playersController.renderPlayersWorkspace(state, { avatar, fmtDateTime })
+    : state.section === 'vendors'
+      ? vendorsWorkspace()
       : state.section === 'settings'
         ? settingsWorkspace()
         : contactsWorkspace()}
@@ -3078,6 +3182,11 @@ function bindEvents() {
         state.settingsSuccess = null;
         await refreshLedgerUsers();
       }
+      if (state.section === 'vendors') {
+        state.vendorError = null;
+        state.vendorSuccess = null;
+        await refreshVendors();
+      }
       if (state.section === 'payments') {
         state.mobilePaymentsPane = 'list';
         state.paymentStatusFilter = 'All';
@@ -3120,6 +3229,11 @@ function bindEvents() {
   document.querySelector('#createLedgerUserForm')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void createLedgerUser(event.target);
+  });
+
+  document.querySelector('#createVendorForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void createVendor(event.target);
   });
 
   document.querySelectorAll('[data-ledger-user-toggle]').forEach((button) => {
@@ -3848,6 +3962,31 @@ async function createLedgerUser(form) {
     state.settingsError = error.message || 'Could not create user.';
   } finally {
     state.ledgerUserSaving = false;
+    render();
+  }
+}
+
+async function createVendor(form) {
+  state.vendorSaving = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    const name = form.querySelector('#vendorName')?.value?.trim() || '';
+    const commissionPercentage = form.querySelector('#vendorCommissionPercentage')?.value ?? '0';
+    const linkedStaffUid = form.querySelector('#vendorLinkedStaffUid')?.value?.trim() || '';
+    const notes = form.querySelector('#vendorNotes')?.value?.trim() || '';
+    const payload = await api('/api/vendors', {
+      method: 'POST',
+      body: JSON.stringify({ name, commissionPercentage, linkedStaffUid, notes })
+    });
+    form.reset();
+    state.vendorSuccess = `Vendor ${payload.vendor?.vendorCode || payload.vendor?.vendor_code || ''} created.`;
+    await refreshVendors();
+  } catch (error) {
+    state.vendorError = error.message || 'Could not create vendor.';
+  } finally {
+    state.vendorSaving = false;
     render();
   }
 }

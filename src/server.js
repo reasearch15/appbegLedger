@@ -37,6 +37,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerPaymentMethodRoutes } from './routes/paymentMethods.js';
 import { registerAppBegPlayerRoutes } from './routes/appbegPlayers.js';
 import { registerOngoingRoutes } from './routes/ongoing.js';
+import { registerVendorRoutes } from './routes/vendors.js';
 import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
@@ -186,6 +187,7 @@ registerHealthRoutes(app, { store });
 registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
 registerAppBegPlayerRoutes(app, { appbegStore });
 registerOngoingRoutes(app, { store });
+registerVendorRoutes(app, { store, requireAdmin });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });

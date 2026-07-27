@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { resolveDatabaseConfig } from './config.js';
 import { createDriver } from './drivers/index.js';
 import { migratePostgres } from './migrate-postgres.js';
@@ -5667,6 +5668,156 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return toPublicLedgerUser(await db.prepare('SELECT * FROM ledger_users WHERE id = ?').get(userId));
   }
 
+  function formatVendorCode(id) {
+    const numericId = Number(id);
+    if (!Number.isInteger(numericId) || numericId <= 0) {
+      throw new Error('Vendor id is required to generate a vendor code.');
+    }
+    return `VND-${String(numericId).padStart(6, '0')}`;
+  }
+
+  function normalizeVendor(row) {
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      vendor_code: row.vendor_code || formatVendorCode(row.id),
+      name: row.name || '',
+      status: row.status || 'active',
+      commission_percentage: Number(row.commission_percentage || 0),
+      linked_staff_uid: row.linked_staff_uid || null,
+      notes: row.notes || '',
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    };
+  }
+
+  function normalizeVendorInput(input = {}) {
+    const name = String(input.name || '').trim();
+    const linkedStaffUid = input.linkedStaffUid ?? input.linked_staff_uid;
+    const rawCommission = input.commissionPercentage ?? input.commission_percentage ?? 0;
+    const commission = Number(rawCommission);
+    if (!name) {
+      const error = new Error('Vendor name is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (!Number.isFinite(commission) || commission < 0 || commission > 100) {
+      const error = new Error('Commission percentage must be between 0 and 100.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    return {
+      name,
+      commissionPercentage: Math.round(commission * 100) / 100,
+      linkedStaffUid: String(linkedStaffUid || '').trim() || null,
+      notes: String(input.notes || '').trim() || null
+    };
+  }
+
+  async function listVendors() {
+    const rows = await db.prepare(`
+      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+      FROM vendors
+      ORDER BY created_at DESC, id DESC
+    `).all();
+    return rows.map(normalizeVendor);
+  }
+
+  async function getVendor(id) {
+    const vendorId = Number(id);
+    if (!Number.isInteger(vendorId) || vendorId <= 0) return null;
+    return normalizeVendor(await db.prepare(`
+      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+      FROM vendors
+      WHERE id = ?
+    `).get(vendorId));
+  }
+
+  async function createVendor(input = {}) {
+    const vendor = normalizeVendorInput(input);
+    const timestamp = nowIso();
+    const pendingCode = `VND-PENDING-${crypto.randomUUID()}`;
+
+    if (sql.isPostgres) {
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const inserted = await client.query(`
+          INSERT INTO vendors (
+            vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+          )
+          VALUES ($1, $2, 'active', $3, $4, $5, $6, $6)
+          RETURNING id
+        `, [
+          pendingCode,
+          vendor.name,
+          vendor.commissionPercentage,
+          vendor.linkedStaffUid,
+          vendor.notes,
+          timestamp
+        ]);
+        const id = Number(inserted.rows[0]?.id);
+        const vendorCode = formatVendorCode(id);
+        await client.query(`
+          UPDATE vendors
+          SET vendor_code = $1, updated_at = $2
+          WHERE id = $3
+        `, [vendorCode, timestamp, id]);
+        const selected = await client.query(`
+          SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+          FROM vendors
+          WHERE id = $1
+        `, [id]);
+        const row = selected.rows[0] || null;
+        if (!row?.vendor_code || row.vendor_code !== vendorCode) {
+          throw new Error('Vendor code generation failed.');
+        }
+        await client.query('COMMIT');
+        return normalizeVendor(row);
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => null);
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
+    const createSqliteVendor = db.db.transaction(() => {
+      const result = db.db.prepare(`
+        INSERT INTO vendors (
+          vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+        )
+        VALUES (?, ?, 'active', ?, ?, ?, ?, ?)
+      `).run(
+        pendingCode,
+        vendor.name,
+        vendor.commissionPercentage,
+        vendor.linkedStaffUid,
+        vendor.notes,
+        timestamp,
+        timestamp
+      );
+      const id = Number(result.lastInsertRowid);
+      const vendorCode = formatVendorCode(id);
+      db.db.prepare(`
+        UPDATE vendors
+        SET vendor_code = ?, updated_at = ?
+        WHERE id = ?
+      `).run(vendorCode, timestamp, id);
+      const row = db.db.prepare(`
+        SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+        FROM vendors
+        WHERE id = ?
+      `).get(id);
+      if (!row?.vendor_code || row.vendor_code !== vendorCode) {
+        throw new Error('Vendor code generation failed.');
+      }
+      return row;
+    });
+
+    return normalizeVendor(createSqliteVendor());
+  }
+
   async function normalizePaymentDeadlinesOnBoot() {
     try {
       // Backfill freeze_at from message_date/created_at + configured search window, then freeze overdue unmatched rows.
@@ -5891,7 +6042,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listLedgerUsers,
     createLedgerUser,
     updateLedgerUser,
-    toPublicLedgerUser
+    toPublicLedgerUser,
+    listVendors,
+    getVendor,
+    createVendor
   };
 }
 
@@ -6611,6 +6765,20 @@ async function migrate(db) {
     )
   `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_ledger_users_username ON ledger_users(username)');
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS vendors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vendor_code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+      commission_percentage REAL NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
+      linked_staff_uid TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC)');
 
   const users = await db.prepare('SELECT id, created_at, first_seen FROM telegram_users').all();
   const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM activity_events WHERE telegram_user_id = ? AND event_type = ?');

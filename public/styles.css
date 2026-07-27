@@ -87,6 +87,12 @@ button {
   background: rgba(255, 255, 255, 0.09);
 }
 
+.nav-icon {
+  display: inline-flex;
+  width: 22px;
+  justify-content: center;
+}
+
 .ops-main {
   min-width: 0;
   height: 100vh;
@@ -217,6 +223,57 @@ h1 {
   font-size: 13px;
   font-weight: 800;
   color: var(--text);
+}
+
+.vendors-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+}
+
+.vendors-list-card,
+.vendor-form-card {
+  min-width: 0;
+  overflow: auto;
+}
+
+.vendors-table {
+  min-width: 760px;
+}
+
+.vendors-table-header,
+.vendors-row {
+  display: grid;
+  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px minmax(180px, 1fr) 110px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.vendors-table-header {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.vendor-reporting-only {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.vendor-status.active {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.vendor-status.suspended {
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 .sync-log-preview {
@@ -2470,7 +2527,8 @@ textarea {
 
   .payments-layout,
   .players-layout,
-  .settings-layout {
+  .settings-layout,
+  .vendors-layout {
     grid-template-columns: 1fr;
     gap: 10px;
   }
