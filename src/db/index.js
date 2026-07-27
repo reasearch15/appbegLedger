@@ -5686,8 +5686,31 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       commission_percentage: Number(row.commission_percentage || 0),
       linked_staff_uid: row.linked_staff_uid || null,
       notes: row.notes || '',
+      player_count: Number(row.player_count || 0),
       created_at: row.created_at,
       updated_at: row.updated_at
+    };
+  }
+
+  function normalizeVendorCode(value) {
+    const code = String(value || '').trim().toUpperCase();
+    return /^VND-\d{6}$/.test(code) ? code : null;
+  }
+
+  function normalizeVendorPlayer(row) {
+    if (!row) return null;
+    const info = parseJsonField(row.registration_info_json, {});
+    return {
+      id: Number(row.id),
+      vendor_id: Number(row.vendor_id),
+      telegram_contact_id: row.telegram_contact_id == null ? null : Number(row.telegram_contact_id),
+      appbeg_player_uid: row.appbeg_player_uid || null,
+      linked_at: row.linked_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      telegram_name: row.telegram_name || row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ') || '',
+      telegram_username: row.telegram_username || null,
+      appbeg_username: info.preferred_appbeg_username || info.appbeg_username || row.appbeg_username || null
     };
   }
 
@@ -5716,8 +5739,20 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function listVendors() {
     const rows = await db.prepare(`
-      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
-      FROM vendors
+      SELECT
+        v.id,
+        v.vendor_code,
+        v.name,
+        v.status,
+        v.commission_percentage,
+        v.linked_staff_uid,
+        v.notes,
+        v.created_at,
+        v.updated_at,
+        COUNT(vp.id) AS player_count
+      FROM vendors v
+      LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
+      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.linked_staff_uid, v.notes, v.created_at, v.updated_at
       ORDER BY created_at DESC, id DESC
     `).all();
     return rows.map(normalizeVendor);
@@ -5727,10 +5762,33 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const vendorId = Number(id);
     if (!Number.isInteger(vendorId) || vendorId <= 0) return null;
     return normalizeVendor(await db.prepare(`
-      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
-      FROM vendors
-      WHERE id = ?
+      SELECT
+        v.id,
+        v.vendor_code,
+        v.name,
+        v.status,
+        v.commission_percentage,
+        v.linked_staff_uid,
+        v.notes,
+        v.created_at,
+        v.updated_at,
+        COUNT(vp.id) AS player_count
+      FROM vendors v
+      LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
+      WHERE v.id = ?
+      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.linked_staff_uid, v.notes, v.created_at, v.updated_at
     `).get(vendorId));
+  }
+
+  async function getVendorByCode(vendorCode) {
+    const code = normalizeVendorCode(vendorCode);
+    if (!code) return null;
+    return normalizeVendor(await db.prepare(`
+      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at, 0 AS player_count
+      FROM vendors
+      WHERE vendor_code = ?
+      LIMIT 1
+    `).get(code));
   }
 
   async function createVendor(input = {}) {
@@ -5816,6 +5874,145 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     });
 
     return normalizeVendor(createSqliteVendor());
+  }
+
+  async function getVendorPlayerByContactId(contactId) {
+    const id = Number(contactId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    return normalizeVendorPlayer(await db.prepare(`
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+             cas.registration_info_json
+      FROM vendor_players vp
+      LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
+      LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+      WHERE vp.telegram_contact_id = ?
+      LIMIT 1
+    `).get(id));
+  }
+
+  async function getVendorPlayerByAppBegUid(playerUid) {
+    const uid = String(playerUid || '').trim();
+    if (!uid) return null;
+    return normalizeVendorPlayer(await db.prepare(`
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+             cas.registration_info_json
+      FROM vendor_players vp
+      LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
+      LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+      WHERE vp.appbeg_player_uid = ?
+      LIMIT 1
+    `).get(uid));
+  }
+
+  async function captureVendorReferralForContact(contactId, vendorCode, actorName = 'TelegramStart') {
+    const id = Number(contactId);
+    if (!Number.isInteger(id) || id <= 0) return { captured: false, reason: 'invalid_contact' };
+    const code = normalizeVendorCode(vendorCode);
+    if (!code) return { captured: false, reason: 'invalid_vendor_code' };
+
+    const vendor = await getVendorByCode(code);
+    if (!vendor || vendor.status !== 'active') {
+      return { captured: false, reason: 'vendor_not_found' };
+    }
+
+    const existingOwner = await getVendorPlayerByContactId(id);
+    if (existingOwner) {
+      return { captured: false, reason: 'already_owned', vendor: await getVendor(existingOwner.vendor_id) };
+    }
+
+    const state = await ensureAutomationState(id);
+    const info = state?.registration_info || {};
+    if (info.vendor_id || info.vendor_code) {
+      return { captured: false, reason: 'referral_already_captured', vendor };
+    }
+
+    await updateRegistrationInfo(id, {
+      ...info,
+      vendor_id: vendor.id,
+      vendor_code: vendor.vendor_code,
+      vendor_referral_captured_at: nowIso()
+    }, actorName);
+
+    return { captured: true, reason: 'captured', vendor };
+  }
+
+  async function linkVendorPlayerForContact({ contactId, appbegPlayerUid, actorName = 'System' } = {}) {
+    const id = Number(contactId);
+    const uid = String(appbegPlayerUid || '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !uid) {
+      return { linked: false, reason: 'missing_contact_or_player' };
+    }
+
+    const byPlayer = await getVendorPlayerByAppBegUid(uid);
+    if (byPlayer) return { linked: false, reason: 'player_already_owned', mapping: byPlayer };
+
+    const byContact = await getVendorPlayerByContactId(id);
+    if (byContact) return { linked: false, reason: 'contact_already_owned', mapping: byContact };
+
+    const state = await ensureAutomationState(id);
+    const info = state?.registration_info || {};
+    const vendor = info.vendor_id
+      ? await getVendor(info.vendor_id)
+      : await getVendorByCode(info.vendor_code);
+    if (!vendor || vendor.status !== 'active') {
+      return { linked: false, reason: 'no_vendor_referral' };
+    }
+
+    const timestamp = nowIso();
+    try {
+      const result = await db.prepare(`
+        INSERT INTO vendor_players (
+          vendor_id, telegram_contact_id, appbeg_player_uid, linked_at, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(vendor.id, id, uid, timestamp, timestamp, timestamp);
+      const mappingId = Number(result.lastInsertRowid);
+      const mapping = normalizeVendorPlayer(await db.prepare(`
+        SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+               cas.registration_info_json
+        FROM vendor_players vp
+        LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
+        LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+        WHERE vp.id = ?
+      `).get(mappingId));
+      await logEvent({
+        telegramUserId: id,
+        eventType: 'vendor_player_linked',
+        title: 'Vendor Player Linked',
+        body: `Player ownership linked to vendor ${vendor.vendor_code}.`,
+        actorName,
+        metadata: {
+          vendorId: vendor.id,
+          vendorCode: vendor.vendor_code,
+          appbegPlayerUid: uid
+        }
+      }).catch(() => null);
+      return { linked: true, reason: 'linked', vendor, mapping };
+    } catch (error) {
+      if (/unique|constraint|duplicate/i.test(String(error.message || ''))) {
+        return {
+          linked: false,
+          reason: 'already_owned',
+          mapping: await getVendorPlayerByAppBegUid(uid) || await getVendorPlayerByContactId(id)
+        };
+      }
+      throw error;
+    }
+  }
+
+  async function listVendorPlayers(vendorId) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) return [];
+    const rows = await db.prepare(`
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+             cas.registration_info_json
+      FROM vendor_players vp
+      LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
+      LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+      WHERE vp.vendor_id = ?
+      ORDER BY vp.linked_at DESC, vp.id DESC
+    `).all(id);
+    return rows.map(normalizeVendorPlayer);
   }
 
   async function normalizePaymentDeadlinesOnBoot() {
@@ -6045,7 +6242,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     toPublicLedgerUser,
     listVendors,
     getVendor,
-    createVendor
+    getVendorByCode,
+    createVendor,
+    captureVendorReferralForContact,
+    linkVendorPlayerForContact,
+    getVendorPlayerByContactId,
+    getVendorPlayerByAppBegUid,
+    listVendorPlayers
   };
 }
 
@@ -6779,6 +6982,30 @@ async function migrate(db) {
     )
   `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC)');
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS vendor_players (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vendor_id INTEGER NOT NULL,
+      telegram_contact_id INTEGER,
+      appbeg_player_uid TEXT,
+      linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+      FOREIGN KEY (telegram_contact_id) REFERENCES telegram_users(id) ON DELETE SET NULL
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_players_vendor_linked ON vendor_players(vendor_id, linked_at DESC)');
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_contact_unique
+    ON vendor_players(telegram_contact_id)
+    WHERE telegram_contact_id IS NOT NULL
+  `);
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_appbeg_uid_unique
+    ON vendor_players(appbeg_player_uid)
+    WHERE appbeg_player_uid IS NOT NULL
+  `);
 
   const users = await db.prepare('SELECT id, created_at, first_seen FROM telegram_users').all();
   const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM activity_events WHERE telegram_user_id = ? AND event_type = ?');

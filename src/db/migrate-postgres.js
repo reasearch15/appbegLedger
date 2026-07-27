@@ -403,6 +403,25 @@ export async function migratePostgres(driver) {
     );
     CREATE INDEX IF NOT EXISTS idx_vendors_status_created ON vendors(status, created_at DESC);
   `);
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS vendor_players (
+      id BIGSERIAL PRIMARY KEY,
+      vendor_id BIGINT NOT NULL REFERENCES vendors(id),
+      telegram_contact_id BIGINT REFERENCES telegram_users(id) ON DELETE SET NULL,
+      appbeg_player_uid TEXT,
+      linked_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_vendor_players_vendor_linked
+      ON vendor_players(vendor_id, linked_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_contact_unique
+      ON vendor_players(telegram_contact_id)
+      WHERE telegram_contact_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_appbeg_uid_unique
+      ON vendor_players(appbeg_player_uid)
+      WHERE appbeg_player_uid IS NOT NULL;
+  `);
 
   await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
 }

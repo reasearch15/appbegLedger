@@ -139,6 +139,10 @@ let state = {
   vendorSaving: false,
   vendorError: null,
   vendorSuccess: null,
+  selectedVendorId: null,
+  selectedVendor: null,
+  vendorPlayers: [],
+  vendorDetailLoading: false,
   appbegPlayers: [],
   appbegPlayersLoading: false,
   appbegPlayersError: null,
@@ -434,10 +438,31 @@ async function refreshVendors() {
   try {
     const payload = await api('/api/vendors');
     state.vendors = payload.vendors || [];
+    if (state.selectedVendorId && !state.vendors.some((vendor) => Number(vendor.id) === Number(state.selectedVendorId))) {
+      state.selectedVendorId = null;
+      state.selectedVendor = null;
+      state.vendorPlayers = [];
+    }
   } catch (error) {
     state.vendorError = error.message || 'Could not load vendors.';
   } finally {
     state.vendorsLoading = false;
+  }
+}
+
+async function refreshSelectedVendor() {
+  if (!isAdmin() || !state.selectedVendorId) return;
+  state.vendorDetailLoading = true;
+  try {
+    const payload = await api(`/api/vendors/${state.selectedVendorId}`);
+    state.selectedVendor = payload.vendor || null;
+    state.vendorPlayers = payload.players || [];
+  } catch (error) {
+    state.vendorError = error.message || 'Could not load vendor detail.';
+    state.selectedVendor = null;
+    state.vendorPlayers = [];
+  } finally {
+    state.vendorDetailLoading = false;
   }
 }
 
@@ -2586,6 +2611,7 @@ function vendorCommission(value) {
 }
 
 function vendorsWorkspace() {
+  const selected = state.selectedVendor;
   return `
     <main class="ops-main vendors-main">
       <header class="topbar">
@@ -2633,24 +2659,63 @@ function vendorsWorkspace() {
                 <span>Name</span>
                 <span>Status</span>
                 <span>Commission</span>
+                <span>Players</span>
                 <span>Linked Staff UID</span>
                 <span>Created</span>
               </div>
               ${state.vendors.map((vendor) => `
-                <div class="vendors-row">
+                <button class="vendors-row ${Number(state.selectedVendorId) === Number(vendor.id) ? 'active' : ''}" type="button" data-vendor-id="${escapeHtml(vendor.id)}">
                   <span class="mono">${escapeHtml(vendor.vendorCode || vendor.vendor_code || '')}</span>
                   <span class="strong">${escapeHtml(vendor.name || '')}</span>
                   <span>${vendorStatusBadge(vendor.status)}</span>
                   <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
+                  <span>${escapeHtml(vendor.playerCount ?? vendor.player_count ?? 0)}</span>
                   <span>
                     <span class="mono">${escapeHtml(vendor.linkedStaffUid || vendor.linked_staff_uid || '-')}</span>
                     <span class="subtle vendor-reporting-only">Reporting only</span>
                   </span>
                   <span>${fmtDate(vendor.created_at)}</span>
-                </div>
+                </button>
               `).join('')}
             </div>
           ` : (!state.vendorsLoading ? '<div class="subtle">No vendors created yet.</div>' : '')}
+        </section>
+        <section class="card vendor-detail-card">
+          <div class="card-title">Vendor Detail</div>
+          ${state.vendorDetailLoading ? '<div class="subtle">Loading vendor detail...</div>' : ''}
+          ${selected ? `
+            <div class="vendor-detail-summary">
+              <div>
+                <div class="subtle">Vendor</div>
+                <div class="strong">${escapeHtml(selected.vendorCode || selected.vendor_code || '')} · ${escapeHtml(selected.name || '')}</div>
+              </div>
+              <div>
+                <div class="subtle">Player Count</div>
+                <div class="strong">${escapeHtml(selected.playerCount ?? selected.player_count ?? state.vendorPlayers.length)}</div>
+              </div>
+            </div>
+            <div class="card-title small-title">Owned Players</div>
+            ${state.vendorPlayers.length ? `
+              <div class="vendor-players-table">
+                <div class="vendor-players-header">
+                  <span>Telegram Name</span>
+                  <span>Telegram Username</span>
+                  <span>AppBeg Username</span>
+                  <span>AppBeg UID</span>
+                  <span>Linked Date</span>
+                </div>
+                ${state.vendorPlayers.map((player) => `
+                  <div class="vendor-player-row">
+                    <span>${escapeHtml(player.telegramName || player.telegram_name || '-')}</span>
+                    <span>${escapeHtml(player.telegramUsername || player.telegram_username || '-')}</span>
+                    <span>${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
+                    <span class="mono">${escapeHtml(player.appbegPlayerUid || player.appbeg_player_uid || '-')}</span>
+                    <span>${fmtDate(player.linked_at)}</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div class="subtle">No owned players linked yet.</div>'}
+          ` : (!state.vendorDetailLoading ? '<div class="subtle">Select a vendor to view owned players.</div>' : '')}
         </section>
       </section>
     </main>
@@ -3186,6 +3251,7 @@ function bindEvents() {
         state.vendorError = null;
         state.vendorSuccess = null;
         await refreshVendors();
+        if (state.selectedVendorId) await refreshSelectedVendor();
       }
       if (state.section === 'payments') {
         state.mobilePaymentsPane = 'list';
@@ -3234,6 +3300,15 @@ function bindEvents() {
   document.querySelector('#createVendorForm')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void createVendor(event.target);
+  });
+
+  document.querySelectorAll('[data-vendor-id]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      event.preventDefault();
+      state.selectedVendorId = Number(button.dataset.vendorId);
+      await refreshSelectedVendor();
+      render();
+    });
   });
 
   document.querySelectorAll('[data-ledger-user-toggle]').forEach((button) => {
@@ -3981,8 +4056,10 @@ async function createVendor(form) {
       body: JSON.stringify({ name, commissionPercentage, linkedStaffUid, notes })
     });
     form.reset();
+    state.selectedVendorId = Number(payload.vendor?.id) || state.selectedVendorId;
     state.vendorSuccess = `Vendor ${payload.vendor?.vendorCode || payload.vendor?.vendor_code || ''} created.`;
     await refreshVendors();
+    await refreshSelectedVendor();
   } catch (error) {
     state.vendorError = error.message || 'Could not create vendor.';
   } finally {

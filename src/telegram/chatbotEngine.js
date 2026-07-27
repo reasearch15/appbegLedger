@@ -269,7 +269,7 @@ export function paymentAppButtons() {
 export async function decideBotReply({ store, contact, messageText = '', action = null, forceEntryMenu = false, callbackMessageId = null }) {
   const text = String(messageText || '').trim();
   action = normalizeCallbackAction(action) || null;
-  const automationState = await store.ensureAutomationState(contact.id);
+  let automationState = await store.ensureAutomationState(contact.id);
   const botSession = typeof store.getBotSession === 'function'
     ? await store.getBotSession(contact.id).catch(() => null)
     : null;
@@ -297,6 +297,12 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const command = !action ? parseBotCommand(text) : null;
   if (command) {
     if (command.command === 'start') {
+      if (command.args && typeof store.captureVendorReferralForContact === 'function') {
+        await store.captureVendorReferralForContact(contact.id, command.args, 'TelegramStart').catch((error) => {
+          console.warn('[vendor] referral capture skipped:', error.message);
+        });
+        automationState = await store.ensureAutomationState(contact.id);
+      }
       return await buildStateAwareEntryMenu({
         store,
         contact,

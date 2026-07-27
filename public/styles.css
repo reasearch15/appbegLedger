@@ -228,29 +228,49 @@ h1 {
 .vendors-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
   overflow: hidden;
 }
 
 .vendors-list-card,
-.vendor-form-card {
+.vendor-form-card,
+.vendor-detail-card {
   min-width: 0;
   overflow: auto;
 }
 
+.vendor-detail-card {
+  grid-column: 2;
+}
+
 .vendors-table {
-  min-width: 760px;
+  min-width: 840px;
 }
 
 .vendors-table-header,
 .vendors-row {
   display: grid;
-  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px minmax(180px, 1fr) 110px;
+  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px 80px minmax(180px, 1fr) 110px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.vendors-row {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.vendors-row:hover,
+.vendors-row.active {
+  background: #f8fafc;
 }
 
 .vendors-table-header {
@@ -274,6 +294,41 @@ h1 {
 .vendor-status.suspended {
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.vendor-detail-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.small-title {
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.vendor-players-table {
+  min-width: 720px;
+}
+
+.vendor-players-header,
+.vendor-player-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(130px, 1fr) minmax(140px, 1fr) minmax(220px, 1.4fr) 110px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.vendor-players-header {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
 }
 
 .sync-log-preview {
@@ -2531,6 +2586,10 @@ textarea {
   .vendors-layout {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+
+  .vendor-detail-card {
+    grid-column: auto;
   }
 
   .players-table-header span:nth-child(n+5),

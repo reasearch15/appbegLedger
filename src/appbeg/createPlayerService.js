@@ -234,6 +234,29 @@ export async function createAppBegPlayerForContact(store, {
       actorName
     });
 
+    if (typeof store.linkVendorPlayerForContact === 'function') {
+      try {
+        await store.linkVendorPlayerForContact({
+          contactId: id,
+          appbegPlayerUid: result.playerUid,
+          actorName
+        });
+      } catch (vendorError) {
+        console.warn('[vendor] player ownership link failed:', vendorError.message);
+        await store.logEvent?.({
+          telegramUserId: id,
+          eventType: 'vendor_player_link_failed',
+          title: 'Vendor Player Link Failed',
+          body: vendorError.message || 'Vendor player ownership link failed.',
+          actorName,
+          metadata: {
+            playerUid: result.playerUid,
+            username: result.username || username
+          }
+        }).catch(() => null);
+      }
+    }
+
     console.log(`[ledger] create_player_success contact=${id} playerUid=${result.playerUid || 'n/a'}`);
 
     await store.logEvent({

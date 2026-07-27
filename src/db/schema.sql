@@ -656,3 +656,26 @@ CREATE TABLE IF NOT EXISTS vendors (
 
 CREATE INDEX IF NOT EXISTS idx_vendors_status_created
   ON vendors(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS vendor_players (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  vendor_id INTEGER NOT NULL,
+  telegram_contact_id INTEGER,
+  appbeg_player_uid TEXT,
+  linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+  FOREIGN KEY (telegram_contact_id) REFERENCES telegram_users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_players_vendor_linked
+  ON vendor_players(vendor_id, linked_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_contact_unique
+  ON vendor_players(telegram_contact_id)
+  WHERE telegram_contact_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_appbeg_uid_unique
+  ON vendor_players(appbeg_player_uid)
+  WHERE appbeg_player_uid IS NOT NULL;
