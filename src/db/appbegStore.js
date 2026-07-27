@@ -33,14 +33,19 @@ const FINANCIAL_TABLE = 'financial_events_cache';
 const FINANCIAL_COLUMN_CANDIDATES = {
   playerUid: ['player_uid', 'appbeg_player_uid', 'uid'],
   type: ['event_type', 'type'],
-  amount: ['amount'],
+  amount: ['amount', 'amount_npr', 'amountNpr'],
   amountCents: ['amount_cents'],
-  status: ['status'],
-  activityAt: ['completed_at', 'created_at']
+  status: ['status', 'event_status', 'state'],
+  activityAt: ['completed_at', 'created_at', 'createdAt'],
+  source: ['source'],
+  sourceFlow: ['source_flow', 'sourceFlow'],
+  paymentEventId: ['payment_event_id', 'paymentEventId']
 };
-const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'idempotency_key'];
+const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'id'];
 const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
 const FINANCIAL_OUT_TYPES = ['cashout', 'redeem'];
+const FINANCIAL_LEDGER_CREDIT_TYPES = ['coadmin_coin_add'];
+const FINANCIAL_LEDGER_SOURCE_FLOWS = ['registration_initial_deposit', 'registered_user_deposit'];
 const FINANCIAL_COMPLETED_STATUSES = ['completed'];
 const FINANCIAL_QUERY_CHUNK_SIZE = 500;
 const DEFAULT_BUSINESS_TIME_ZONE = 'Asia/Kathmandu';
@@ -87,6 +92,10 @@ function pickColumn(columns, candidates) {
   return candidates.find((name) => columns.has(name)) || null;
 }
 
+function logFinancialTrace(event, metadata = {}) {
+  console.log('[appbeg-financial]', JSON.stringify({ event, ...metadata }));
+}
+
 function buildQueryPlan(columns) {
   const uidColumn = UID_COLUMN_CANDIDATES.find((name) => columns.has(name));
   if (!uidColumn) {
@@ -125,6 +134,11 @@ function buildQueryPlan(columns) {
 async function buildFinancialPlan(pool) {
   const table = await findExistingTable(pool, [FINANCIAL_TABLE]);
   if (!table) {
+    logFinancialTrace('financial_cache_schema_validation', {
+      configured: false,
+      reason: 'table_missing',
+      table: FINANCIAL_TABLE
+    });
     return { configured: false, reason: 'AppBeg financial events cache table was not found.' };
   }
 
@@ -135,19 +149,44 @@ async function buildFinancialPlan(pool) {
   const amount = amountCents ? null : pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.amount);
   const status = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.status);
   const activityAt = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.activityAt);
+  const source = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.source);
+  const sourceFlow = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.sourceFlow);
+  const paymentEventId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.paymentEventId);
 
   const missing = [];
   if (!playerUid) missing.push('player uid');
   if (!type) missing.push('event type');
   if (!amount && !amountCents) missing.push('amount');
-  if (!status) missing.push('status');
 
   if (missing.length) {
+    logFinancialTrace('financial_cache_schema_validation', {
+      configured: false,
+      table,
+      missing_columns: missing,
+      present_columns: columns.size
+    });
     return {
       configured: false,
       reason: `AppBeg financial events cache is missing required ${missing.join(', ')} column(s).`
     };
   }
+
+  logFinancialTrace('financial_cache_schema_validation', {
+    configured: true,
+    table,
+    columns: {
+      player_uid: playerUid,
+      type,
+      amount: amountCents || amount,
+      status: status || null,
+      activity_at: activityAt || null,
+      source: source || null,
+      source_flow: sourceFlow || null,
+      payment_event_id: paymentEventId || null,
+      dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES) || null
+    },
+    status_required: false
+  });
 
   return {
     configured: true,
@@ -159,6 +198,9 @@ async function buildFinancialPlan(pool) {
       amountCents,
       status,
       activityAt,
+      source,
+      sourceFlow,
+      paymentEventId,
       dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES)
     }
   };
@@ -273,19 +315,6 @@ function zeroFinancialRow(uid) {
   };
 }
 
-function normalizeFinancialRow(row) {
-  const totalIn = Number(row?.total_in || 0);
-  const totalOut = Number(row?.total_out || 0);
-  return {
-    uid: row?.uid == null ? null : String(row.uid),
-    total_in: Number.isFinite(totalIn) ? totalIn : 0,
-    total_out: Number.isFinite(totalOut) ? totalOut : 0,
-    net: Number.isFinite(totalIn - totalOut) ? totalIn - totalOut : 0,
-    last_activity: row?.last_activity || null,
-    active_today: row?.active_today === true || row?.active_today === 1 || row?.active_today === '1'
-  };
-}
-
 function summarizeFinancialRows(rows) {
   const summary = rows.reduce((acc, row) => {
     acc.total_in += Number(row.total_in || 0);
@@ -302,8 +331,100 @@ function summarizeFinancialRows(rows) {
   return summary;
 }
 
-function quotedList(values) {
-  return values.map((value) => `'${String(value).replaceAll("'", "''")}'`).join(', ');
+function parseActivityInstant(value, timeZone) {
+  if (!value) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/(Z|[+-][0-9]{2}:?[0-9]{2})$/.test(text)) {
+    const date = new Date(text);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (match) {
+    return zonedWallTimeToUtc({
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+      hour: Number(match[4] || 0),
+      minute: Number(match[5] || 0),
+      second: Number(match[6] || 0)
+    }, timeZone);
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isCompletedFinancialEvent(row) {
+  const status = String(row.status || '').trim().toLowerCase();
+  return !status || FINANCIAL_COMPLETED_STATUSES.includes(status);
+}
+
+function isLedgerCreditIn(row) {
+  const type = String(row.event_type || '').trim().toLowerCase();
+  if (!FINANCIAL_LEDGER_CREDIT_TYPES.includes(type)) return false;
+  const sourceFlow = String(row.source_flow || '').trim().toLowerCase();
+  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
+  const source = String(row.source || '').trim().toLowerCase();
+  const paymentEventId = String(row.payment_event_id || '').trim();
+  const dedupeKey = String(row.dedupe_key || '').trim();
+  return source === 'appbeg_ledger'
+    && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
+}
+
+function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } = {}) {
+  const byUid = new Map(uids.map((uid) => [uid, zeroFinancialRow(uid)]));
+  const seen = new Set();
+  const counts = {
+    scanned: rows.length,
+    included: 0,
+    excluded_status: 0,
+    excluded_type: 0,
+    deduped: 0
+  };
+
+  for (const row of rows) {
+    const uid = String(row.uid || '').trim();
+    if (!byUid.has(uid)) continue;
+    const type = String(row.event_type || '').trim().toLowerCase();
+    if (!isCompletedFinancialEvent(row)) {
+      counts.excluded_status += 1;
+      continue;
+    }
+    const isIn = FINANCIAL_IN_TYPES.includes(type) || isLedgerCreditIn(row);
+    const isOut = FINANCIAL_OUT_TYPES.includes(type);
+    if (!isIn && !isOut) {
+      counts.excluded_type += 1;
+      continue;
+    }
+    const dedupeKey = String(row.dedupe_key || '').trim() || `row-${counts.scanned}-${counts.included}`;
+    const key = `${uid}:${type}:${dedupeKey}`;
+    if (seen.has(key)) {
+      counts.deduped += 1;
+      continue;
+    }
+    seen.add(key);
+
+    const player = byUid.get(uid);
+    const amount = Math.abs(Number(row.amount || 0));
+    if (Number.isFinite(amount)) {
+      if (isIn) player.total_in += amount;
+      if (isOut) player.total_out += amount;
+    }
+    const activity = parseActivityInstant(row.activity_at, timeZone);
+    if (activity) {
+      const iso = activity.toISOString();
+      if (!player.last_activity || activity > new Date(player.last_activity)) {
+        player.last_activity = iso;
+      }
+      if (activeBounds && activity >= activeBounds.start && activity < activeBounds.end) {
+        player.active_today = true;
+      }
+    }
+    player.net = player.total_in - player.total_out;
+    counts.included += 1;
+  }
+
+  return { players: uids.map((uid) => byUid.get(uid) || zeroFinancialRow(uid)), counts };
 }
 
 function chunkArray(items, size) {
@@ -501,6 +622,11 @@ export async function createAppBegStore(env = process.env) {
 
     if (!financialPlan?.configured) {
       const players = uids.map(zeroFinancialRow);
+      logFinancialTrace('vendor_totals_query', {
+        configured: false,
+        requested_players: uids.length,
+        reason: financialPlan?.reason || 'AppBeg financial reporting is not configured.'
+      });
       return {
         configured: false,
         reason: financialPlan?.reason || 'AppBeg financial reporting is not configured.',
@@ -521,60 +647,73 @@ export async function createAppBegStore(env = process.env) {
     const amountExpr = cols.amountCents
       ? `(ABS(COALESCE(f.${quoteIdent(cols.amountCents)}, 0)::numeric) / 100.0)`
       : `ABS(COALESCE(f.${quoteIdent(cols.amount)}, 0)::numeric)`;
-    const typeExpr = `LOWER(COALESCE(f.${quoteIdent(cols.type)}, '')::text)`;
-    const statusExpr = `LOWER(COALESCE(f.${quoteIdent(cols.status)}, '')::text)`;
     const activityExpr = cols.activityAt ? `f.${quoteIdent(cols.activityAt)}::text` : 'NULL::text';
-    const inTypes = quotedList(FINANCIAL_IN_TYPES);
-    const outTypes = quotedList(FINANCIAL_OUT_TYPES);
-    const completedStatuses = quotedList(FINANCIAL_COMPLETED_STATUSES);
+    const statusExpr = cols.status ? `f.${quoteIdent(cols.status)}::text` : 'NULL::text';
+    const sourceExpr = cols.source ? `f.${quoteIdent(cols.source)}::text` : 'NULL::text';
+    const sourceFlowExpr = cols.sourceFlow ? `f.${quoteIdent(cols.sourceFlow)}::text` : 'NULL::text';
+    const paymentEventExpr = cols.paymentEventId ? `f.${quoteIdent(cols.paymentEventId)}::text` : 'NULL::text';
+    const dedupeTextExpr = cols.dedupe ? `NULLIF(f.${quoteIdent(cols.dedupe)}::text, '')` : 'NULL::text';
     const activeDay = Number.isNaN(new Date(today).getTime()) ? new Date() : new Date(today);
     const activeBounds = businessDayBounds(activeDay, timeZone);
 
     const dedupeKeyExpr = cols.dedupe
-      ? `COALESCE(NULLIF(f.${quoteIdent(cols.dedupe)}::text, ''), f.ctid::text)`
+      ? `COALESCE(${dedupeTextExpr}, ${paymentEventExpr}, f.ctid::text)`
       : 'f.ctid::text';
-    const activityInstantExpr = `CASE
-      WHEN i.activity_at ~ '(Z|[+-][0-9]{2}:?[0-9]{2})$' THEN i.activity_at::timestamptz
-      ELSE i.activity_at::timestamp AT TIME ZONE $4
-    END`;
+    logFinancialTrace('vendor_totals_query', {
+      configured: true,
+      source: financialPlan.table,
+      requested_players: uids.length,
+      status_column: cols.status || null,
+      source_flow_column: cols.sourceFlow || null
+    });
 
     const players = [];
+    const totalsCounts = {
+      scanned: 0,
+      included: 0,
+      excluded_status: 0,
+      excluded_type: 0,
+      deduped: 0
+    };
     for (const chunk of chunkArray(uids, FINANCIAL_QUERY_CHUNK_SIZE)) {
       const result = await pool.query(`
       WITH requested(uid) AS (
         SELECT unnest($1::text[]) AS uid
-      ),
-      included AS (
-        SELECT DISTINCT ON (f.${quoteIdent(cols.playerUid)}::text, ${typeExpr}, ${dedupeKeyExpr})
+      )
+      SELECT
           f.${quoteIdent(cols.playerUid)}::text AS uid,
-          ${typeExpr} AS event_type,
+          LOWER(COALESCE(f.${quoteIdent(cols.type)}, '')::text) AS event_type,
           ${amountExpr} AS amount,
+          ${statusExpr} AS status,
           ${activityExpr} AS activity_at,
+          ${sourceExpr} AS source,
+          ${sourceFlowExpr} AS source_flow,
+          ${paymentEventExpr} AS payment_event_id,
           ${dedupeKeyExpr} AS dedupe_key
         FROM ${quoteIdent(financialPlan.table)} f
         JOIN requested r ON f.${quoteIdent(cols.playerUid)}::text = r.uid
-        WHERE ${statusExpr} IN (${completedStatuses})
-          AND ${typeExpr} IN (${inTypes}, ${outTypes})
-        ORDER BY f.${quoteIdent(cols.playerUid)}::text, ${typeExpr}, ${dedupeKeyExpr}, ${activityExpr} DESC NULLS LAST
-      )
-      SELECT
-        r.uid,
-        COALESCE(SUM(CASE WHEN i.event_type IN (${inTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_in,
-        COALESCE(SUM(CASE WHEN i.event_type IN (${outTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_out,
-        MAX(i.activity_at) AS last_activity,
-        COALESCE(MAX(CASE
-          WHEN i.activity_at ~ '^\\d{4}-\\d{2}-\\d{2}'
-            AND ${activityInstantExpr} >= $2::timestamptz
-            AND ${activityInstantExpr} < $3::timestamptz
-          THEN 1 ELSE 0
-        END), 0)::int AS active_today
-      FROM requested r
-      LEFT JOIN included i ON i.uid = r.uid
-      GROUP BY r.uid
-    `, [chunk, activeBounds.start.toISOString(), activeBounds.end.toISOString(), activeBounds.timeZone]);
-      const byUid = new Map(result.rows.map((row) => [String(row.uid), normalizeFinancialRow(row)]));
-      players.push(...chunk.map((uid) => byUid.get(uid) || zeroFinancialRow(uid)));
+    `, [chunk]);
+      const chunkReport = aggregateFinancialEventsForUids(chunk, result.rows, {
+        activeBounds,
+        timeZone: activeBounds.timeZone
+      });
+      for (const key of Object.keys(totalsCounts)) {
+        totalsCounts[key] += Number(chunkReport.counts[key] || 0);
+      }
+      players.push(...chunkReport.players);
     }
+    const summary = summarizeFinancialRows(players);
+    logFinancialTrace('event_inclusion_counts', {
+      source: financialPlan.table,
+      requested_players: uids.length,
+      scanned: totalsCounts.scanned,
+      included: totalsCounts.included,
+      excluded_status: totalsCounts.excluded_status,
+      excluded_type: totalsCounts.excluded_type,
+      deduped: totalsCounts.deduped,
+      total_in: summary.total_in,
+      total_out: summary.total_out
+    });
     return {
       configured: true,
       source: financialPlan.table,
@@ -584,7 +723,7 @@ export async function createAppBegStore(env = process.env) {
         end: activeBounds.end.toISOString()
       },
       players,
-      summary: summarizeFinancialRows(players)
+      summary
     };
   }
 
@@ -635,3 +774,9 @@ export async function createAppBegStore(env = process.env) {
     }
   };
 }
+
+export const appBegFinancialTesting = {
+  buildFinancialPlan,
+  aggregateFinancialEventsForUids,
+  businessDayBounds
+};
