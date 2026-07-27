@@ -679,3 +679,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_contact_unique
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_players_appbeg_uid_unique
   ON vendor_players(appbeg_player_uid)
   WHERE appbeg_player_uid IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS vendor_settlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  vendor_id INTEGER NOT NULL,
+  settlement_amount_cents INTEGER NOT NULL CHECK (settlement_amount_cents > 0),
+  settlement_date TEXT NOT NULL,
+  notes TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_settlements_vendor_date
+  ON vendor_settlements(vendor_id, settlement_date DESC, id DESC);

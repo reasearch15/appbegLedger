@@ -9,6 +9,12 @@ function zeroFinancial() {
   };
 }
 
+function roundCurrency(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+  return Math.round(amount * 100) / 100;
+}
+
 function normalizeFinancial(financial = {}) {
   const available = financial.financial_available ?? financial.financialAvailable ?? true;
   if (available === false) {
@@ -35,6 +41,15 @@ function normalizeFinancial(financial = {}) {
 
 function publicFinancial(financial = {}) {
   const normalized = normalizeFinancial(financial);
+  const commissionPercentage = Number(financial.commission_percentage ?? financial.commissionPercentage ?? 0);
+  const settlementTotal = Number(financial.settlement_total ?? financial.settlementTotal ?? 0);
+  const lastSettlement = financial.last_settlement ?? financial.lastSettlement ?? null;
+  const receivable = normalized.financial_available === false || normalized.net == null
+    ? null
+    : roundCurrency(normalized.net * ((Number.isFinite(commissionPercentage) ? commissionPercentage : 0) / 100));
+  const outstanding = receivable == null
+    ? null
+    : roundCurrency(receivable - (Number.isFinite(settlementTotal) ? settlementTotal : 0));
   return {
     totalIn: normalized.total_in,
     total_in: normalized.total_in,
@@ -46,7 +61,15 @@ function publicFinancial(financial = {}) {
     financialAvailable: normalized.financial_available,
     financial_available: normalized.financial_available,
     financialUnavailableReason: normalized.financial_unavailable_reason,
-    financial_unavailable_reason: normalized.financial_unavailable_reason
+    financial_unavailable_reason: normalized.financial_unavailable_reason,
+    settlementTotal,
+    settlement_total: settlementTotal,
+    settlementTotalCents: Number(financial.settlement_total_cents || 0),
+    settlement_total_cents: Number(financial.settlement_total_cents || 0),
+    lastSettlement,
+    last_settlement: lastSettlement,
+    receivable,
+    outstanding
   };
 }
 
@@ -94,9 +117,32 @@ function vendorPlayerPayload(player) {
   };
 }
 
+function vendorSettlementPayload(settlement) {
+  return {
+    id: settlement.id,
+    vendorId: settlement.vendor_id,
+    vendor_id: settlement.vendor_id,
+    settlementAmountCents: settlement.settlement_amount_cents,
+    settlement_amount_cents: settlement.settlement_amount_cents,
+    amount: settlement.settlement_amount,
+    settlementAmount: settlement.settlement_amount,
+    settlement_amount: settlement.settlement_amount,
+    settlementDate: settlement.settlement_date,
+    settlement_date: settlement.settlement_date,
+    notes: settlement.notes,
+    createdBy: settlement.created_by,
+    created_by: settlement.created_by,
+    created_at: settlement.created_at,
+    updated_at: settlement.updated_at
+  };
+}
+
 function handleVendorError(res, error) {
-  const status = error?.code === 'VALIDATION_ERROR' ? 400 : 400;
-  res.status(status).json({ error: error.message || 'Vendor request failed.' });
+  if (error?.code === 'VALIDATION_ERROR') {
+    return res.status(400).json({ error: error.message || 'Vendor request failed.' });
+  }
+  console.error('[vendors] request failed');
+  return res.status(500).json({ error: 'Vendor request failed.' });
 }
 
 async function loadFinancialByUid(appbegStore, players) {
@@ -164,6 +210,44 @@ function summarizePlayersFinancial(players, financialByUid) {
   }, zeroFinancial());
 }
 
+function summarizeSettlements(settlements = []) {
+  return settlements.reduce((summary, settlement) => {
+    const cents = Number(settlement.settlement_amount_cents || 0);
+    if (Number.isSafeInteger(cents)) {
+      summary.settlement_total_cents += cents;
+      summary.settlement_total = summary.settlement_total_cents / 100;
+    }
+    if (!summary.last_settlement) {
+      summary.last_settlement = settlement.settlement_date || null;
+    }
+    return summary;
+  }, { settlement_total_cents: 0, settlement_total: 0, last_settlement: null });
+}
+
+function applyVendorSettlementSummary(vendor, settlements = []) {
+  const summary = summarizeSettlements(settlements);
+  return {
+    ...vendor,
+    financial: {
+      ...(vendor.financial || {}),
+      commission_percentage: vendor.commission_percentage,
+      settlement_total: summary.settlement_total,
+      settlement_total_cents: summary.settlement_total_cents,
+      last_settlement: summary.last_settlement
+    }
+  };
+}
+
+function applyVendorSettlementSummaries(vendors = [], settlements = []) {
+  const settlementsByVendor = new Map();
+  for (const settlement of settlements) {
+    const vendorId = Number(settlement.vendor_id);
+    if (!settlementsByVendor.has(vendorId)) settlementsByVendor.set(vendorId, []);
+    settlementsByVendor.get(vendorId).push(settlement);
+  }
+  return vendors.map((vendor) => applyVendorSettlementSummary(vendor, settlementsByVendor.get(Number(vendor.id)) || []));
+}
+
 export function buildVendorFinancialPayload({ vendors = [], players = [], financialByUid = { players: new Map() } } = {}) {
   const playersByVendor = new Map();
   for (const player of players) {
@@ -195,8 +279,12 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
       ? await store.listAllVendorPlayers()
       : [];
     const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const settlements = typeof store.listAllVendorSettlements === 'function'
+      ? await store.listAllVendorSettlements()
+      : [];
+    const vendorsWithFinancial = buildVendorFinancialPayload({ vendors, players, financialByUid });
     res.json({
-      vendors: buildVendorFinancialPayload({ vendors, players, financialByUid }).map(vendorPayload),
+      vendors: applyVendorSettlementSummaries(vendorsWithFinancial, settlements).map(vendorPayload),
       financial: {
         configured: financialByUid.configured,
         source: financialByUid.source,
@@ -218,18 +306,67 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     if (financial.financial_available !== false) {
       financial.net = financial.total_in - financial.total_out;
     }
+    const settlements = typeof store.listVendorSettlements === 'function'
+      ? await store.listVendorSettlements(id)
+      : [];
     res.json({
-      vendor: vendorPayload({ ...vendor, player_count: players.length, financial }),
+      vendor: vendorPayload(applyVendorSettlementSummary({ ...vendor, player_count: players.length, financial }, settlements)),
       players: players.map((player) => vendorPlayerPayload({
         ...player,
         financial: financialForPlayer(player, financialByUid)
       })),
+      settlements: settlements.map(vendorSettlementPayload),
       financial: {
         configured: financialByUid.configured,
         source: financialByUid.source,
         reason: financialByUid.reason
       }
     });
+  });
+
+  app.get('/api/vendors/:id/settlements', adminOnly, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid vendor id.' });
+    }
+    const vendor = await store.getVendor(id);
+    if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+    const settlements = await store.listVendorSettlements(id);
+    res.json({ settlements: settlements.map(vendorSettlementPayload) });
+  });
+
+  app.patch('/api/vendors/:id/commission', adminOnly, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid vendor id.' });
+      }
+      const vendor = await store.updateVendorCommissionPercentage(id, req.body?.commissionPercentage);
+      if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
+      res.json({ vendor: vendorPayload(vendor) });
+    } catch (error) {
+      handleVendorError(res, error);
+    }
+  });
+
+  app.post('/api/vendors/:id/settlements', adminOnly, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid vendor id.' });
+      }
+      const actor = req.ledgerUser?.display_name || req.ledgerUser?.username || req.ledgerUser?.id || 'Admin';
+      const settlement = await store.createVendorSettlement(id, {
+        amount: req.body?.amount ?? req.body?.settlementAmount,
+        settlementDate: req.body?.settlementDate,
+        notes: req.body?.notes,
+        createdBy: actor
+      });
+      if (!settlement) return res.status(404).json({ error: 'Vendor not found.' });
+      res.status(201).json({ settlement: vendorSettlementPayload(settlement) });
+    } catch (error) {
+      handleVendorError(res, error);
+    }
   });
 
   app.post('/api/vendors', adminOnly, async (req, res) => {

@@ -314,6 +314,41 @@ h1 {
   border-bottom: 1px solid var(--line);
 }
 
+.vendor-settlement-tools {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(260px, 1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.compact-form {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.vendor-settlements-table {
+  min-width: 760px;
+  margin-bottom: 14px;
+}
+
+.vendor-settlements-header,
+.vendor-settlement-row {
+  display: grid;
+  grid-template-columns: 110px 110px minmax(220px, 1fr) minmax(120px, 0.8fr) 130px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.vendor-settlements-header {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
 .small-title {
   margin-top: 6px;
   font-size: 14px;
@@ -2603,6 +2638,10 @@ textarea {
 
   .vendor-financial-card {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vendor-settlement-tools {
+    grid-template-columns: 1fr;
   }
 
   .players-table-header span:nth-child(n+5),

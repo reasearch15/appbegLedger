@@ -31,6 +31,9 @@ function createApp() {
     },
     post(pathname, ...handlers) {
       routes[`POST ${pathname}`] = handlers;
+    },
+    patch(pathname, ...handlers) {
+      routes[`PATCH ${pathname}`] = handlers;
     }
   };
 }

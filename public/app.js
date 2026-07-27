@@ -142,7 +142,10 @@ let state = {
   selectedVendorId: null,
   selectedVendor: null,
   vendorPlayers: [],
+  vendorSettlements: [],
   vendorDetailLoading: false,
+  vendorCommissionSaving: false,
+  vendorSettlementSaving: false,
   appbegPlayers: [],
   appbegPlayersLoading: false,
   appbegPlayersError: null,
@@ -469,6 +472,7 @@ async function refreshVendors() {
       state.selectedVendorId = null;
       state.selectedVendor = null;
       state.vendorPlayers = [];
+      state.vendorSettlements = [];
     }
   } catch (error) {
     state.vendorError = error.message || 'Could not load vendors.';
@@ -484,10 +488,12 @@ async function refreshSelectedVendor() {
     const payload = await api(`/api/vendors/${state.selectedVendorId}`);
     state.selectedVendor = payload.vendor || null;
     state.vendorPlayers = payload.players || [];
+    state.vendorSettlements = payload.settlements || [];
   } catch (error) {
     state.vendorError = error.message || 'Could not load vendor detail.';
     state.selectedVendor = null;
     state.vendorPlayers = [];
+    state.vendorSettlements = [];
   } finally {
     state.vendorDetailLoading = false;
   }
@@ -2743,11 +2749,78 @@ function vendorsWorkspace() {
                 <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'net', 'net'))}</div>
               </div>
               <div>
+                <div class="subtle">Commission %</div>
+                <div class="strong">${escapeHtml(vendorCommission(selected.commissionPercentage ?? selected.commission_percentage))}</div>
+              </div>
+              <div>
+                <div class="subtle">Receivable</div>
+                <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'receivable', 'receivable'))}</div>
+              </div>
+              <div>
+                <div class="subtle">Last Settlement</div>
+                <div class="strong">${escapeHtml(fmtDate(selected.lastSettlement || selected.last_settlement))}</div>
+              </div>
+              <div>
+                <div class="subtle">Outstanding</div>
+                <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'outstanding', 'outstanding'))}</div>
+              </div>
+              <div>
                 <div class="subtle">Last Activity</div>
                 <div class="strong">${escapeHtml(fmtFinancialDate(selected))}</div>
               </div>
             </div>
             ${!financialAvailable(selected) ? `<div class="settings-error">${escapeHtml(selected.financialUnavailableReason || selected.financial_unavailable_reason || 'Financial reporting is unavailable.')}</div>` : ''}
+            <div class="vendor-settlement-tools">
+              <form id="vendorCommissionForm" class="settings-form compact-form">
+                <div class="form-section-label">Commission</div>
+                <label class="field-label">
+                  <span>Commission percentage</span>
+                  <input id="vendorDetailCommissionPercentage" type="number" min="0" max="100" step="0.01" value="${escapeHtml(selected.commissionPercentage ?? selected.commission_percentage ?? 0)}" ${state.vendorCommissionSaving ? 'disabled' : ''} />
+                </label>
+                <div class="settings-actions">
+                  <button class="button secondary" type="submit" ${state.vendorCommissionSaving ? 'disabled' : ''}>${state.vendorCommissionSaving ? 'Saving...' : 'Save Commission'}</button>
+                </div>
+              </form>
+              <form id="vendorSettlementForm" class="settings-form compact-form">
+                <div class="form-section-label">Record Settlement</div>
+                <label class="field-label">
+                  <span>Amount</span>
+                  <input id="vendorSettlementAmount" type="number" min="0.01" step="0.01" ${state.vendorSettlementSaving ? 'disabled' : ''} />
+                </label>
+                <label class="field-label">
+                  <span>Settlement date</span>
+                  <input id="vendorSettlementDate" type="date" ${state.vendorSettlementSaving ? 'disabled' : ''} />
+                </label>
+                <label class="field-label">
+                  <span>Notes, optional</span>
+                  <textarea id="vendorSettlementNotes" rows="3" ${state.vendorSettlementSaving ? 'disabled' : ''}></textarea>
+                </label>
+                <div class="settings-actions">
+                  <button class="button" type="submit" ${state.vendorSettlementSaving ? 'disabled' : ''}>${state.vendorSettlementSaving ? 'Recording...' : 'Record Settlement'}</button>
+                </div>
+              </form>
+            </div>
+            <div class="card-title small-title">Settlement History</div>
+            ${state.vendorSettlements.length ? `
+              <div class="vendor-settlements-table">
+                <div class="vendor-settlements-header">
+                  <span>Date</span>
+                  <span>Amount</span>
+                  <span>Notes</span>
+                  <span>Created By</span>
+                  <span>Created At</span>
+                </div>
+                ${state.vendorSettlements.map((settlement) => `
+                  <div class="vendor-settlement-row">
+                    <span>${escapeHtml(fmtDate(settlement.settlementDate || settlement.settlement_date))}</span>
+                    <span>${escapeHtml(fmtMoney(settlement.amount ?? settlement.settlementAmount ?? settlement.settlement_amount))}</span>
+                    <span>${escapeHtml(settlement.notes || '-')}</span>
+                    <span>${escapeHtml(settlement.createdBy || settlement.created_by || '-')}</span>
+                    <span>${escapeHtml(fmtDateTime(settlement.created_at))}</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div class="subtle">No settlements recorded yet.</div>'}
             <div class="card-title small-title">Owned Players</div>
             ${state.vendorPlayers.length ? `
               <div class="vendor-players-table">
@@ -3371,6 +3444,16 @@ function bindEvents() {
       await refreshSelectedVendor();
       render();
     });
+  });
+
+  document.querySelector('#vendorCommissionForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void updateVendorCommission(event.target);
+  });
+
+  document.querySelector('#vendorSettlementForm')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void createVendorSettlement(event.target);
   });
 
   document.querySelectorAll('[data-ledger-user-toggle]').forEach((button) => {
@@ -4126,6 +4209,55 @@ async function createVendor(form) {
     state.vendorError = error.message || 'Could not create vendor.';
   } finally {
     state.vendorSaving = false;
+    render();
+  }
+}
+
+async function updateVendorCommission(form) {
+  if (!state.selectedVendorId || state.vendorCommissionSaving) return;
+  state.vendorCommissionSaving = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    const commissionPercentage = form.querySelector('#vendorDetailCommissionPercentage')?.value ?? '0';
+    await api(`/api/vendors/${state.selectedVendorId}/commission`, {
+      method: 'PATCH',
+      body: JSON.stringify({ commissionPercentage })
+    });
+    state.vendorSuccess = 'Vendor commission updated.';
+    await refreshVendors();
+    await refreshSelectedVendor();
+  } catch (error) {
+    state.vendorError = error.message || 'Could not update vendor commission.';
+  } finally {
+    state.vendorCommissionSaving = false;
+    render();
+  }
+}
+
+async function createVendorSettlement(form) {
+  if (!state.selectedVendorId || state.vendorSettlementSaving) return;
+  state.vendorSettlementSaving = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    const amount = form.querySelector('#vendorSettlementAmount')?.value ?? '';
+    const settlementDate = form.querySelector('#vendorSettlementDate')?.value ?? '';
+    const notes = form.querySelector('#vendorSettlementNotes')?.value?.trim() || '';
+    await api(`/api/vendors/${state.selectedVendorId}/settlements`, {
+      method: 'POST',
+      body: JSON.stringify({ amount, settlementDate, notes })
+    });
+    form.reset();
+    state.vendorSuccess = 'Vendor settlement recorded.';
+    await refreshVendors();
+    await refreshSelectedVendor();
+  } catch (error) {
+    state.vendorError = error.message || 'Could not record vendor settlement.';
+  } finally {
+    state.vendorSettlementSaving = false;
     render();
   }
 }

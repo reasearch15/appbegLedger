@@ -51,6 +51,8 @@ export { REGISTRATION_STATUSES, CONVERSATION_STATUSES, DEFAULT_TAGS, DEFAULT_QUI
 const REGISTRATION_PAYMENT_COOLDOWN_MISSES = 3;
 const REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const REGISTRATION_PAYMENT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const MAX_VENDOR_SETTLEMENT_CENTS = 999999999999;
+const MAX_VENDOR_SETTLEMENT_NOTES_LENGTH = 1000;
 
 function redactSensitiveRegistrationInfo(info = {}) {
   if (!info || typeof info !== 'object') return info;
@@ -5714,24 +5716,88 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
-  function normalizeVendorInput(input = {}) {
-    const name = String(input.name || '').trim();
-    const linkedStaffUid = input.linkedStaffUid ?? input.linked_staff_uid;
-    const rawCommission = input.commissionPercentage ?? input.commission_percentage ?? 0;
-    const commission = Number(rawCommission);
-    if (!name) {
-      const error = new Error('Vendor name is required.');
+  function normalizeVendorSettlement(row) {
+    if (!row) return null;
+    const cents = Number(row.settlement_amount_cents || 0);
+    return {
+      id: Number(row.id),
+      vendor_id: Number(row.vendor_id),
+      settlement_amount_cents: cents,
+      settlement_amount: centsToDollars(cents) ?? 0,
+      settlement_date: row.settlement_date,
+      notes: row.notes || '',
+      created_by: row.created_by || '',
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    };
+  }
+
+  function normalizeVendorCommissionPercentage(value) {
+    const text = String(value ?? '').trim();
+    if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
+      const error = new Error('Commission percentage must be between 0 and 100.');
       error.code = 'VALIDATION_ERROR';
       throw error;
     }
+    const commission = Number(text);
     if (!Number.isFinite(commission) || commission < 0 || commission > 100) {
       const error = new Error('Commission percentage must be between 0 and 100.');
       error.code = 'VALIDATION_ERROR';
       throw error;
     }
+    return Math.round(commission * 100) / 100;
+  }
+
+  function normalizeVendorSettlementInput(input = {}) {
+    const amountText = String(input.amount ?? input.settlementAmount ?? input.settlement_amount ?? '').trim();
+    const amountCents = parseMoneyToCents(amountText);
+    const settlementDate = String(input.settlementDate ?? input.settlement_date ?? '').trim();
+    const notes = String(input.notes || '').trim();
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      const error = new Error('Settlement amount must be greater than 0.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (amountCents > MAX_VENDOR_SETTLEMENT_CENTS) {
+      const error = new Error('Settlement amount exceeds the supported limit.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    const dateMatch = settlementDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const parsedDate = dateMatch ? new Date(`${settlementDate}T00:00:00.000Z`) : null;
+    if (!dateMatch
+      || !parsedDate
+      || Number.isNaN(parsedDate.getTime())
+      || parsedDate.toISOString().slice(0, 10) !== settlementDate) {
+      const error = new Error('Settlement date is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (notes.length > MAX_VENDOR_SETTLEMENT_NOTES_LENGTH) {
+      const error = new Error(`Settlement notes must be ${MAX_VENDOR_SETTLEMENT_NOTES_LENGTH} characters or fewer.`);
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    return {
+      amountCents,
+      settlementDate,
+      notes: notes || null,
+      createdBy: String(input.createdBy ?? input.created_by ?? '').trim() || null
+    };
+  }
+
+  function normalizeVendorInput(input = {}) {
+    const name = String(input.name || '').trim();
+    const linkedStaffUid = input.linkedStaffUid ?? input.linked_staff_uid;
+    const rawCommission = input.commissionPercentage ?? input.commission_percentage ?? 0;
+    if (!name) {
+      const error = new Error('Vendor name is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
     return {
       name,
-      commissionPercentage: Math.round(commission * 100) / 100,
+      commissionPercentage: normalizeVendorCommissionPercentage(rawCommission),
       linkedStaffUid: String(linkedStaffUid || '').trim() || null,
       notes: String(input.notes || '').trim() || null
     };
@@ -5874,6 +5940,78 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     });
 
     return normalizeVendor(createSqliteVendor());
+  }
+
+  async function updateVendorCommissionPercentage(vendorId, commissionPercentage) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('Valid vendor id is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    const commission = normalizeVendorCommissionPercentage(commissionPercentage);
+    const timestamp = nowIso();
+    const result = await db.prepare(`
+      UPDATE vendors
+      SET commission_percentage = ?, updated_at = ?
+      WHERE id = ?
+    `).run(commission, timestamp, id);
+    if (!result.changes) return null;
+    return await getVendor(id);
+  }
+
+  async function listVendorSettlements(vendorId) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) return [];
+    const rows = await db.prepare(`
+      SELECT id, vendor_id, settlement_amount_cents, settlement_date, notes, created_by, created_at, updated_at
+      FROM vendor_settlements
+      WHERE vendor_id = ?
+      ORDER BY settlement_date DESC, id DESC
+    `).all(id);
+    return rows.map(normalizeVendorSettlement);
+  }
+
+  async function listAllVendorSettlements() {
+    const rows = await db.prepare(`
+      SELECT id, vendor_id, settlement_amount_cents, settlement_date, notes, created_by, created_at, updated_at
+      FROM vendor_settlements
+      ORDER BY vendor_id ASC, settlement_date DESC, id DESC
+    `).all();
+    return rows.map(normalizeVendorSettlement);
+  }
+
+  async function createVendorSettlement(vendorId, input = {}) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('Valid vendor id is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    const vendor = await getVendor(id);
+    if (!vendor) return null;
+    const settlement = normalizeVendorSettlementInput(input);
+    const timestamp = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO vendor_settlements (
+        vendor_id, settlement_amount_cents, settlement_date, notes, created_by, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      settlement.amountCents,
+      settlement.settlementDate,
+      settlement.notes,
+      settlement.createdBy,
+      timestamp,
+      timestamp
+    );
+    const settlementId = Number(result.lastInsertRowid);
+    return normalizeVendorSettlement(await db.prepare(`
+      SELECT id, vendor_id, settlement_amount_cents, settlement_date, notes, created_by, created_at, updated_at
+      FROM vendor_settlements
+      WHERE id = ?
+    `).get(settlementId));
   }
 
   async function getVendorPlayerByContactId(contactId) {
@@ -6261,7 +6399,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getVendorPlayerByContactId,
     getVendorPlayerByAppBegUid,
     listVendorPlayers,
-    listAllVendorPlayers
+    listAllVendorPlayers,
+    updateVendorCommissionPercentage,
+    listVendorSettlements,
+    listAllVendorSettlements,
+    createVendorSettlement
   };
 }
 
@@ -7019,6 +7161,20 @@ async function migrate(db) {
     ON vendor_players(appbeg_player_uid)
     WHERE appbeg_player_uid IS NOT NULL
   `);
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS vendor_settlements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vendor_id INTEGER NOT NULL,
+      settlement_amount_cents INTEGER NOT NULL CHECK (settlement_amount_cents > 0),
+      settlement_date TEXT NOT NULL,
+      notes TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_settlements_vendor_date ON vendor_settlements(vendor_id, settlement_date DESC, id DESC)');
 
   const users = await db.prepare('SELECT id, created_at, first_seen FROM telegram_users').all();
   const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM activity_events WHERE telegram_user_id = ? AND event_type = ?');
