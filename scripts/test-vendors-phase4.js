@@ -37,6 +37,9 @@ function createApp() {
     post(pathname, ...handlers) {
       routes[`POST ${pathname}`] = handlers;
     },
+    delete(pathname, ...handlers) {
+      routes[`DELETE ${pathname}`] = handlers;
+    },
     patch(pathname, ...handlers) {
       routes[`PATCH ${pathname}`] = handlers;
     }
@@ -188,8 +191,8 @@ async function detail(app, id) {
 
 async function testDashboardSummaryAndListDetailParity() {
   await withStore('vendor-phase4-parity', async (store) => {
-    const low = await store.createVendor({ name: 'Low Net', commissionPercentage: 10, linkedStaffUid: 'staff-low' });
-    const high = await store.createVendor({ name: 'High Net', commissionPercentage: 20, linkedStaffUid: 'staff-high' });
+    const low = await store.createVendor({ name: 'Low Net', commissionPercentage: 10 });
+    const high = await store.createVendor({ name: 'High Net', commissionPercentage: 20 });
     await createOwnedPlayer(store, low, 4101, 'low_uid');
     await createOwnedPlayer(store, high, 4102, 'high_uid_a');
     await createOwnedPlayer(store, high, 4103, 'high_uid_b');
@@ -230,7 +233,7 @@ async function testDashboardSummaryAndListDetailParity() {
 
 async function testSearchFilterAndSorting() {
   await withStore('vendor-phase4-search-filter-sort', async (store) => {
-    const alpha = await store.createVendor({ name: 'alpha Partner', linkedStaffUid: 'staff-secret' });
+    const alpha = await store.createVendor({ name: 'alpha Partner' });
     const beta = await store.createVendor({ name: 'Beta Partner' });
     const gamma = await store.createVendor({ name: 'Gamma Partner', commissionPercentage: 50 });
     await createOwnedPlayer(store, alpha, 4201, 'alpha_uid', 'Needle Player', 'player_needle');
@@ -249,7 +252,6 @@ async function testSearchFilterAndSorting() {
     assert.deepEqual((await list(app, { query: `  ${alpha.vendor_code.toLowerCase()}  ` })).payload.vendors.map((vendor) => vendor.name), ['alpha Partner']);
     assert.deepEqual((await list(app, { query: 'ALPHA' })).payload.vendors.map((vendor) => vendor.name), ['alpha Partner']);
     assert.deepEqual((await list(app, { query: 'Needle' })).payload.vendors.map((vendor) => vendor.name), []);
-    assert.deepEqual((await list(app, { query: 'staff-secret' })).payload.vendors.map((vendor) => vendor.name), []);
     assert.deepEqual((await list(app, { query: '%' })).payload.vendors.map((vendor) => vendor.name), []);
     assert.deepEqual((await list(app, { status: 'active', sort: 'name', dir: 'asc' })).payload.vendors.map((vendor) => vendor.name), ['alpha Partner', 'Gamma Partner']);
     assert.deepEqual((await list(app, { status: 'suspended' })).payload.vendors.map((vendor) => vendor.name), ['Beta Partner']);

@@ -42,7 +42,6 @@ async function testVendorCreationValidation() {
     const vendor = await store.createVendor({
       name: 'North Desk',
       commissionPercentage: 12.5,
-      linkedStaffUid: 'staff_uid_reporting',
       notes: 'Phase 1 test'
     });
 
@@ -50,7 +49,7 @@ async function testVendorCreationValidation() {
     assert.equal(vendor.name, 'North Desk');
     assert.equal(vendor.status, 'active');
     assert.equal(vendor.commission_percentage, 12.5);
-    assert.equal(vendor.linked_staff_uid, 'staff_uid_reporting');
+    assert.equal(Object.hasOwn(vendor, ['linked', 'staff', 'uid'].join('_')), false);
 
     const vendors = await store.listVendors();
     assert.equal(vendors.length, 1);
@@ -81,6 +80,9 @@ async function testVendorListingRequiresAdmin() {
   const app = {
     get(pathname, ...handlers) {
       routes[`GET ${pathname}`] = handlers;
+    },
+    delete(pathname, ...handlers) {
+      routes[`DELETE ${pathname}`] = handlers;
     },
     post(pathname, ...handlers) {
       routes[`POST ${pathname}`] = handlers;

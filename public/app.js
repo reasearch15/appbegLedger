@@ -146,6 +146,7 @@ let state = {
   vendorDetailLoading: false,
   vendorCommissionSaving: false,
   vendorSettlementSaving: false,
+  vendorDeleting: false,
   vendorDashboardQuery: '',
   vendorDashboardStatus: 'all',
   vendorDashboardSort: 'net',
@@ -2668,6 +2669,10 @@ function vendorLatestSettlement(vendor) {
   return `${amount} / ${date}`;
 }
 
+function vendorBotLinkValue(vendor) {
+  return vendor?.vendorBotLink || vendor?.vendor_bot_link || '';
+}
+
 function vendorsWorkspace() {
   const selected = state.selectedVendor;
   return `
@@ -2692,14 +2697,9 @@ function vendorsWorkspace() {
               <input id="vendorCommissionPercentage" type="number" min="0" max="100" step="0.01" value="0" ${state.vendorSaving ? 'disabled' : ''} />
             </label>
             <label class="field-label">
-              <span>Linked Staff UID, optional</span>
-              <input id="vendorLinkedStaffUid" placeholder="Reporting only" ${state.vendorSaving ? 'disabled' : ''} />
-            </label>
-            <label class="field-label">
               <span>Notes, optional</span>
               <textarea id="vendorNotes" rows="4" ${state.vendorSaving ? 'disabled' : ''}></textarea>
             </label>
-            <p class="subtle">Linked Staff UID is Reporting only. It does not affect routing, permissions, ownership, claims, or assignments.</p>
             ${state.vendorError ? `<div class="settings-error">${escapeHtml(state.vendorError)}</div>` : ''}
             ${state.vendorSuccess ? `<div class="settings-success">${escapeHtml(state.vendorSuccess)}</div>` : ''}
             <div class="settings-actions">
@@ -2759,7 +2759,6 @@ function vendorsWorkspace() {
                 <span>Commission</span>
                 <span>Receivable</span>
                 <span>Outstanding</span>
-                <span>Linked Staff UID</span>
                 <span>Latest Settlement</span>
               </div>
               ${state.vendors.map((vendor) => `
@@ -2775,10 +2774,6 @@ function vendorsWorkspace() {
                   <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
                   <span>${escapeHtml(fmtFinancialMoney(vendor, 'receivable', 'receivable'))}</span>
                   <span>${escapeHtml(fmtFinancialMoney(vendor, 'outstanding', 'outstanding'))}</span>
-                  <span>
-                    <span class="mono">${escapeHtml(vendor.linkedStaffUid || vendor.linked_staff_uid || '-')}</span>
-                    <span class="subtle vendor-reporting-only">Reporting only</span>
-                  </span>
                   <span>${escapeHtml(vendorLatestSettlement(vendor))}</span>
                 </button>
               `).join('')}
@@ -2801,6 +2796,19 @@ function vendorsWorkspace() {
               <div>
                 <div class="subtle">Active Today</div>
                 <div class="strong">${escapeHtml(fmtFinancialCount(selected, 'activePlayersToday', 'active_players_today'))}</div>
+              </div>
+            </div>
+            <div class="vendor-bot-link-card">
+              <div>
+                <div class="subtle">Vendor Bot Link</div>
+                ${vendorBotLinkValue(selected)
+                  ? `<a class="mono vendor-bot-link" href="${escapeHtml(vendorBotLinkValue(selected))}" target="_blank" rel="noopener noreferrer">${escapeHtml(vendorBotLinkValue(selected))}</a>`
+                  : '<div class="subtle">Vendor bot link unavailable</div>'}
+              </div>
+              <div class="settings-actions vendor-bot-link-actions">
+                <button class="button secondary" type="button" data-vendor-copy="link" ${vendorBotLinkValue(selected) ? '' : 'disabled'}>Copy Link</button>
+                <button class="button secondary" type="button" data-vendor-open-bot ${vendorBotLinkValue(selected) ? '' : 'disabled'}>Open Bot</button>
+                <button class="button secondary" type="button" data-vendor-copy="code">Copy Vendor Code</button>
               </div>
             </div>
             <div class="vendor-financial-card">
@@ -2918,6 +2926,13 @@ function vendorsWorkspace() {
                 `).join('')}
               </div>
             ` : '<div class="subtle">No owned players linked yet.</div>'}
+            <div class="vendor-danger-zone">
+              <div>
+                <div class="card-title small-title">Delete Vendor</div>
+                <div class="subtle">This action cannot be undone. Vendors with owned players cannot be deleted.</div>
+              </div>
+              <button class="button danger" type="button" data-delete-vendor ${state.vendorDeleting ? 'disabled' : ''}>${state.vendorDeleting ? 'Deleting...' : 'Delete Vendor'}</button>
+            </div>
           ` : (!state.vendorDetailLoading ? '<div class="subtle">Select a vendor to view owned players.</div>' : '')}
         </section>
       </section>
@@ -3539,6 +3554,23 @@ function bindEvents() {
   document.querySelector('#vendorSettlementForm')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void createVendorSettlement(event.target);
+  });
+
+  document.querySelectorAll('[data-vendor-copy]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      void copyVendorValue(button.dataset.vendorCopy);
+    });
+  });
+
+  document.querySelector('[data-vendor-open-bot]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    openVendorBot();
+  });
+
+  document.querySelector('[data-delete-vendor]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    void deleteSelectedVendor();
   });
 
   document.querySelectorAll('[data-ledger-user-toggle]').forEach((button) => {
@@ -4279,11 +4311,10 @@ async function createVendor(form) {
   try {
     const name = form.querySelector('#vendorName')?.value?.trim() || '';
     const commissionPercentage = form.querySelector('#vendorCommissionPercentage')?.value ?? '0';
-    const linkedStaffUid = form.querySelector('#vendorLinkedStaffUid')?.value?.trim() || '';
     const notes = form.querySelector('#vendorNotes')?.value?.trim() || '';
     const payload = await api('/api/vendors', {
       method: 'POST',
-      body: JSON.stringify({ name, commissionPercentage, linkedStaffUid, notes })
+      body: JSON.stringify({ name, commissionPercentage, notes })
     });
     form.reset();
     state.selectedVendorId = Number(payload.vendor?.id) || state.selectedVendorId;
@@ -4294,6 +4325,70 @@ async function createVendor(form) {
     state.vendorError = error.message || 'Could not create vendor.';
   } finally {
     state.vendorSaving = false;
+    render();
+  }
+}
+
+async function copyVendorValue(kind) {
+  const selected = state.selectedVendor;
+  const value = kind === 'code'
+    ? (selected?.vendorCode || selected?.vendor_code || '')
+    : vendorBotLinkValue(selected);
+  if (!value) {
+    state.vendorError = kind === 'code' ? 'Vendor code is unavailable.' : 'Vendor bot link unavailable.';
+    state.vendorSuccess = null;
+    render();
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(value);
+    state.vendorError = null;
+    state.vendorSuccess = kind === 'code' ? 'Vendor code copied.' : 'Vendor bot link copied.';
+  } catch {
+    state.vendorError = 'Could not copy to clipboard.';
+    state.vendorSuccess = null;
+  }
+  render();
+}
+
+function openVendorBot() {
+  const url = vendorBotLinkValue(state.selectedVendor);
+  if (!url) {
+    state.vendorError = 'Vendor bot link unavailable.';
+    state.vendorSuccess = null;
+    render();
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+async function deleteSelectedVendor() {
+  if (!state.selectedVendorId || state.vendorDeleting) return;
+  const typed = window.prompt([
+    'Delete Vendor',
+    '',
+    'This action cannot be undone.',
+    '',
+    'Type DELETE to continue.'
+  ].join('\n'));
+  if (typed !== 'DELETE') return;
+
+  state.vendorDeleting = true;
+  state.vendorError = null;
+  state.vendorSuccess = null;
+  render();
+  try {
+    await api(`/api/vendors/${state.selectedVendorId}`, { method: 'DELETE' });
+    state.selectedVendorId = null;
+    state.selectedVendor = null;
+    state.vendorPlayers = [];
+    state.vendorSettlements = [];
+    state.vendorSuccess = 'Vendor deleted.';
+    await refreshVendors();
+  } catch (error) {
+    state.vendorError = error.message || 'Could not delete vendor.';
+  } finally {
+    state.vendorDeleting = false;
     render();
   }
 }

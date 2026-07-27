@@ -246,13 +246,13 @@ h1 {
 }
 
 .vendors-table {
-  min-width: 1500px;
+  min-width: 1320px;
 }
 
 .vendors-table-header,
 .vendors-row {
   display: grid;
-  grid-template-columns: 120px minmax(160px, 1fr) 110px 80px 100px 90px 90px 90px 110px 100px 110px minmax(180px, 1fr) 150px;
+  grid-template-columns: 120px minmax(160px, 1fr) 110px 80px 100px 90px 90px 90px 110px 100px 110px 150px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -292,12 +292,6 @@ h1 {
   text-transform: uppercase;
 }
 
-.vendor-reporting-only {
-  display: block;
-  margin-top: 2px;
-  font-size: 11px;
-}
-
 .vendor-status.active {
   background: #ecfdf5;
   color: #047857;
@@ -315,6 +309,38 @@ h1 {
   margin-bottom: 14px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.vendor-bot-link-card,
+.vendor-danger-zone {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.vendor-bot-link {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.vendor-bot-link-actions {
+  margin-top: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.vendor-danger-zone {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #fecaca;
+  border-bottom: 0;
 }
 
 .vendor-financial-card {

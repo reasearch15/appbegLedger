@@ -93,10 +93,44 @@ function publicSettlementAvailability(vendor) {
   };
 }
 
+function normalizeBotUsername(value) {
+  const username = String(value || '').trim().replace(/^@+/, '').split(/[/?#]/)[0];
+  return /^[A-Za-z0-9_]{5,32}$/.test(username) ? username : '';
+}
+
+function botUsernameFromUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    if (!/^(t\.me|telegram\.me)$/i.test(url.hostname)) return '';
+    return normalizeBotUsername(url.pathname.replace(/^\/+/, '').split('/')[0]);
+  } catch {
+    return '';
+  }
+}
+
+function configuredVendorBotUsername(env = process.env) {
+  return normalizeBotUsername(env.VENDOR_TELEGRAM_BOT_USERNAME)
+    || normalizeBotUsername(env.TELEGRAM_BOT_USERNAME)
+    || botUsernameFromUrl(env.ROYAL_VIP_TELEGRAM_BOT_URL)
+    || botUsernameFromUrl(env.TELEGRAM_BOT_URL)
+    || normalizeBotUsername(globalThis.telegramBot?.botInfo?.username)
+    || normalizeBotUsername(globalThis.telegramBot?.telegram?.botInfo?.username);
+}
+
+export function buildVendorBotLink(vendorCode, env = process.env) {
+  const username = configuredVendorBotUsername(env);
+  const code = String(vendorCode || '').trim();
+  if (!username || !code) return null;
+  return `https://t.me/${username}?start=${encodeURIComponent(code)}`;
+}
+
 function vendorPayload(vendor) {
   const financial = publicFinancial(vendor.financial || vendor);
   const settlementAvailability = publicSettlementAvailability(vendor);
   const financialAvailable = financial.financialAvailable !== false;
+  const vendorBotLink = buildVendorBotLink(vendor.vendor_code);
   return {
     id: vendor.id,
     vendorCode: vendor.vendor_code,
@@ -105,9 +139,9 @@ function vendorPayload(vendor) {
     status: vendor.status,
     commissionPercentage: vendor.commission_percentage,
     commission_percentage: vendor.commission_percentage,
-    linkedStaffUid: vendor.linked_staff_uid,
-    linked_staff_uid: vendor.linked_staff_uid,
     notes: vendor.notes,
+    vendorBotLink,
+    vendor_bot_link: vendorBotLink,
     playerCount: vendor.player_count || 0,
     player_count: vendor.player_count || 0,
     activePlayersToday: financialAvailable ? (vendor.active_players_today ?? 0) : null,
@@ -173,6 +207,9 @@ function vendorSettlementPayload(settlement) {
 function handleVendorError(res, error) {
   if (error?.code === 'VALIDATION_ERROR') {
     return res.status(400).json({ error: error.message || 'Vendor request failed.' });
+  }
+  if (error?.code === 'VENDOR_HAS_PLAYERS') {
+    return res.status(409).json({ error: error.message || 'This Vendor still owns players.' });
   }
   console.error('[vendors] request failed');
   return res.status(500).json({ error: 'Vendor request failed.' });
@@ -554,12 +591,25 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     }
   });
 
+  app.delete('/api/vendors/:id', adminOnly, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: 'Invalid vendor id.' });
+      }
+      const result = await store.deleteVendor(id);
+      if (!result?.deleted) return res.status(404).json({ error: 'Vendor not found.' });
+      res.json({ deleted: true, vendorId: id });
+    } catch (error) {
+      handleVendorError(res, error);
+    }
+  });
+
   app.post('/api/vendors', adminOnly, async (req, res) => {
     try {
       const vendor = await store.createVendor({
         name: req.body?.name,
         commissionPercentage: req.body?.commissionPercentage,
-        linkedStaffUid: req.body?.linkedStaffUid,
         notes: req.body?.notes
       });
       res.status(201).json({ vendor: vendorPayload(vendor) });

@@ -144,7 +144,6 @@ async function testOwnedUnknownAndNoVendorPlayers() {
           vendor_name: 'Royal VIP East',
           vendor_code: 'VND-000012',
           vendor_status: 'suspended',
-          linked_staff_uid: 'staff-reporting',
           ownership_date: '2026-07-27T12:00:00.000Z'
         }];
       }
@@ -161,7 +160,6 @@ async function testOwnedUnknownAndNoVendorPlayers() {
       vendorName: 'Royal VIP East',
       vendorCode: 'VND-000012',
       vendorStatus: 'suspended',
-      linkedStaffUid: 'staff-reporting',
       ownershipDate: '2026-07-27T12:00:00.000Z'
     });
     assert.deepEqual(res.payload.players.missing_uid, { owned: false });
@@ -249,8 +247,7 @@ async function testEndpointReadsSqliteVendorOwnership() {
   try {
     await withStore('vendor-internal-ownership', async (store) => {
       const vendor = await store.createVendor({
-        name: 'Royal VIP East',
-        linkedStaffUid: 'staff-reporting'
+        name: 'Royal VIP East'
       });
       const contact = await store.upsertTelegramUser({
         id: 9001,
@@ -278,7 +275,7 @@ async function testEndpointReadsSqliteVendorOwnership() {
       assert.equal(res.payload.players.sqlite_owned_uid.vendorName, 'Royal VIP East');
       assert.equal(res.payload.players.sqlite_owned_uid.vendorCode, vendor.vendor_code);
       assert.equal(res.payload.players.sqlite_owned_uid.vendorStatus, 'active');
-      assert.equal(res.payload.players.sqlite_owned_uid.linkedStaffUid, 'staff-reporting');
+      assert.equal(Object.hasOwn(res.payload.players.sqlite_owned_uid, ['linked', 'Staff', 'Uid'].join('')), false);
       assert.match(res.payload.players.sqlite_owned_uid.ownershipDate, /^\d{4}-\d{2}-\d{2}T/);
       assert.deepEqual(res.payload.players.sqlite_unknown_uid, { owned: false });
     });

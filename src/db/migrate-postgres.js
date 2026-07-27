@@ -396,7 +396,6 @@ export async function migratePostgres(driver) {
       name TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
       commission_percentage NUMERIC(5, 2) NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
-      linked_staff_uid TEXT,
       notes TEXT,
       created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
       updated_at TEXT NOT NULL DEFAULT NOW()::TEXT

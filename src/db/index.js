@@ -5686,7 +5686,6 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       name: row.name || '',
       status: row.status || 'active',
       commission_percentage: Number(row.commission_percentage || 0),
-      linked_staff_uid: row.linked_staff_uid || null,
       notes: row.notes || '',
       player_count: Number(row.player_count || 0),
       created_at: row.created_at,
@@ -5788,7 +5787,6 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   function normalizeVendorInput(input = {}) {
     const name = String(input.name || '').trim();
-    const linkedStaffUid = input.linkedStaffUid ?? input.linked_staff_uid;
     const rawCommission = input.commissionPercentage ?? input.commission_percentage ?? 0;
     if (!name) {
       const error = new Error('Vendor name is required.');
@@ -5798,7 +5796,6 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return {
       name,
       commissionPercentage: normalizeVendorCommissionPercentage(rawCommission),
-      linkedStaffUid: String(linkedStaffUid || '').trim() || null,
       notes: String(input.notes || '').trim() || null
     };
   }
@@ -5811,14 +5808,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         v.name,
         v.status,
         v.commission_percentage,
-        v.linked_staff_uid,
         v.notes,
         v.created_at,
         v.updated_at,
         COUNT(vp.id) AS player_count
       FROM vendors v
       LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
-      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.linked_staff_uid, v.notes, v.created_at, v.updated_at
+      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
       ORDER BY v.created_at DESC, v.id DESC
     `).all();
     return rows.map(normalizeVendor);
@@ -5834,7 +5830,6 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         v.name,
         v.status,
         v.commission_percentage,
-        v.linked_staff_uid,
         v.notes,
         v.created_at,
         v.updated_at,
@@ -5842,7 +5837,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM vendors v
       LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
       WHERE v.id = ?
-      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.linked_staff_uid, v.notes, v.created_at, v.updated_at
+      GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.notes, v.created_at, v.updated_at
     `).get(vendorId));
   }
 
@@ -5850,7 +5845,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const code = normalizeVendorCode(vendorCode);
     if (!code) return null;
     return normalizeVendor(await db.prepare(`
-      SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at, 0 AS player_count
+      SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at, 0 AS player_count
       FROM vendors
       WHERE vendor_code = ?
       LIMIT 1
@@ -5868,15 +5863,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         await client.query('BEGIN');
         const inserted = await client.query(`
           INSERT INTO vendors (
-            vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+            vendor_code, name, status, commission_percentage, notes, created_at, updated_at
           )
-          VALUES ($1, $2, 'active', $3, $4, $5, $6, $6)
+          VALUES ($1, $2, 'active', $3, $4, $5, $5)
           RETURNING id
         `, [
           pendingCode,
           vendor.name,
           vendor.commissionPercentage,
-          vendor.linkedStaffUid,
           vendor.notes,
           timestamp
         ]);
@@ -5888,7 +5882,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           WHERE id = $3
         `, [vendorCode, timestamp, id]);
         const selected = await client.query(`
-          SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+          SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at
           FROM vendors
           WHERE id = $1
         `, [id]);
@@ -5909,14 +5903,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const createSqliteVendor = db.db.transaction(() => {
       const result = db.db.prepare(`
         INSERT INTO vendors (
-          vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+          vendor_code, name, status, commission_percentage, notes, created_at, updated_at
         )
-        VALUES (?, ?, 'active', ?, ?, ?, ?, ?)
+        VALUES (?, ?, 'active', ?, ?, ?, ?)
       `).run(
         pendingCode,
         vendor.name,
         vendor.commissionPercentage,
-        vendor.linkedStaffUid,
         vendor.notes,
         timestamp,
         timestamp
@@ -5929,7 +5922,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         WHERE id = ?
       `).run(vendorCode, timestamp, id);
       const row = db.db.prepare(`
-        SELECT id, vendor_code, name, status, commission_percentage, linked_staff_uid, notes, created_at, updated_at
+        SELECT id, vendor_code, name, status, commission_percentage, notes, created_at, updated_at
         FROM vendors
         WHERE id = ?
       `).get(id);
@@ -5940,6 +5933,58 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     });
 
     return normalizeVendor(createSqliteVendor());
+  }
+
+  async function deleteVendor(vendorId) {
+    const id = Number(vendorId);
+    if (!Number.isInteger(id) || id <= 0) {
+      const error = new Error('Valid vendor id is required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+
+    if (sql.isPostgres) {
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const vendor = await client.query('SELECT id FROM vendors WHERE id = $1 FOR UPDATE', [id]);
+        if (!vendor.rows[0]) {
+          await client.query('ROLLBACK');
+          return { deleted: false, reason: 'not_found' };
+        }
+        const playerCount = await client.query('SELECT COUNT(*)::int AS count FROM vendor_players WHERE vendor_id = $1', [id]);
+        if (Number(playerCount.rows[0]?.count || 0) > 0) {
+          const error = new Error('This Vendor still owns players. Transfer or remove ownership before deleting.');
+          error.code = 'VENDOR_HAS_PLAYERS';
+          throw error;
+        }
+        await client.query('DELETE FROM vendor_settlements WHERE vendor_id = $1', [id]);
+        await client.query('DELETE FROM vendors WHERE id = $1', [id]);
+        await client.query('COMMIT');
+        return { deleted: true };
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => null);
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
+    const deleteSqliteVendor = db.db.transaction(() => {
+      const vendor = db.db.prepare('SELECT id FROM vendors WHERE id = ?').get(id);
+      if (!vendor) return { deleted: false, reason: 'not_found' };
+      const playerCount = Number(db.db.prepare('SELECT COUNT(*) AS count FROM vendor_players WHERE vendor_id = ?').get(id)?.count || 0);
+      if (playerCount > 0) {
+        const error = new Error('This Vendor still owns players. Transfer or remove ownership before deleting.');
+        error.code = 'VENDOR_HAS_PLAYERS';
+        throw error;
+      }
+      db.db.prepare('DELETE FROM vendor_settlements WHERE vendor_id = ?').run(id);
+      db.db.prepare('DELETE FROM vendors WHERE id = ?').run(id);
+      return { deleted: true };
+    });
+
+    return deleteSqliteVendor();
   }
 
   async function updateVendorCommissionPercentage(vendorId, commissionPercentage) {
@@ -6181,8 +6226,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           vp.linked_at AS ownership_date,
           v.name AS vendor_name,
           v.vendor_code,
-          v.status AS vendor_status,
-          v.linked_staff_uid
+          v.status AS vendor_status
         FROM vendor_players vp
         JOIN vendors v ON v.id = vp.vendor_id
         WHERE vp.appbeg_player_uid IN (${placeholders})
@@ -6426,6 +6470,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     getVendor,
     getVendorByCode,
     createVendor,
+    deleteVendor,
     captureVendorReferralForContact,
     linkVendorPlayerForContact,
     getVendorPlayerByContactId,
@@ -7163,7 +7208,6 @@ async function migrate(db) {
       name TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
       commission_percentage REAL NOT NULL DEFAULT 0 CHECK (commission_percentage >= 0 AND commission_percentage <= 100),
-      linked_staff_uid TEXT,
       notes TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

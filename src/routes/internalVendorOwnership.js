@@ -87,7 +87,6 @@ function vendorOwnershipPayload(row) {
     vendorName: safeText(row.vendor_name) || '',
     vendorCode: safeText(row.vendor_code) || '',
     vendorStatus: safeText(row.vendor_status) || 'active',
-    linkedStaffUid: safeText(row.linked_staff_uid),
     ownershipDate: safeDateText(row.ownership_date || row.linked_at)
   };
 }
