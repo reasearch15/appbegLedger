@@ -33,18 +33,21 @@ const FINANCIAL_TABLE = 'financial_events_cache';
 const FINANCIAL_COLUMN_CANDIDATES = {
   playerUid: ['player_uid', 'appbeg_player_uid', 'uid'],
   type: ['event_type', 'type'],
-  amount: ['amount', 'amount_npr', 'amountNpr'],
+  amount: ['amount_npr', 'amountNpr', 'amount'],
   amountCents: ['amount_cents'],
   status: ['status', 'event_status', 'state'],
   activityAt: ['completed_at', 'created_at', 'createdAt'],
   source: ['source'],
   sourceFlow: ['source_flow', 'sourceFlow'],
-  paymentEventId: ['payment_event_id', 'paymentEventId']
+  paymentEventId: ['payment_event_id', 'paymentEventId'],
+  actorUid: ['actor_uid', 'actorUid'],
+  actorRole: ['actor_role', 'actorRole'],
+  meta: ['meta']
 };
-const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'id'];
+const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'firebase_id', 'id'];
 const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
 const FINANCIAL_OUT_TYPES = ['cashout', 'redeem'];
-const FINANCIAL_LEDGER_CREDIT_TYPES = ['coadmin_coin_add'];
+const FINANCIAL_LEDGER_CREDIT_TYPES = ['coadmin_coin_add', 'ledger_deposit_credit'];
 const FINANCIAL_LEDGER_SOURCE_FLOWS = ['registration_initial_deposit', 'registered_user_deposit'];
 const FINANCIAL_COMPLETED_STATUSES = ['completed'];
 const FINANCIAL_QUERY_CHUNK_SIZE = 500;
@@ -152,6 +155,9 @@ async function buildFinancialPlan(pool) {
   const source = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.source);
   const sourceFlow = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.sourceFlow);
   const paymentEventId = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.paymentEventId);
+  const actorUid = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.actorUid);
+  const actorRole = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.actorRole);
+  const meta = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.meta);
 
   const missing = [];
   if (!playerUid) missing.push('player uid');
@@ -183,6 +189,9 @@ async function buildFinancialPlan(pool) {
       source: source || null,
       source_flow: sourceFlow || null,
       payment_event_id: paymentEventId || null,
+      actor_uid: actorUid || null,
+      actor_role: actorRole || null,
+      meta: meta || null,
       dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES) || null
     },
     status_required: false
@@ -201,6 +210,9 @@ async function buildFinancialPlan(pool) {
       source,
       sourceFlow,
       paymentEventId,
+      actorUid,
+      actorRole,
+      meta,
       dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES)
     }
   };
@@ -359,16 +371,37 @@ function isCompletedFinancialEvent(row) {
   return !status || FINANCIAL_COMPLETED_STATUSES.includes(status);
 }
 
+function metaValue(row, key) {
+  const meta = row?.meta && typeof row.meta === 'object' ? row.meta : {};
+  return String(row?.[`meta_${key}`] ?? meta[key] ?? '').trim();
+}
+
 function isLedgerCreditIn(row) {
   const type = String(row.event_type || '').trim().toLowerCase();
   if (!FINANCIAL_LEDGER_CREDIT_TYPES.includes(type)) return false;
-  const sourceFlow = String(row.source_flow || '').trim().toLowerCase();
-  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
   const source = String(row.source || '').trim().toLowerCase();
+  if (source === 'authority_ledger_deposit_credit') return true;
+  const actorUid = String(row.actor_uid || '').trim().toLowerCase();
+  const actorRole = String(row.actor_role || '').trim().toLowerCase();
+  if (actorUid === 'appbeg_ledger' && actorRole === 'ledger') return true;
+  const sourceFlow = String(row.source_flow || metaValue(row, 'sourceFlow')).trim().toLowerCase();
+  const metaPaymentEventId = metaValue(row, 'paymentEventId');
+  const metaExternalReference = metaValue(row, 'externalReference');
+  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow) && (metaPaymentEventId || metaExternalReference)) return true;
+  if (type === 'ledger_deposit_credit') return false;
+  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
   const paymentEventId = String(row.payment_event_id || '').trim();
   const dedupeKey = String(row.dedupe_key || '').trim();
   return source === 'appbeg_ledger'
     && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
+}
+
+function financialDedupeKey(row, fallback) {
+  return metaValue(row, 'externalReference')
+    || metaValue(row, 'paymentEventId')
+    || String(row.firebase_id || '').trim()
+    || String(row.dedupe_key || '').trim()
+    || fallback;
 }
 
 function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } = {}) {
@@ -396,7 +429,7 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
       counts.excluded_type += 1;
       continue;
     }
-    const dedupeKey = String(row.dedupe_key || '').trim() || `row-${counts.scanned}-${counts.included}`;
+    const dedupeKey = financialDedupeKey(row, `row-${counts.scanned}-${counts.included}`);
     const key = `${uid}:${type}:${dedupeKey}`;
     if (seen.has(key)) {
       counts.deduped += 1;
@@ -652,19 +685,24 @@ export async function createAppBegStore(env = process.env) {
     const sourceExpr = cols.source ? `f.${quoteIdent(cols.source)}::text` : 'NULL::text';
     const sourceFlowExpr = cols.sourceFlow ? `f.${quoteIdent(cols.sourceFlow)}::text` : 'NULL::text';
     const paymentEventExpr = cols.paymentEventId ? `f.${quoteIdent(cols.paymentEventId)}::text` : 'NULL::text';
+    const actorUidExpr = cols.actorUid ? `f.${quoteIdent(cols.actorUid)}::text` : 'NULL::text';
+    const actorRoleExpr = cols.actorRole ? `f.${quoteIdent(cols.actorRole)}::text` : 'NULL::text';
+    const metaExpr = cols.meta ? `f.${quoteIdent(cols.meta)}` : 'NULL::jsonb';
+    const metaSourceFlowExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'sourceFlow'` : 'NULL::text';
+    const metaPaymentEventExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'paymentEventId'` : 'NULL::text';
+    const metaExternalRefExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'externalReference'` : 'NULL::text';
     const dedupeTextExpr = cols.dedupe ? `NULLIF(f.${quoteIdent(cols.dedupe)}::text, '')` : 'NULL::text';
     const activeDay = Number.isNaN(new Date(today).getTime()) ? new Date() : new Date(today);
     const activeBounds = businessDayBounds(activeDay, timeZone);
 
-    const dedupeKeyExpr = cols.dedupe
-      ? `COALESCE(${dedupeTextExpr}, ${paymentEventExpr}, f.ctid::text)`
-      : 'f.ctid::text';
+    const dedupeKeyExpr = `COALESCE(NULLIF(${metaExternalRefExpr}, ''), NULLIF(${metaPaymentEventExpr}, ''), ${dedupeTextExpr}, ${paymentEventExpr}, f.ctid::text)`;
     logFinancialTrace('vendor_totals_query', {
       configured: true,
       source: financialPlan.table,
       requested_players: uids.length,
       status_column: cols.status || null,
-      source_flow_column: cols.sourceFlow || null
+      source_flow_column: cols.sourceFlow || null,
+      meta_column: cols.meta || null
     });
 
     const players = [];
@@ -689,6 +727,12 @@ export async function createAppBegStore(env = process.env) {
           ${sourceExpr} AS source,
           ${sourceFlowExpr} AS source_flow,
           ${paymentEventExpr} AS payment_event_id,
+          ${actorUidExpr} AS actor_uid,
+          ${actorRoleExpr} AS actor_role,
+          ${metaExpr} AS meta,
+          ${metaSourceFlowExpr} AS "meta_sourceFlow",
+          ${metaPaymentEventExpr} AS "meta_paymentEventId",
+          ${metaExternalRefExpr} AS "meta_externalReference",
           ${dedupeKeyExpr} AS dedupe_key
         FROM ${quoteIdent(financialPlan.table)} f
         JOIN requested r ON f.${quoteIdent(cols.playerUid)}::text = r.uid

@@ -206,6 +206,52 @@ async function testRegistrationCreditInclusionAndExclusionRules() {
   assert.equal(counts.excluded_type, 3);
 }
 
+async function testProductionLedgerDepositCreditShapeCountsOnce() {
+  const activeBounds = appBegFinancialTesting.businessDayBounds(TEST_NOW, 'Asia/Kathmandu');
+  const productionRow = {
+    uid: 'o6XdSdLND0g8odmeoYaMXyG5uRn2',
+    firebase_id: 'f8c3f020-16b7-4b6f-ad67-e33654a80240',
+    event_type: 'ledger_deposit_credit',
+    amount: 6,
+    amount_npr: 6,
+    amount_coins: 6,
+    reason: 'registration_initial_deposit',
+    source: 'authority_ledger_deposit_credit',
+    actor_uid: 'appbeg_ledger',
+    actor_role: 'ledger',
+    meta: {
+      sourceFlow: 'registration_initial_deposit',
+      paymentEventId: '1278',
+      externalReference: 'appbegledger-payment-event:1278',
+      ledgerContactId: '34'
+    },
+    activity_at: '2026-07-27T13:00:00+05:45'
+  };
+  const { players, counts } = appBegFinancialTesting.aggregateFinancialEventsForUids([
+    'o6XdSdLND0g8odmeoYaMXyG5uRn2'
+  ], [
+    productionRow,
+    { ...productionRow, firebase_id: 'duplicate-row-same-business-event' },
+    {
+      uid: 'o6XdSdLND0g8odmeoYaMXyG5uRn2',
+      event_type: 'ledger_deposit_credit',
+      amount: 100,
+      reason: 'registration_initial_deposit',
+      activity_at: '2026-07-27T13:00:00+05:45'
+    }
+  ], {
+    activeBounds,
+    timeZone: activeBounds.timeZone
+  });
+
+  assert.equal(players[0].total_in, 6);
+  assert.equal(players[0].total_out, 0);
+  assert.equal(players[0].net, 6);
+  assert.equal(counts.included, 1);
+  assert.equal(counts.deduped, 1);
+  assert.equal(counts.excluded_type, 1);
+}
+
 async function testVendorDetailUsesRegistrationDepositAndZeroTransactions() {
   await withStore('vendor-financial-cache', async (store) => {
     const vendor = await store.createVendor({ name: 'Charlie', commissionPercentage: 20 });
@@ -292,6 +338,7 @@ async function testMissingRequiredSchemaStaysUnavailable() {
 async function main() {
   await testSchemaValidationAllowsAuthoritativeCacheWithoutStatus();
   await testRegistrationCreditInclusionAndExclusionRules();
+  await testProductionLedgerDepositCreditShapeCountsOnce();
   await testVendorDetailUsesRegistrationDepositAndZeroTransactions();
   await testMissingRequiredSchemaStaysUnavailable();
   console.log('Vendor financial cache tests passed.');
