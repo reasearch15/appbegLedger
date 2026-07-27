@@ -136,6 +136,22 @@ async function initAppBegStore() {
       async getPlayerByUid() {
         return null;
       },
+      async getFinancialReportForPlayerUids(playerUids = []) {
+        const players = (Array.isArray(playerUids) ? playerUids : [])
+          .map((uid) => ({
+            uid: String(uid || ''),
+            total_in: 0,
+            total_out: 0,
+            net: 0,
+            last_activity: null
+          }));
+        return {
+          configured: false,
+          reason: error.message || 'AppBeg database connection failed.',
+          players,
+          summary: { total_in: 0, total_out: 0, net: 0, last_activity: null }
+        };
+      },
       async exportPlayersCsv() {
         throw new Error(error.message || 'AppBeg database connection failed.');
       }
@@ -187,7 +203,7 @@ registerHealthRoutes(app, { store });
 registerPaymentMethodRoutes(app, { store, rootDir, requireAdmin });
 registerAppBegPlayerRoutes(app, { appbegStore });
 registerOngoingRoutes(app, { store });
-registerVendorRoutes(app, { store, requireAdmin });
+registerVendorRoutes(app, { store, requireAdmin, appbegStore });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });

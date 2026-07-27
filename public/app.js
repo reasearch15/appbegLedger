@@ -218,17 +218,21 @@ function escapeHtml(value) {
 
 function fmtDate(value) {
   if (!value) return '-';
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: '2-digit', year: 'numeric' }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: '2-digit', year: 'numeric' }).format(date);
 }
 
 function fmtDateTime(value) {
   if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
   return new Intl.DateTimeFormat(undefined, {
     month: 'short',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit'
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function formatWindowRemaining(expiresAt) {
@@ -242,7 +246,30 @@ function formatWindowRemaining(expiresAt) {
 
 function fmtTime(value) {
   if (!value) return '';
-  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+function fmtMoney(value) {
+  if (value == null || value === '') return 'Unavailable';
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return 'Unavailable';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+}
+
+function financialAvailable(item) {
+  return (item?.financialAvailable ?? item?.financial_available) !== false;
+}
+
+function fmtFinancialMoney(item, key, snakeKey = key) {
+  if (!financialAvailable(item)) return 'Unavailable';
+  return fmtMoney(item?.[key] ?? item?.[snakeKey]);
+}
+
+function fmtFinancialDate(item) {
+  if (!financialAvailable(item)) return 'Unavailable';
+  return fmtDate(item?.lastActivity || item?.last_activity);
 }
 
 function dayKey(value) {
@@ -2618,7 +2645,7 @@ function vendorsWorkspace() {
         <div>
           <div class="eyebrow">Vendor Foundation</div>
           <h1>Vendors</h1>
-          <div class="subtle">Admin-only vendor records. No players, payments, cashouts, or settlements are connected in Phase 1.</div>
+          <div class="subtle">Admin-only vendor records and read-only financial reporting. No settlements or money movement.</div>
         </div>
       </header>
       <section class="vendors-layout">
@@ -2660,6 +2687,10 @@ function vendorsWorkspace() {
                 <span>Status</span>
                 <span>Commission</span>
                 <span>Players</span>
+                <span>Total In</span>
+                <span>Total Out</span>
+                <span>Net</span>
+                <span>Last Activity</span>
                 <span>Linked Staff UID</span>
                 <span>Created</span>
               </div>
@@ -2670,6 +2701,10 @@ function vendorsWorkspace() {
                   <span>${vendorStatusBadge(vendor.status)}</span>
                   <span>${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
                   <span>${escapeHtml(vendor.playerCount ?? vendor.player_count ?? 0)}</span>
+                  <span>${escapeHtml(fmtFinancialMoney(vendor, 'totalIn', 'total_in'))}</span>
+                  <span>${escapeHtml(fmtFinancialMoney(vendor, 'totalOut', 'total_out'))}</span>
+                  <span>${escapeHtml(fmtFinancialMoney(vendor, 'net', 'net'))}</span>
+                  <span>${escapeHtml(fmtFinancialDate(vendor))}</span>
                   <span>
                     <span class="mono">${escapeHtml(vendor.linkedStaffUid || vendor.linked_staff_uid || '-')}</span>
                     <span class="subtle vendor-reporting-only">Reporting only</span>
@@ -2694,21 +2729,48 @@ function vendorsWorkspace() {
                 <div class="strong">${escapeHtml(selected.playerCount ?? selected.player_count ?? state.vendorPlayers.length)}</div>
               </div>
             </div>
+            <div class="vendor-financial-card">
+              <div>
+                <div class="subtle">Total In</div>
+                <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'totalIn', 'total_in'))}</div>
+              </div>
+              <div>
+                <div class="subtle">Total Out</div>
+                <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'totalOut', 'total_out'))}</div>
+              </div>
+              <div>
+                <div class="subtle">Net</div>
+                <div class="strong">${escapeHtml(fmtFinancialMoney(selected, 'net', 'net'))}</div>
+              </div>
+              <div>
+                <div class="subtle">Last Activity</div>
+                <div class="strong">${escapeHtml(fmtFinancialDate(selected))}</div>
+              </div>
+            </div>
+            ${!financialAvailable(selected) ? `<div class="settings-error">${escapeHtml(selected.financialUnavailableReason || selected.financial_unavailable_reason || 'Financial reporting is unavailable.')}</div>` : ''}
             <div class="card-title small-title">Owned Players</div>
             ${state.vendorPlayers.length ? `
               <div class="vendor-players-table">
                 <div class="vendor-players-header">
+                  <span>AppBeg Username</span>
+                  <span>Total In</span>
+                  <span>Total Out</span>
+                  <span>Net</span>
+                  <span>Last Activity</span>
                   <span>Telegram Name</span>
                   <span>Telegram Username</span>
-                  <span>AppBeg Username</span>
                   <span>AppBeg UID</span>
                   <span>Linked Date</span>
                 </div>
                 ${state.vendorPlayers.map((player) => `
                   <div class="vendor-player-row">
+                    <span>${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
+                    <span>${escapeHtml(fmtFinancialMoney(player, 'totalIn', 'total_in'))}</span>
+                    <span>${escapeHtml(fmtFinancialMoney(player, 'totalOut', 'total_out'))}</span>
+                    <span>${escapeHtml(fmtFinancialMoney(player, 'net', 'net'))}</span>
+                    <span>${escapeHtml(fmtFinancialDate(player))}</span>
                     <span>${escapeHtml(player.telegramName || player.telegram_name || '-')}</span>
                     <span>${escapeHtml(player.telegramUsername || player.telegram_username || '-')}</span>
-                    <span>${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
                     <span class="mono">${escapeHtml(player.appbegPlayerUid || player.appbeg_player_uid || '-')}</span>
                     <span>${fmtDate(player.linked_at)}</span>
                   </div>

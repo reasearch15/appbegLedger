@@ -246,13 +246,13 @@ h1 {
 }
 
 .vendors-table {
-  min-width: 840px;
+  min-width: 1180px;
 }
 
 .vendors-table-header,
 .vendors-row {
   display: grid;
-  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px 80px minmax(180px, 1fr) 110px;
+  grid-template-columns: 120px minmax(160px, 1fr) 110px 110px 80px 90px 90px 90px 110px minmax(180px, 1fr) 110px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -305,19 +305,28 @@ h1 {
   border-bottom: 1px solid var(--line);
 }
 
+.vendor-financial-card {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
 .small-title {
   margin-top: 6px;
   font-size: 14px;
 }
 
 .vendor-players-table {
-  min-width: 720px;
+  min-width: 1180px;
 }
 
 .vendor-players-header,
 .vendor-player-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(130px, 1fr) minmax(140px, 1fr) minmax(220px, 1.4fr) 110px;
+  grid-template-columns: minmax(140px, 1fr) 90px 90px 90px 110px minmax(140px, 1fr) minmax(130px, 1fr) minmax(220px, 1.4fr) 110px;
   gap: 10px;
   align-items: center;
   padding: 10px 0;
@@ -2590,6 +2599,10 @@ textarea {
 
   .vendor-detail-card {
     grid-column: auto;
+  }
+
+  .vendor-financial-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .players-table-header span:nth-child(n+5),

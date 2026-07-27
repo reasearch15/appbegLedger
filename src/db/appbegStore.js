@@ -29,6 +29,20 @@ const OPTIONAL_COLUMNS = [
 ];
 
 const UID_COLUMN_CANDIDATES = ['uid', 'firebase_id'];
+const FINANCIAL_TABLE = 'financial_events_cache';
+const FINANCIAL_COLUMN_CANDIDATES = {
+  playerUid: ['player_uid', 'appbeg_player_uid', 'uid'],
+  type: ['event_type', 'type'],
+  amount: ['amount'],
+  amountCents: ['amount_cents'],
+  status: ['status'],
+  activityAt: ['completed_at', 'created_at']
+};
+const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'idempotency_key'];
+const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
+const FINANCIAL_OUT_TYPES = ['cashout', 'redeem'];
+const FINANCIAL_COMPLETED_STATUSES = ['completed'];
+const FINANCIAL_QUERY_CHUNK_SIZE = 500;
 
 function quoteIdent(name) {
   return `"${String(name).replaceAll('"', '""')}"`;
@@ -46,6 +60,30 @@ async function loadPlayersCacheColumns(pool) {
     ORDER BY ordinal_position
   `);
   return new Set(result.rows.map((row) => row.column_name));
+}
+
+async function loadTableColumns(pool, tableName) {
+  const result = await pool.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = $1
+    ORDER BY ordinal_position
+  `, [tableName]);
+  return new Set(result.rows.map((row) => row.column_name));
+}
+
+async function findExistingTable(pool, candidates) {
+  const result = await pool.query(`
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+  `, [candidates]);
+  const found = new Set(result.rows.map((row) => row.table_name));
+  return candidates.find((name) => found.has(name)) || null;
+}
+
+function pickColumn(columns, candidates) {
+  return candidates.find((name) => columns.has(name)) || null;
 }
 
 function buildQueryPlan(columns) {
@@ -80,6 +118,48 @@ function buildQueryPlan(columns) {
     hasDeletedAt: columns.has('deleted_at'),
     optionalPresent,
     selectSql: selectParts.join(',\n      ')
+  };
+}
+
+async function buildFinancialPlan(pool) {
+  const table = await findExistingTable(pool, [FINANCIAL_TABLE]);
+  if (!table) {
+    return { configured: false, reason: 'AppBeg financial events cache table was not found.' };
+  }
+
+  const columns = await loadTableColumns(pool, table);
+  const playerUid = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.playerUid);
+  const type = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.type);
+  const amountCents = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.amountCents);
+  const amount = amountCents ? null : pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.amount);
+  const status = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.status);
+  const activityAt = pickColumn(columns, FINANCIAL_COLUMN_CANDIDATES.activityAt);
+
+  const missing = [];
+  if (!playerUid) missing.push('player uid');
+  if (!type) missing.push('event type');
+  if (!amount && !amountCents) missing.push('amount');
+  if (!status) missing.push('status');
+
+  if (missing.length) {
+    return {
+      configured: false,
+      reason: `AppBeg financial events cache is missing required ${missing.join(', ')} column(s).`
+    };
+  }
+
+  return {
+    configured: true,
+    table,
+    columns: {
+      playerUid,
+      type,
+      amount,
+      amountCents,
+      status,
+      activityAt,
+      dedupe: pickColumn(columns, FINANCIAL_DEDUPE_COLUMN_CANDIDATES)
+    }
   };
 }
 
@@ -181,6 +261,53 @@ function baseFromSql() {
   return 'FROM players_cache p';
 }
 
+function zeroFinancialRow(uid) {
+  return {
+    uid,
+    total_in: 0,
+    total_out: 0,
+    net: 0,
+    last_activity: null
+  };
+}
+
+function normalizeFinancialRow(row) {
+  const totalIn = Number(row?.total_in || 0);
+  const totalOut = Number(row?.total_out || 0);
+  return {
+    uid: row?.uid == null ? null : String(row.uid),
+    total_in: Number.isFinite(totalIn) ? totalIn : 0,
+    total_out: Number.isFinite(totalOut) ? totalOut : 0,
+    net: Number.isFinite(totalIn - totalOut) ? totalIn - totalOut : 0,
+    last_activity: row?.last_activity || null
+  };
+}
+
+function summarizeFinancialRows(rows) {
+  const summary = rows.reduce((acc, row) => {
+    acc.total_in += Number(row.total_in || 0);
+    acc.total_out += Number(row.total_out || 0);
+    if (row.last_activity && (!acc.last_activity || new Date(row.last_activity) > new Date(acc.last_activity))) {
+      acc.last_activity = row.last_activity;
+    }
+    return acc;
+  }, { total_in: 0, total_out: 0, net: 0, last_activity: null });
+  summary.net = summary.total_in - summary.total_out;
+  return summary;
+}
+
+function quotedList(values) {
+  return values.map((value) => `'${String(value).replaceAll("'", "''")}'`).join(', ');
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 export async function createAppBegStore(env = process.env) {
   const config = resolveAppBegDatabaseConfig(env);
   if (!config.configured) {
@@ -206,10 +333,12 @@ export async function createAppBegStore(env = process.env) {
   });
 
   let plan;
+  let financialPlan;
   try {
     await pool.query('SELECT 1');
     const columns = await loadPlayersCacheColumns(pool);
     plan = buildQueryPlan(columns);
+    financialPlan = await buildFinancialPlan(pool);
   } catch (error) {
     await pool.end().catch(() => {});
     throw error;
@@ -308,6 +437,83 @@ export async function createAppBegStore(env = process.env) {
     return result.players;
   }
 
+  async function getFinancialReportForPlayerUids(playerUids = []) {
+    const uids = [...new Set((Array.isArray(playerUids) ? playerUids : [])
+      .map((uid) => String(uid || '').trim())
+      .filter(Boolean))];
+
+    if (!financialPlan?.configured) {
+      const players = uids.map(zeroFinancialRow);
+      return {
+        configured: false,
+        reason: financialPlan?.reason || 'AppBeg financial reporting is not configured.',
+        players,
+        summary: summarizeFinancialRows(players)
+      };
+    }
+
+    if (!uids.length) {
+      return {
+        configured: true,
+        players: [],
+        summary: summarizeFinancialRows([])
+      };
+    }
+
+    const cols = financialPlan.columns;
+    const amountExpr = cols.amountCents
+      ? `(ABS(COALESCE(f.${quoteIdent(cols.amountCents)}, 0)::numeric) / 100.0)`
+      : `ABS(COALESCE(f.${quoteIdent(cols.amount)}, 0)::numeric)`;
+    const typeExpr = `LOWER(COALESCE(f.${quoteIdent(cols.type)}, '')::text)`;
+    const statusExpr = `LOWER(COALESCE(f.${quoteIdent(cols.status)}, '')::text)`;
+    const activityExpr = cols.activityAt ? `f.${quoteIdent(cols.activityAt)}::text` : 'NULL::text';
+    const inTypes = quotedList(FINANCIAL_IN_TYPES);
+    const outTypes = quotedList(FINANCIAL_OUT_TYPES);
+    const completedStatuses = quotedList(FINANCIAL_COMPLETED_STATUSES);
+
+    const dedupeKeyExpr = cols.dedupe
+      ? `COALESCE(NULLIF(f.${quoteIdent(cols.dedupe)}::text, ''), f.ctid::text)`
+      : 'f.ctid::text';
+
+    const players = [];
+    for (const chunk of chunkArray(uids, FINANCIAL_QUERY_CHUNK_SIZE)) {
+      const result = await pool.query(`
+      WITH requested(uid) AS (
+        SELECT unnest($1::text[]) AS uid
+      ),
+      included AS (
+        SELECT DISTINCT ON (f.${quoteIdent(cols.playerUid)}::text, ${typeExpr}, ${dedupeKeyExpr})
+          f.${quoteIdent(cols.playerUid)}::text AS uid,
+          ${typeExpr} AS event_type,
+          ${amountExpr} AS amount,
+          ${activityExpr} AS activity_at,
+          ${dedupeKeyExpr} AS dedupe_key
+        FROM ${quoteIdent(financialPlan.table)} f
+        JOIN requested r ON f.${quoteIdent(cols.playerUid)}::text = r.uid
+        WHERE ${statusExpr} IN (${completedStatuses})
+          AND ${typeExpr} IN (${inTypes}, ${outTypes})
+        ORDER BY f.${quoteIdent(cols.playerUid)}::text, ${typeExpr}, ${dedupeKeyExpr}, ${activityExpr} DESC NULLS LAST
+      )
+      SELECT
+        r.uid,
+        COALESCE(SUM(CASE WHEN i.event_type IN (${inTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_in,
+        COALESCE(SUM(CASE WHEN i.event_type IN (${outTypes}) THEN i.amount ELSE 0 END), 0)::double precision AS total_out,
+        MAX(i.activity_at) AS last_activity
+      FROM requested r
+      LEFT JOIN included i ON i.uid = r.uid
+      GROUP BY r.uid
+    `, [chunk]);
+      const byUid = new Map(result.rows.map((row) => [String(row.uid), normalizeFinancialRow(row)]));
+      players.push(...chunk.map((uid) => byUid.get(uid) || zeroFinancialRow(uid)));
+    }
+    return {
+      configured: true,
+      source: financialPlan.table,
+      players,
+      summary: summarizeFinancialRows(players)
+    };
+  }
+
   async function getPlayerByUid(uid) {
     const normalizedUid = String(uid || '').trim();
     if (!normalizedUid) return null;
@@ -349,6 +555,7 @@ export async function createAppBegStore(env = process.env) {
     getPlayerByUid,
     getPlayerByUsername,
     exportPlayersCsv,
+    getFinancialReportForPlayerUids,
     async close() {
       await pool.end();
     }

@@ -1475,7 +1475,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT *
       FROM internal_notes
       WHERE telegram_user_id = ?
-      ORDER BY created_at DESC, id DESC
+      ORDER BY v.created_at DESC, v.id DESC
     `).all(id);
   }
 
@@ -5753,7 +5753,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       FROM vendors v
       LEFT JOIN vendor_players vp ON vp.vendor_id = v.id
       GROUP BY v.id, v.vendor_code, v.name, v.status, v.commission_percentage, v.linked_staff_uid, v.notes, v.created_at, v.updated_at
-      ORDER BY created_at DESC, id DESC
+      ORDER BY v.created_at DESC, v.id DESC
     `).all();
     return rows.map(normalizeVendor);
   }
@@ -6015,6 +6015,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return rows.map(normalizeVendorPlayer);
   }
 
+  async function listAllVendorPlayers() {
+    const rows = await db.prepare(`
+      SELECT vp.*, u.display_name, u.first_name, u.last_name, u.username AS telegram_username, u.appbeg_account_id AS appbeg_username,
+             cas.registration_info_json
+      FROM vendor_players vp
+      LEFT JOIN telegram_users u ON u.id = vp.telegram_contact_id
+      LEFT JOIN contact_automation_state cas ON cas.telegram_user_id = u.id
+      ORDER BY vp.vendor_id ASC, vp.linked_at DESC, vp.id DESC
+    `).all();
+    return rows.map(normalizeVendorPlayer);
+  }
+
   async function normalizePaymentDeadlinesOnBoot() {
     try {
       // Backfill freeze_at from message_date/created_at + configured search window, then freeze overdue unmatched rows.
@@ -6248,7 +6260,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     linkVendorPlayerForContact,
     getVendorPlayerByContactId,
     getVendorPlayerByAppBegUid,
-    listVendorPlayers
+    listVendorPlayers,
+    listAllVendorPlayers
   };
 }
 
