@@ -1477,7 +1477,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       SELECT *
       FROM internal_notes
       WHERE telegram_user_id = ?
-      ORDER BY v.created_at DESC, v.id DESC
+      ORDER BY created_at DESC, id DESC
     `).all(id);
   }
 
