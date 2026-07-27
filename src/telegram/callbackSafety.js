@@ -70,19 +70,30 @@ export async function recordActiveBotMessage({ store, user, bot = null, messageI
   });
 }
 
-export async function validateCallbackFreshness({ store, user, action, callbackMessageId }) {
+export async function validateCallbackFreshness({ store, user, action, callbackMessageId, callbackMessageDate = null }) {
+  const normalizedAction = normalizeCallbackAction(action);
+  const callbackAgeSeconds = callbackMessageAgeSeconds(callbackMessageDate);
   if (!isStateChangingCallbackAction(action)) {
-    return { ok: true, stateChanging: false };
+    return { ok: true, stateChanging: false, callbackAgeSeconds };
   }
   if (isPersistentNavigationCallbackAction(action)) {
     return {
       ok: true,
       stateChanging: true,
-      persistentNavigation: true
+      persistentNavigation: true,
+      callbackAgeSeconds
     };
   }
   const state = await store.ensureAutomationState(user.id);
   const info = state?.registration_info || {};
+  if (normalizedAction === 'deposit:cancel' && isActiveDepositCancel(state, info)) {
+    return {
+      ok: true,
+      stateChanging: true,
+      activeDepositCancel: true,
+      callbackAgeSeconds
+    };
+  }
   const activeMessageId = Number(info.active_bot_message_id || 0) || null;
   const pressedMessageId = Number(callbackMessageId || 0) || null;
 
@@ -93,7 +104,8 @@ export async function validateCallbackFreshness({ store, user, action, callbackM
       reason: 'expired_callback',
       activeMessageId,
       pressedMessageId,
-      recoverCurrentStep: !activeMessageId
+      recoverCurrentStep: !activeMessageId,
+      callbackAgeSeconds
     };
   }
 
@@ -102,8 +114,24 @@ export async function validateCallbackFreshness({ store, user, action, callbackM
     stateChanging: true,
     activeMessageId,
     pressedMessageId,
-    version: Number(info.active_bot_message_version || 0) || null
+    version: Number(info.active_bot_message_version || 0) || null,
+    callbackAgeSeconds
   };
+}
+
+function isActiveDepositCancel(state = {}, info = {}) {
+  const flow = String(state?.current_flow || state?.currentFlow || '');
+  const step = String(state?.current_step || state?.currentStep || '');
+  return flow === 'registered_deposit'
+    || flow === 'deposit'
+    || ['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'waiting_amount', 'waiting_payment_name', 'await_payment'].includes(step)
+    || Boolean(info.deposit_in_progress || info.deposit_awaiting_payment);
+}
+
+function callbackMessageAgeSeconds(callbackMessageDate) {
+  const seconds = Number(callbackMessageDate || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.max(0, Math.floor(Date.now() / 1000) - seconds);
 }
 
 function normalizeRows(buttons = []) {

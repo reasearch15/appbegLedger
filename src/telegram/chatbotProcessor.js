@@ -3,7 +3,7 @@ import {
   isChatbotButtonAction,
   normalizeCallbackAction
 } from './chatbotEngine.js';
-import { registrationCompletionStatus } from '../registration/utils.js';
+import { parseMoneyToCents, registrationCompletionStatus } from '../registration/utils.js';
 import { createAppBegPlayerForContact } from '../appbeg/createPlayerService.js';
 import { generateCustomerSupportReply } from './customerSupportAi.js';
 import { queueBotReply } from './chatbotProcessorDelivery.js';
@@ -21,6 +21,7 @@ import {
 
 export const SUPPORT_AI_FALLBACK_REPLY = "Sorry, I'm having trouble accessing support right now. Please try again shortly.";
 const SUPPORT_AI_TIMEOUT_MS = Number(process.env.CUSTOMER_SUPPORT_AI_TIMEOUT_MS || 15000);
+const contactJobLocks = new Map();
 
 export { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
 export { handlePaymentRegistrationQr } from './registrationQrSend.js';
@@ -226,7 +227,27 @@ export async function enqueueChatbotJob(store, {
   return job;
 }
 
-export async function processBotJob(store, job, { io = null, bot = null, supportAiGenerator = generateCustomerSupportReply } = {}) {
+export async function processBotJob(store, job, options = {}) {
+  const contactId = job?.contact_id || job?.contactId || 'unknown';
+  const previous = contactJobLocks.get(contactId) || Promise.resolve();
+  let releaseLock;
+  const current = new Promise((resolve) => {
+    releaseLock = resolve;
+  });
+  const chain = previous.catch(() => null).then(() => current);
+  contactJobLocks.set(contactId, chain);
+  await previous.catch(() => null);
+  try {
+    return await processBotJobUnlocked(store, job, options);
+  } finally {
+    releaseLock();
+    if (contactJobLocks.get(contactId) === chain) {
+      contactJobLocks.delete(contactId);
+    }
+  }
+}
+
+async function processBotJobUnlocked(store, job, { io = null, bot = null, supportAiGenerator = generateCustomerSupportReply } = {}) {
   const contact = await store.getUserProfile(job.contact_id);
   if (!contact) {
     await store.completeBotJob(job.id, { status: 'failed', errorText: 'Contact not found' });
@@ -247,7 +268,8 @@ export async function processBotJob(store, job, { io = null, bot = null, support
       `action=${job.action || 'none'} job_type=${job.job_type || 'none'} ` +
       `automation_flow=${beforeState.current_flow || 'none'} automation_step=${beforeState.current_step || 'none'} ` +
       `bot_session=${botSession?.workflow_key || 'none'}/${botSession?.workflow_step || 'none'} ` +
-      `deposit_active=${depositActive} status=${contact.registration_status}`
+      `deposit_active=${depositActive} parsed_amount_cents=${parseMoneyToCents(job.input_text || '') ?? 'invalid'} ` +
+      `status=${contact.registration_status}`
     );
 
     const registrationJob = shouldUseRegistrationBot(job, beforeState, contact, botSession);
@@ -493,7 +515,14 @@ export async function processBotJob(store, job, { io = null, bot = null, support
     }
 
     const afterState = await store.getAutomationState(contact.id);
-    console.log(`[chatbot] state contact=${contact.id} current_flow=${afterState?.current_flow || 'none'} current_step=${afterState?.current_step || 'none'}`);
+    console.log(
+      `[chatbot] state_after_processing contact=${contact.id} job=${job.id} ` +
+      `update_id=${job.update_id || 'n/a'} telegram_message_id=${job.incoming_telegram_message_id || 'n/a'} ` +
+      `handler=${decision.kind} current_flow=${afterState?.current_flow || 'none'} ` +
+      `current_step=${afterState?.current_step || 'none'} ` +
+      `deposit_in_progress=${Boolean(afterState?.registration_info?.deposit_in_progress)} ` +
+      `deposit_awaiting_payment=${Boolean(afterState?.registration_info?.deposit_awaiting_payment)}`
+    );
 
     if (!repliesSentBeforeCreate && !accountViewHandled) {
       await sendDecisionReplies({ store, contact, decision, job, bot: bot || globalThis.telegramBot || null, beforeStateSnapshot, stateWriteAttempted });

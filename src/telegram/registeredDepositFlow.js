@@ -527,6 +527,10 @@ export async function continueRegisteredDeposit({
       `step=${normalizedStep} deposit_in_progress=${Boolean(info.deposit_in_progress)}`
     );
     const amountCents = parseMoneyToCents(text);
+    console.log(
+      `[chatbot] deposit_amount_parsed contact=${contact.id} ` +
+      `parsed_amount_cents=${amountCents ?? 'invalid'} min_cents=${MIN_REGISTRATION_DEPOSIT * 100}`
+    );
     const minCents = MIN_REGISTRATION_DEPOSIT * 100;
     if (!Number.isSafeInteger(amountCents) || amountCents < minCents) {
       return {

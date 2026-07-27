@@ -30,40 +30,45 @@ export function startTelegramListener({ token, store, io }) {
         store,
         user: fresh || user,
         action,
-        callbackMessageId
+        callbackMessageId,
+        callbackMessageDate: ctx.callbackQuery.message?.date || null
       });
       if (!freshness.ok) {
         await ctx.answerCbQuery(EXPIRED_CALLBACK_MESSAGE);
         console.log(
           `[chatbot] callback_expired contact=${user.id} action=${action || 'n/a'} ` +
-          `pressed_message_id=${freshness.pressedMessageId || 'n/a'} active_message_id=${freshness.activeMessageId || 'n/a'}`
+          `pressed_message_id=${freshness.pressedMessageId || 'n/a'} active_message_id=${freshness.activeMessageId || 'n/a'} ` +
+          `callback_age_seconds=${freshness.callbackAgeSeconds ?? 'n/a'} rejected=true`
         );
-        if (freshness.recoverCurrentStep) {
-          const recoveryResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
-            CHATBOT_ENABLED,
-            contact: fresh,
-            sentAt: ctx.callbackQuery.message?.date
-              ? new Date(ctx.callbackQuery.message.date * 1000).toISOString()
-              : null,
-            enqueueParams: {
-              contactId: user.id,
-              telegramUserId: user.telegram_id,
-              updateId: ctx.update?.update_id,
-              incomingTelegramMessageId: callbackMessageId,
-              jobType: 'inbound_message',
-              inputText: '',
-              action: null,
-              force_entry_menu: true
-            }
-          });
-          if (recoveryResult.enqueued) {
-            io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
-            io.emit('contacts:changed');
+        const recoveryResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
+          CHATBOT_ENABLED,
+          contact: fresh || user,
+          sentAt: ctx.callbackQuery.message?.date
+            ? new Date(ctx.callbackQuery.message.date * 1000).toISOString()
+            : null,
+          enqueueParams: {
+            contactId: user.id,
+            telegramUserId: user.telegram_id,
+            updateId: ctx.update?.update_id,
+            incomingTelegramMessageId: callbackMessageId,
+            jobType: 'inbound_message',
+            inputText: '',
+            action: null,
+            force_entry_menu: true
           }
+        });
+        if (recoveryResult.enqueued) {
+          io.emit('message:new', { userId: user.id, contactId: user.id, telegramId: user.telegram_id });
+          io.emit('contacts:changed');
         }
         return;
       }
       await ctx.answerCbQuery();
+      console.log(
+        `[chatbot] callback_freshness contact=${user.id} action=${action || 'n/a'} ` +
+        `message_id=${callbackMessageId || 'n/a'} callback_age_seconds=${freshness.callbackAgeSeconds ?? 'n/a'} ` +
+        `rejected=false persistent=${Boolean(freshness.persistentNavigation)} active_deposit_cancel=${Boolean(freshness.activeDepositCancel)}`
+      );
 
       const enqueueResult = await tryEnqueueRegistrationBotJob(store, enqueueChatbotJob, {
         CHATBOT_ENABLED,

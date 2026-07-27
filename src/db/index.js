@@ -6970,6 +6970,12 @@ async function migrate(db) {
     `);
   }
 
+  // Existing installs may have bot_jobs without update_id. schema.sql creates
+  // idx_bot_jobs_update_id, so the column must exist before the schema batch runs.
+  if (await tableExists(db, 'bot_jobs')) {
+    await addColumnIfMissing(db, 'bot_jobs', 'update_id', 'INTEGER');
+  }
+
   await db.exec(fs.readFileSync(schemaPath, 'utf8'));
 
   if (await tableExists(db, 'telegram_users_old')) {

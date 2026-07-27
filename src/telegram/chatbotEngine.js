@@ -353,13 +353,15 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   );
 
   // Amount replies must stay on deposit even if Help/Account/Main Menu corrupted flow/step.
-  if (!action && depositSessionActive && parseMoneyToCents(text) != null) {
+  // While waiting for deposit_amount, every normal text update belongs to this handler:
+  // valid money starts the payment window, invalid text gets the amount validation reply.
+  if (!action && depositSessionActive && depositContinueStep === 'deposit_amount') {
     console.log(
-      `[chatbot] deposit_amount_detected contact=${contact.id} ` +
+      `[chatbot] deposit_amount_route_selected contact=${contact.id} ` +
       `automation_flow=${flow || 'none'} automation_step=${normalizedStep || 'none'} ` +
       `bot_session_flow=${botSession?.workflow_key || 'none'} ` +
       `bot_session_step=${botSession?.workflow_step || 'none'} ` +
-      `resolved_step=${depositContinueStep}`
+      `resolved_step=${depositContinueStep} parsed_cents=${parseMoneyToCents(text) ?? 'invalid'}`
     );
     return await continueRegisteredDeposit({
       store,

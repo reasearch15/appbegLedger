@@ -90,7 +90,7 @@ export function parseFirstDepositAmount(text, { minAmount = MIN_REGISTRATION_DEP
 
 export function parseMoneyToCents(text) {
   const raw = String(text || '').trim();
-  const match = raw.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  const match = raw.match(/^\$?(\d+)(?:\.(\d{1,2}))?$/);
   if (!match) return null;
   const dollars = Number.parseInt(match[1], 10);
   const centsText = (match[2] || '').padEnd(2, '0');
