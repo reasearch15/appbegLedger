@@ -557,8 +557,14 @@ async function refreshVendorPortalSettlements() {
   state.vendorPortal.loading = true;
   state.vendorPortal.error = null;
   try {
-    const payload = await api('/api/vendor/settlements');
+    const [payload, dashboardPayload] = await Promise.all([
+      api('/api/vendor/settlements'),
+      api('/api/vendor/dashboard').catch(() => null)
+    ]);
     state.vendorPortal.settlements = payload.settlements || [];
+    if (dashboardPayload?.vendor) {
+      state.vendorPortal.dashboard = dashboardPayload.vendor;
+    }
   } catch (error) {
     state.vendorPortal.error = error.message || 'Could not load settlement history.';
   } finally {
@@ -2715,6 +2721,12 @@ function vendorStatusBadge(status) {
   return `<span class="badge vendor-status ${escapeHtml(normalized)}">${escapeHtml(normalized)}</span>`;
 }
 
+function vendorPortalStatusBadge(status) {
+  const normalized = String(status || 'unknown').trim().toLowerCase() || 'unknown';
+  const label = normalized.replaceAll('_', ' ');
+  return `<span class="badge vp-status-badge ${escapeHtml(normalized)}">${escapeHtml(label)}</span>`;
+}
+
 function vendorCommission(value) {
   const amount = Number(value || 0);
   if (!Number.isFinite(amount)) return '0%';
@@ -2733,152 +2745,305 @@ function vendorBotLinkValue(vendor) {
   return vendor?.vendorBotLink || vendor?.vendor_bot_link || '';
 }
 
+function financialNumber(item, key, snakeKey = key) {
+  if (!financialAvailable(item)) return null;
+  const value = Number(item?.[key] ?? item?.[snakeKey]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function vpIcon(name) {
+  const stroke = 'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"';
+  const fill = 'fill="currentColor"';
+  const icons = {
+    dashboard: `<svg viewBox="0 0 24 24" ${fill} aria-hidden="true"><path d="M4 4h7v7H4V4zm9 0h7v5h-7V4zM4 13h7v7H4v-7zm9 3h7v4h-7v-4z"/></svg>`,
+    players: `<svg viewBox="0 0 24 24" ${fill} aria-hidden="true"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-4.4 0-8 2.2-8 5v1h16v-1c0-2.8-3.6-5-8-5z"/></svg>`,
+    settlements: `<svg viewBox="0 0 24 24" ${fill} aria-hidden="true"><path d="M7 3h10a2 2 0 0 1 2 2v14l-3-2-2 2-2-2-2 2-2-2-3 2V5a2 2 0 0 1 2-2zm2 5h6v2H9V8zm0 4h6v2H9v-2z"/></svg>`,
+    inflow: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><path d="M12 3v12"/><path d="m8 11 4 4 4-4"/><path d="M5 19h14"/></svg>`,
+    outflow: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><path d="M12 21V9"/><path d="m8 13 4-4 4 4"/><path d="M5 5h14"/></svg>`,
+    net: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><path d="M4 12h16"/><path d="M12 4v16"/></svg>`,
+    receivable: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><path d="M12 2v20"/><path d="M17 7a5 5 0 0 0-10 0c0 4 5 4 5 8a5 5 0 0 1-10 0"/></svg>`,
+    outstanding: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>`,
+    paid: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>`,
+    users: `<svg viewBox="0 0 24 24" ${fill} aria-hidden="true"><path d="M16 11a3 3 0 1 0-3-3 3 3 0 0 0 3 3zm-8 0a3 3 0 1 0-3-3 3 3 0 0 0 3 3zm0 2c-3.3 0-6 1.7-6 3.8V19h8.5A7.5 7.5 0 0 1 8 13zm8 0a7.2 7.2 0 0 0-2.1.3A5.6 5.6 0 0 1 16 17.8V19h7v-.2C23 14.7 19.3 13 16 13z"/></svg>`,
+    active: `<svg viewBox="0 0 24 24" ${fill} aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9A9 9 0 0 0 12 3zm1 5v4.2l3 1.8-.8 1.3L11 13V8z"/></svg>`,
+    empty: `<svg viewBox="0 0 24 24" ${stroke} aria-hidden="true"><path d="M4 7h16v12H4z"/><path d="M6 4h12l1 3H5z"/><path d="M12 11v5"/><path d="M9 13.5h6"/></svg>`
+  };
+  return icons[name] || '';
+}
+
+function vpMetricCard({ label, value, tone = 'neutral', icon = 'net', hint = '' }) {
+  return `
+    <article class="vp-metric-card tone-${escapeHtml(tone)}" aria-label="${escapeHtml(label)}: ${escapeHtml(value)}">
+      <div class="vp-metric-top">
+        <span class="vp-metric-icon" aria-hidden="true">${vpIcon(icon)}</span>
+        <span class="vp-metric-label">${escapeHtml(label)}</span>
+      </div>
+      <div class="vp-metric-value">${escapeHtml(value)}</div>
+      ${hint ? `<div class="vp-metric-hint">${escapeHtml(hint)}</div>` : ''}
+    </article>
+  `;
+}
+
+function vendorPortalPageHeader({ title, subtitle, badgeHtml = '', metaHtml = '' }) {
+  return `
+    <header class="vp-page-header">
+      <div class="vp-page-header-copy">
+        <div class="vp-page-title-row">
+          <h1>${escapeHtml(title)}</h1>
+          ${badgeHtml}
+          ${metaHtml}
+        </div>
+        ${subtitle ? `<p class="vp-page-subtitle">${escapeHtml(subtitle)}</p>` : ''}
+      </div>
+    </header>
+  `;
+}
+
 function vendorPortalDashboardWorkspace() {
   const vendor = state.vendorPortal.dashboard || {};
-  const cards = [
+  const netValue = financialNumber(vendor, 'net', 'net');
+  const netTone = netValue == null ? 'neutral' : (netValue >= 0 ? 'positive' : 'danger');
+  const hasLatestSettlement = (vendor.hasSettlements ?? vendor.has_settlements) === true
+    && (vendor.settlementAvailable ?? vendor.settlement_available) !== false;
+  const infoItems = [
     ['Vendor Name', vendor.name || '-'],
     ['Vendor Code', vendor.vendorCode || vendor.vendor_code || '-'],
-    ['Status', vendor.status || '-'],
     ['Commission %', vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage)],
-    ['Players', vendor.playerCount ?? vendor.player_count ?? 0],
-    ['Active Today', fmtFinancialCount(vendor, 'activePlayersToday', 'active_players_today')],
-    ['Total In', fmtFinancialMoney(vendor, 'totalIn', 'total_in')],
-    ['Total Out', fmtFinancialMoney(vendor, 'totalOut', 'total_out')],
-    ['Net', fmtFinancialMoney(vendor, 'net', 'net')],
-    ['Receivable', fmtFinancialMoney(vendor, 'receivable', 'receivable')],
-    ['Settlements Paid', fmtMoney(vendor.settlementTotal ?? vendor.settlement_total ?? 0)],
-    ['Outstanding', fmtFinancialMoney(vendor, 'outstanding', 'outstanding')]
+    ['Status', null]
   ];
   return `
-    <main class="ops-main vendors-main">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">Vendor Portal</div>
-          <h1>Dashboard</h1>
-        </div>
-      </header>
-      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
-      ${state.vendorPortal.loading ? '<div class="subtle">Loading dashboard...</div>' : ''}
-      <section class="vendor-financial-card">
-        ${cards.map(([label, value]) => `
-          <div>
-            <div class="subtle">${escapeHtml(label)}</div>
-            <div class="strong">${escapeHtml(value)}</div>
-          </div>
-        `).join('')}
-      </section>
+    <main class="ops-main vp-main">
+      <div class="vp-content">
+        ${vendorPortalPageHeader({
+          title: 'Vendor Dashboard',
+          subtitle: 'Track your players, performance, and settlements.',
+          badgeHtml: vendorStatusBadge(vendor.status)
+        })}
+        ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+        ${state.vendorPortal.loading && !vendor.name ? '<div class="vp-loading">Loading dashboard...</div>' : ''}
+        <section class="vp-info-card card">
+          ${infoItems.map(([label, value]) => `
+            <div class="vp-info-item">
+              <div class="vp-info-label">${escapeHtml(label)}</div>
+              <div class="vp-info-value">${label === 'Status' ? vendorStatusBadge(vendor.status) : escapeHtml(value)}</div>
+            </div>
+          `).join('')}
+        </section>
+        <section class="vp-metrics-grid financial">
+          ${vpMetricCard({ label: 'Total In', value: fmtFinancialMoney(vendor, 'totalIn', 'total_in'), tone: 'positive', icon: 'inflow', hint: 'Player deposits attributed to you' })}
+          ${vpMetricCard({ label: 'Total Out', value: fmtFinancialMoney(vendor, 'totalOut', 'total_out'), tone: 'danger', icon: 'outflow', hint: 'Player withdrawals attributed to you' })}
+          ${vpMetricCard({ label: 'Net', value: fmtFinancialMoney(vendor, 'net', 'net'), tone: netTone, icon: 'net', hint: 'Total In − Total Out' })}
+          ${vpMetricCard({ label: 'Receivable', value: fmtFinancialMoney(vendor, 'receivable', 'receivable'), tone: 'accent', icon: 'receivable', hint: 'Net × commission %' })}
+          ${vpMetricCard({ label: 'Outstanding', value: fmtFinancialMoney(vendor, 'outstanding', 'outstanding'), tone: 'warning', icon: 'outstanding', hint: 'Receivable − settlements paid' })}
+          ${vpMetricCard({ label: 'Settlements Paid', value: fmtMoney(vendor.settlementTotal ?? vendor.settlement_total ?? 0), tone: 'paid', icon: 'paid', hint: 'Total recorded settlement payments' })}
+        </section>
+        <section class="vp-metrics-grid compact">
+          ${vpMetricCard({ label: 'Total Players', value: String(vendor.playerCount ?? vendor.player_count ?? 0), tone: 'neutral', icon: 'users' })}
+          ${vpMetricCard({ label: 'Active Today', value: fmtFinancialCount(vendor, 'activePlayersToday', 'active_players_today'), tone: 'neutral', icon: 'active' })}
+        </section>
+        <section class="vp-overview-grid">
+          <article class="card vp-overview-card">
+            <div class="vp-section-title">Business Overview</div>
+            <p class="vp-page-subtitle">Totals below come from your vendor dashboard API response.</p>
+            <div class="vp-formula-list">
+              <div class="vp-formula-row">
+                <span class="vp-formula-label">Net</span>
+                <span class="vp-formula-eq">Total In − Total Out</span>
+                <span class="vp-formula-value">${escapeHtml(fmtFinancialMoney(vendor, 'net', 'net'))}</span>
+              </div>
+              <div class="vp-formula-row">
+                <span class="vp-formula-label">Receivable</span>
+                <span class="vp-formula-eq">Net × ${escapeHtml(vendorCommission(vendor.commissionPercentage ?? vendor.commission_percentage))}</span>
+                <span class="vp-formula-value">${escapeHtml(fmtFinancialMoney(vendor, 'receivable', 'receivable'))}</span>
+              </div>
+              <div class="vp-formula-row">
+                <span class="vp-formula-label">Outstanding</span>
+                <span class="vp-formula-eq">Receivable − Settlements Paid</span>
+                <span class="vp-formula-value">${escapeHtml(fmtFinancialMoney(vendor, 'outstanding', 'outstanding'))}</span>
+              </div>
+            </div>
+          </article>
+          ${hasLatestSettlement ? `
+            <article class="card vp-overview-card">
+              <div class="vp-section-title">Latest Settlement</div>
+              <p class="vp-page-subtitle">Most recent payment recorded by admin.</p>
+              <div class="vp-latest-settlement">
+                <div>
+                  <div class="vp-info-label">Amount</div>
+                  <div class="vp-metric-value compact">${escapeHtml(fmtMoney(vendor.latestSettlementAmount ?? vendor.latest_settlement_amount))}</div>
+                </div>
+                <div>
+                  <div class="vp-info-label">Date</div>
+                  <div class="vp-info-value">${escapeHtml(fmtDate(vendor.latestSettlementDate ?? vendor.latest_settlement_date))}</div>
+                </div>
+              </div>
+            </article>
+          ` : `
+            <article class="card vp-overview-card">
+              <div class="vp-section-title">Latest Settlement</div>
+              <div class="vp-empty-inline">
+                <div class="vp-section-title">No settlements yet</div>
+                <p class="vp-page-subtitle">Settlement payments will appear here after the admin records one.</p>
+              </div>
+            </article>
+          `}
+        </section>
+      </div>
     </main>
   `;
 }
 
 function vendorPortalPlayersWorkspace() {
-  const pagination = state.vendorPortal.pagination || { page: 1, totalPages: 1, total: 0 };
+  const pagination = state.vendorPortal.pagination || { page: 1, limit: 25, total: 0, totalPages: 1 };
+  const page = Number(pagination.page || 1);
+  const limit = Number(pagination.limit || 25);
+  const total = Number(pagination.total || 0);
+  const start = total === 0 ? 0 : ((page - 1) * limit) + 1;
+  const end = Math.min(page * limit, total);
+  const hasFilters = Boolean(state.vendorPortal.query)
+    || state.vendorPortal.sort !== 'linked_at'
+    || state.vendorPortal.dir !== 'desc';
   return `
-    <main class="ops-main vendors-main">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">Vendor Portal</div>
-          <h1>My Players</h1>
-        </div>
-      </header>
-      <form id="vendorPortalPlayerFilters" class="vendor-dashboard-filters">
-        <label class="field-label">
-          <span>Search</span>
-          <input id="vendorPortalPlayerQuery" value="${escapeHtml(state.vendorPortal.query || '')}" placeholder="Username or status" />
-        </label>
-        <label class="field-label">
-          <span>Sort by</span>
-          <select id="vendorPortalPlayerSort">
-            ${[
-              ['linked_at', 'Ownership Date'],
-              ['username', 'Username'],
-              ['status', 'Status'],
-              ['total_in', 'Total In'],
-              ['total_out', 'Total Out'],
-              ['net', 'Net'],
-              ['last_activity', 'Last Activity']
-            ].map(([value, label]) => `<option value="${value}" ${state.vendorPortal.sort === value ? 'selected' : ''}>${label}</option>`).join('')}
-          </select>
-        </label>
-        <label class="field-label">
-          <span>Direction</span>
-          <select id="vendorPortalPlayerDir">
-            <option value="desc" ${state.vendorPortal.dir === 'desc' ? 'selected' : ''}>Descending</option>
-            <option value="asc" ${state.vendorPortal.dir === 'asc' ? 'selected' : ''}>Ascending</option>
-          </select>
-        </label>
-        <div class="settings-actions vendor-dashboard-actions">
-          <button class="button secondary" type="submit">Apply</button>
-        </div>
-      </form>
-      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
-      ${state.vendorPortal.loading ? '<div class="subtle">Loading players...</div>' : ''}
-      <section class="card vendor-detail-card">
-        ${state.vendorPortal.players.length ? `
-          <div class="vendor-players-table">
-            <div class="vendor-players-header">
-              <span>Username</span>
-              <span>Status</span>
-              <span>Total In</span>
-              <span>Total Out</span>
-              <span>Net</span>
-              <span>Last Activity</span>
-              <span>Ownership Date</span>
-            </div>
-            ${state.vendorPortal.players.map((player) => `
-              <div class="vendor-player-row">
-                <span>${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
-                <span>${escapeHtml(player.status || '-')}</span>
-                <span>${escapeHtml(fmtFinancialMoney(player, 'totalIn', 'total_in'))}</span>
-                <span>${escapeHtml(fmtFinancialMoney(player, 'totalOut', 'total_out'))}</span>
-                <span>${escapeHtml(fmtFinancialMoney(player, 'net', 'net'))}</span>
-                <span>${escapeHtml(fmtFinancialDate(player))}</span>
-                <span>${escapeHtml(fmtDate(player.linked_at))}</span>
-              </div>
-            `).join('')}
+    <main class="ops-main vp-main">
+      <div class="vp-content">
+        ${vendorPortalPageHeader({
+          title: 'My Players',
+          subtitle: 'Review attributed players and their financial activity.',
+          metaHtml: `<span class="vp-count-pill">${escapeHtml(total)} players</span>`
+        })}
+        <form id="vendorPortalPlayerFilters" class="card vp-filter-toolbar">
+          <label class="field-label vp-filter-search">
+            <span>Search</span>
+            <input id="vendorPortalPlayerQuery" value="${escapeHtml(state.vendorPortal.query || '')}" placeholder="Username or status" />
+          </label>
+          <label class="field-label">
+            <span>Sort by</span>
+            <select id="vendorPortalPlayerSort">
+              ${[
+                ['linked_at', 'Ownership Date'],
+                ['username', 'Username'],
+                ['status', 'Status'],
+                ['total_in', 'Total In'],
+                ['total_out', 'Total Out'],
+                ['net', 'Net'],
+                ['last_activity', 'Last Activity']
+              ].map(([value, label]) => `<option value="${value}" ${state.vendorPortal.sort === value ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </label>
+          <label class="field-label">
+            <span>Direction</span>
+            <select id="vendorPortalPlayerDir">
+              <option value="desc" ${state.vendorPortal.dir === 'desc' ? 'selected' : ''}>Descending</option>
+              <option value="asc" ${state.vendorPortal.dir === 'asc' ? 'selected' : ''}>Ascending</option>
+            </select>
+          </label>
+          <div class="vp-filter-actions">
+            <button class="button" type="submit">Apply</button>
+            <button class="button secondary" type="button" id="vendorPortalPlayerFiltersReset" ${hasFilters ? '' : 'disabled'}>Clear</button>
           </div>
-        ` : (!state.vendorPortal.loading ? '<div class="subtle">No players found.</div>' : '')}
-        <div class="settings-actions">
-          <button class="button secondary" type="button" data-vendor-portal-page="${Number(pagination.page || 1) - 1}" ${Number(pagination.page || 1) <= 1 ? 'disabled' : ''}>Previous</button>
-          <span class="subtle">Page ${escapeHtml(pagination.page || 1)} of ${escapeHtml(pagination.totalPages || 1)} / ${escapeHtml(pagination.total || 0)} players</span>
-          <button class="button secondary" type="button" data-vendor-portal-page="${Number(pagination.page || 1) + 1}" ${Number(pagination.page || 1) >= Number(pagination.totalPages || 1) ? 'disabled' : ''}>Next</button>
-        </div>
-      </section>
+        </form>
+        ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+        ${state.vendorPortal.loading ? '<div class="vp-loading">Loading players...</div>' : ''}
+        <section class="card vp-table-card">
+          ${state.vendorPortal.players.length ? `
+            <div class="vp-table-scroll">
+              <div class="vp-players-table" role="table" aria-label="My players">
+                <div class="vp-players-header" role="row">
+                  <span role="columnheader">Username</span>
+                  <span role="columnheader">Status</span>
+                  <span role="columnheader" class="vp-num">Total In</span>
+                  <span role="columnheader" class="vp-num">Total Out</span>
+                  <span role="columnheader" class="vp-num">Net</span>
+                  <span role="columnheader">Last Activity</span>
+                  <span role="columnheader">Ownership Date</span>
+                </div>
+                ${state.vendorPortal.players.map((player) => `
+                  <div class="vp-player-row" role="row">
+                    <span role="cell" class="vp-primary-cell">${escapeHtml(player.appbegUsername || player.appbeg_username || '-')}</span>
+                    <span role="cell">${vendorPortalStatusBadge(player.status)}</span>
+                    <span role="cell" class="vp-num">${escapeHtml(fmtFinancialMoney(player, 'totalIn', 'total_in'))}</span>
+                    <span role="cell" class="vp-num">${escapeHtml(fmtFinancialMoney(player, 'totalOut', 'total_out'))}</span>
+                    <span role="cell" class="vp-num">${escapeHtml(fmtFinancialMoney(player, 'net', 'net'))}</span>
+                    <span role="cell">${escapeHtml(fmtFinancialDate(player))}</span>
+                    <span role="cell">${escapeHtml(fmtDate(player.linked_at))}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+            <div class="vp-pagination">
+              <span class="subtle">Showing ${escapeHtml(start)}–${escapeHtml(end)} of ${escapeHtml(total)} players</span>
+              <div class="vp-pagination-actions">
+                <button class="button secondary" type="button" data-vendor-portal-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>Previous</button>
+                <button class="button secondary" type="button" data-vendor-portal-page="${page + 1}" ${page >= Number(pagination.totalPages || 1) ? 'disabled' : ''}>Next</button>
+              </div>
+            </div>
+          ` : (!state.vendorPortal.loading ? `
+            <div class="vp-empty-state">
+              <span class="vp-empty-icon" aria-hidden="true">${vpIcon('users')}</span>
+              <div class="vp-section-title">No players found</div>
+              <p class="vp-page-subtitle">Players attributed to your vendor account will appear here.</p>
+            </div>
+          ` : '')}
+        </section>
+      </div>
     </main>
   `;
 }
 
 function vendorPortalSettlementsWorkspace() {
+  const vendor = state.vendorPortal.dashboard || {};
+  const settlements = state.vendorPortal.settlements || [];
+  const settlementCount = settlements.length;
+  const totalPaid = (vendor.settlementAvailable ?? vendor.settlement_available) === false
+    ? 'Unavailable'
+    : fmtMoney(vendor.settlementTotal ?? vendor.settlement_total ?? 0);
   return `
-    <main class="ops-main vendors-main">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">Vendor Portal</div>
-          <h1>Settlement History</h1>
-        </div>
-      </header>
-      ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
-      ${state.vendorPortal.loading ? '<div class="subtle">Loading settlements...</div>' : ''}
-      <section class="card vendor-detail-card">
-        ${state.vendorPortal.settlements.length ? `
-          <div class="vendor-settlements-table">
-            <div class="vendor-settlements-header">
-              <span>Date</span>
-              <span>Amount</span>
-              <span>Notes</span>
-              <span>Running Outstanding</span>
-            </div>
-            ${state.vendorPortal.settlements.map((settlement) => `
-              <div class="vendor-settlement-row">
-                <span>${escapeHtml(fmtDate(settlement.settlementDate || settlement.settlement_date))}</span>
-                <span>${escapeHtml(fmtMoney(settlement.amount ?? settlement.settlementAmount ?? settlement.settlement_amount))}</span>
-                <span>${escapeHtml(settlement.notes || '-')}</span>
-                <span>${escapeHtml(fmtMoney(settlement.runningOutstanding ?? settlement.running_outstanding))}</span>
+    <main class="ops-main vp-main">
+      <div class="vp-content">
+        ${vendorPortalPageHeader({
+          title: 'Settlement History',
+          subtitle: 'Review completed and pending vendor settlements.'
+        })}
+        ${state.vendorPortal.error ? `<div class="settings-error">${escapeHtml(state.vendorPortal.error)}</div>` : ''}
+        ${state.vendorPortal.loading && !settlements.length && !vendor.name ? '<div class="vp-loading">Loading settlements...</div>' : ''}
+        <section class="vp-metrics-grid settlements">
+          ${vpMetricCard({ label: 'Total Receivable', value: fmtFinancialMoney(vendor, 'receivable', 'receivable'), tone: 'accent', icon: 'receivable' })}
+          ${vpMetricCard({ label: 'Total Paid', value: totalPaid, tone: 'paid', icon: 'paid' })}
+          ${vpMetricCard({ label: 'Outstanding Balance', value: fmtFinancialMoney(vendor, 'outstanding', 'outstanding'), tone: 'warning', icon: 'outstanding' })}
+          ${vpMetricCard({ label: 'Settlement Count', value: String(settlementCount), tone: 'neutral', icon: 'settlements' })}
+        </section>
+        <section class="card vp-table-card">
+          <div class="vp-section-title">Settlement History</div>
+          ${settlements.length ? `
+            <div class="vp-table-scroll">
+              <div class="vp-settlements-table" role="table" aria-label="Settlement history">
+                <div class="vp-settlements-header" role="row">
+                  <span role="columnheader">Date</span>
+                  <span role="columnheader" class="vp-num">Amount</span>
+                  <span role="columnheader">Status</span>
+                  <span role="columnheader">Notes</span>
+                  <span role="columnheader" class="vp-num">Running Outstanding</span>
+                </div>
+                ${settlements.map((settlement) => `
+                  <div class="vp-settlement-row" role="row">
+                    <span role="cell">${escapeHtml(fmtDate(settlement.settlementDate || settlement.settlement_date))}</span>
+                    <span role="cell" class="vp-num">${escapeHtml(fmtMoney(settlement.amount ?? settlement.settlementAmount ?? settlement.settlement_amount))}</span>
+                    <span role="cell"><span class="badge vp-status-badge paid">paid</span></span>
+                    <span role="cell">${escapeHtml(settlement.notes || '-')}</span>
+                    <span role="cell" class="vp-num">${escapeHtml(fmtMoney(settlement.runningOutstanding ?? settlement.running_outstanding))}</span>
+                  </div>
+                `).join('')}
               </div>
-            `).join('')}
-          </div>
-        ` : (!state.vendorPortal.loading ? '<div class="subtle">No settlements recorded yet.</div>' : '')}
-      </section>
+            </div>
+          ` : (!state.vendorPortal.loading ? `
+            <div class="vp-empty-state">
+              <span class="vp-empty-icon" aria-hidden="true">${vpIcon('empty')}</span>
+              <div class="vp-section-title">No settlements yet</div>
+              <p class="vp-page-subtitle">Your settlement history will appear here once the admin records a payment.</p>
+            </div>
+          ` : '')}
+        </section>
+      </div>
     </main>
   `;
 }
@@ -3284,9 +3449,9 @@ async function handlePaymentAction(action, button) {
 
 function render() {
   const items = (isVendor() ? [
-    { id: 'vendor-dashboard', label: 'Dashboard', icon: 'V' },
-    { id: 'vendor-players', label: 'My Players', icon: 'P' },
-    { id: 'vendor-settlements', label: 'Settlements', icon: '$' }
+    { id: 'vendor-dashboard', label: 'Dashboard', iconHtml: vpIcon('dashboard') },
+    { id: 'vendor-players', label: 'My Players', iconHtml: vpIcon('players') },
+    { id: 'vendor-settlements', label: 'Settlements', iconHtml: vpIcon('settlements') }
   ] : [
     { id: 'contacts', label: 'Contacts', icon: '💬' },
     { id: 'players', label: 'Players', icon: '👥' },
@@ -3310,7 +3475,7 @@ function render() {
   ]).filter((item) => !item.adminOnly || isAdmin());
   const navHtml = items.map((item) => `
     <button class="nav-item ${state.section === item.id ? 'active' : ''}" data-section="${item.id}" type="button">
-      <span class="nav-icon" aria-hidden="true">${item.icon}</span>
+      <span class="nav-icon" aria-hidden="true">${item.iconHtml || item.icon}</span>
       <span class="nav-label">${item.label}${item.badge ? ` <span class="nav-count-badge">${item.badge}</span>` : ''}</span>
     </button>
   `).join('');
@@ -3323,17 +3488,19 @@ function render() {
   }
 
   app.innerHTML = `
-    <div class="ops-shell section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
+    <div class="ops-shell ${isVendor() ? 'vendor-portal' : ''} section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
       <button type="button" class="nav-drawer-backdrop" data-nav-close aria-label="Close menu"></button>
       <aside class="sidebar" id="appSidebar">
         <div class="brand">AppBeg Ledger</div>
-        ${navHtml}
+        <nav class="sidebar-nav" aria-label="Primary">
+          ${navHtml}
+        </nav>
         <div class="user-bar">
           <div class="user-bar-meta">
             <div class="user-bar-name">${escapeHtml(state.authUser?.username || 'Admin')}</div>
             <div class="user-bar-role">${escapeHtml(state.authUser?.role || 'admin')}</div>
           </div>
-          <button type="button" class="button secondary small" id="logoutButton">Log out</button>
+          <button type="button" class="button ${isVendor() ? 'danger' : 'secondary'} small logout-button" id="logoutButton">Log out</button>
         </div>
       </aside>
       <div class="mobile-topbar mobile-only">
@@ -3811,6 +3978,16 @@ function bindEvents() {
     state.vendorPortal.query = form.querySelector('#vendorPortalPlayerQuery')?.value?.trim() || '';
     state.vendorPortal.sort = form.querySelector('#vendorPortalPlayerSort')?.value || 'linked_at';
     state.vendorPortal.dir = form.querySelector('#vendorPortalPlayerDir')?.value || 'desc';
+    state.vendorPortal.pagination = { ...(state.vendorPortal.pagination || {}), page: 1 };
+    await refreshVendorPortalPlayers();
+    render();
+  });
+
+  document.querySelector('#vendorPortalPlayerFiltersReset')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    state.vendorPortal.query = '';
+    state.vendorPortal.sort = 'linked_at';
+    state.vendorPortal.dir = 'desc';
     state.vendorPortal.pagination = { ...(state.vendorPortal.pagination || {}), page: 1 };
     await refreshVendorPortalPlayers();
     render();
