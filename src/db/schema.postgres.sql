@@ -637,3 +637,22 @@ CREATE TABLE IF NOT EXISTS vendor_settlements (
 
 CREATE INDEX IF NOT EXISTS idx_vendor_settlements_vendor_date
   ON vendor_settlements(vendor_id, settlement_date DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS vendor_cashout_events (
+  id BIGSERIAL PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL,
+  player_uid TEXT NOT NULL,
+  vendor_id BIGINT NOT NULL REFERENCES vendors(id),
+  amount_npr NUMERIC(18, 2) NOT NULL CHECK (amount_npr > 0),
+  source TEXT NOT NULL DEFAULT 'appbeg_cashout',
+  metadata_json TEXT,
+  occurred_at TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_vendor_created
+  ON vendor_cashout_events(vendor_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_task
+  ON vendor_cashout_events(task_id);

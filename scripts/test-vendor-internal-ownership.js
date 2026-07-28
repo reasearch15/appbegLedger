@@ -141,6 +141,7 @@ async function testOwnedUnknownAndNoVendorPlayers() {
         calls.push(playerUids);
         return [{
           appbeg_player_uid: 'owned_uid',
+          vendor_id: 12,
           vendor_name: 'Royal VIP East',
           vendor_code: 'VND-000012',
           vendor_status: 'suspended',
@@ -157,6 +158,7 @@ async function testOwnedUnknownAndNoVendorPlayers() {
     assert.equal(res.payload.configured, true);
     assert.deepEqual(res.payload.players.owned_uid, {
       owned: true,
+      vendorId: 12,
       vendorName: 'Royal VIP East',
       vendorCode: 'VND-000012',
       vendorStatus: 'suspended',

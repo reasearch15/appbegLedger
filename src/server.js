@@ -39,6 +39,7 @@ import { registerAppBegPlayerRoutes } from './routes/appbegPlayers.js';
 import { registerOngoingRoutes } from './routes/ongoing.js';
 import { registerVendorRoutes } from './routes/vendors.js';
 import { registerInternalVendorOwnershipRoutes } from './routes/internalVendorOwnership.js';
+import { registerInternalVendorCashoutRoutes } from './routes/internalVendorCashoutCompleted.js';
 import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
@@ -215,6 +216,7 @@ registerAppBegPlayerRoutes(app, { appbegStore });
 registerOngoingRoutes(app, { store });
 registerVendorRoutes(app, { store, requireAdmin, requireVendor, appbegStore });
 registerInternalVendorOwnershipRoutes(app, { store });
+registerInternalVendorCashoutRoutes(app, { store, appbegStore, io });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });

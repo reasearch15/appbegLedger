@@ -6575,6 +6575,144 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return rows.map(normalizeVendorPlayer);
   }
 
+  async function getVendorCashoutEventByEventId(eventId) {
+    const id = String(eventId || '').trim();
+    if (!id) return null;
+    const row = await db.prepare(`
+      SELECT
+        id, event_id, task_id, player_uid, vendor_id, amount_npr, source,
+        metadata_json, occurred_at, created_at
+      FROM vendor_cashout_events
+      WHERE event_id = ?
+      LIMIT 1
+    `).get(id);
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      eventId: String(row.event_id),
+      taskId: String(row.task_id),
+      playerUid: String(row.player_uid),
+      vendorId: Number(row.vendor_id),
+      amountNpr: Number(row.amount_npr),
+      source: String(row.source || 'appbeg_cashout'),
+      metadata: parseJsonField(row.metadata_json) || {},
+      occurredAt: row.occurred_at || null,
+      createdAt: row.created_at || null
+    };
+  }
+
+  /**
+   * Idempotently record an AppBeg cashout for vendor accounting.
+   * Does not mutate stored vendor aggregates — Total Out is derived from AppBeg events.
+   */
+  async function recordVendorCashoutCompleted(input = {}) {
+    const eventId = String(input.eventId || '').trim();
+    const taskId = String(input.taskId || '').trim();
+    const playerUid = String(input.playerUid || '').trim();
+    const vendorId = Number(input.vendorId);
+    const amountNpr = Number(input.amountNpr);
+    const source = String(input.source || 'appbeg_cashout').trim() || 'appbeg_cashout';
+    const occurredAt = String(input.occurredAt || '').trim() || null;
+    const metadataJson = JSON.stringify(input.metadata && typeof input.metadata === 'object' ? input.metadata : {});
+
+    if (!eventId || !taskId || !playerUid) {
+      const error = new Error('eventId, taskId, and playerUid are required.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (!Number.isInteger(vendorId) || vendorId <= 0) {
+      const error = new Error('vendorId is invalid.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+    if (!Number.isFinite(amountNpr) || amountNpr <= 0) {
+      const error = new Error('amountNpr must be greater than 0.');
+      error.code = 'VALIDATION_ERROR';
+      throw error;
+    }
+
+    const vendor = await getVendor(vendorId);
+    if (!vendor) {
+      const error = new Error('Vendor not found.');
+      error.code = 'VENDOR_NOT_FOUND';
+      throw error;
+    }
+
+    const existing = await getVendorCashoutEventByEventId(eventId);
+    if (existing) {
+      return { inserted: false, duplicate: true, event: existing, vendor };
+    }
+
+    if (sql.isPostgres) {
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const existingTxn = await client.query(
+          `SELECT id FROM vendor_cashout_events WHERE event_id = $1 LIMIT 1 FOR UPDATE`,
+          [eventId]
+        );
+        if (existingTxn.rows.length) {
+          await client.query('COMMIT');
+          const event = await getVendorCashoutEventByEventId(eventId);
+          return { inserted: false, duplicate: true, event, vendor };
+        }
+        await client.query(
+          `
+            INSERT INTO vendor_cashout_events (
+              event_id, task_id, player_uid, vendor_id, amount_npr, source, metadata_json, occurred_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `,
+          [eventId, taskId, playerUid, vendorId, amountNpr, source, metadataJson, occurredAt]
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => null);
+        if (String(error?.code || '') === '23505' || /unique/i.test(String(error?.message || ''))) {
+          const event = await getVendorCashoutEventByEventId(eventId);
+          return { inserted: false, duplicate: true, event, vendor };
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+      const event = await getVendorCashoutEventByEventId(eventId);
+      return { inserted: true, duplicate: false, event, vendor };
+    }
+
+    try {
+      const insertSqlite = db.db.transaction(() => {
+        const existingRow = db.db.prepare(
+          'SELECT id FROM vendor_cashout_events WHERE event_id = ? LIMIT 1'
+        ).get(eventId);
+        if (existingRow) {
+          return { duplicate: true };
+        }
+        db.db.prepare(`
+          INSERT INTO vendor_cashout_events (
+            event_id, task_id, player_uid, vendor_id, amount_npr, source, metadata_json, occurred_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(eventId, taskId, playerUid, vendorId, amountNpr, source, metadataJson, occurredAt);
+        return { duplicate: false };
+      });
+      const result = insertSqlite();
+      const event = await getVendorCashoutEventByEventId(eventId);
+      return {
+        inserted: !result.duplicate,
+        duplicate: Boolean(result.duplicate),
+        event,
+        vendor
+      };
+    } catch (error) {
+      if (/UNIQUE/i.test(String(error?.message || ''))) {
+        const event = await getVendorCashoutEventByEventId(eventId);
+        return { inserted: false, duplicate: true, event, vendor };
+      }
+      throw error;
+    }
+  }
+
   async function listVendorOwnershipByPlayerUids(playerUids = []) {
     const uids = [...new Set((Array.isArray(playerUids) ? playerUids : [])
       .map((uid) => String(uid || '').trim())
@@ -6588,6 +6726,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       rows.push(...await db.prepare(`
         SELECT
           vp.appbeg_player_uid,
+          vp.vendor_id,
           vp.linked_at AS ownership_date,
           v.name AS vendor_name,
           v.vendor_code,
@@ -6848,6 +6987,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listVendorPlayers,
     listAllVendorPlayers,
     listVendorOwnershipByPlayerUids,
+    getVendorCashoutEventByEventId,
+    recordVendorCashoutCompleted,
     updateVendorCommissionPercentage,
     listVendorSettlements,
     listAllVendorSettlements,
@@ -7638,6 +7779,23 @@ async function migrate(db) {
     )
   `);
   await db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_settlements_vendor_date ON vendor_settlements(vendor_id, settlement_date DESC, id DESC)');
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS vendor_cashout_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      task_id TEXT NOT NULL,
+      player_uid TEXT NOT NULL,
+      vendor_id INTEGER NOT NULL,
+      amount_npr REAL NOT NULL CHECK (amount_npr > 0),
+      source TEXT NOT NULL DEFAULT 'appbeg_cashout',
+      metadata_json TEXT,
+      occurred_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_vendor_created ON vendor_cashout_events(vendor_id, created_at DESC, id DESC)');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_task ON vendor_cashout_events(task_id)');
 
   const users = await db.prepare('SELECT id, created_at, first_seen FROM telegram_users').all();
   const eventCount = await db.prepare('SELECT COUNT(*) AS count FROM activity_events WHERE telegram_user_id = ? AND event_type = ?');

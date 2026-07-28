@@ -703,3 +703,25 @@ CREATE TABLE IF NOT EXISTS vendor_settlements (
 
 CREATE INDEX IF NOT EXISTS idx_vendor_settlements_vendor_date
   ON vendor_settlements(vendor_id, settlement_date DESC, id DESC);
+
+-- Immutable AppBeg cashout notifications for vendor accounting idempotency.
+-- Total Out / Net / receivable remain derived from AppBeg financial_events_cache.
+CREATE TABLE IF NOT EXISTS vendor_cashout_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL,
+  player_uid TEXT NOT NULL,
+  vendor_id INTEGER NOT NULL,
+  amount_npr REAL NOT NULL CHECK (amount_npr > 0),
+  source TEXT NOT NULL DEFAULT 'appbeg_cashout',
+  metadata_json TEXT,
+  occurred_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_vendor_created
+  ON vendor_cashout_events(vendor_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_task
+  ON vendor_cashout_events(task_id);
