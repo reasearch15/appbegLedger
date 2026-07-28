@@ -52,7 +52,10 @@ const FINANCIAL_COLUMN_CANDIDATES = {
 };
 const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'firebase_id', 'id'];
 const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
-const FINANCIAL_OUT_TYPES = ['cashout', 'redeem'];
+// Vendor Total Out is staff/player cash withdrawals only.
+// Game `redeem` credits player cash from a game balance — it must not count as Total Out
+// (otherwise redeem + later cashout double-counts the same funds).
+const FINANCIAL_OUT_TYPES = ['cashout'];
 const FINANCIAL_LEDGER_CREDIT_TYPES = ['coadmin_coin_add', 'ledger_deposit_credit'];
 const FINANCIAL_LEDGER_SOURCE_FLOWS = ['registration_initial_deposit', 'registered_user_deposit'];
 const FINANCIAL_COMPLETED_STATUSES = ['completed'];
@@ -474,9 +477,9 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
       continue;
     }
     const isIn = FINANCIAL_IN_TYPES.includes(type) || isLedgerCreditIn(row);
-    const isOut = type === 'cashout'
-      ? isFinalCashoutOut(row)
-      : FINANCIAL_OUT_TYPES.includes(type);
+    // Only authoritative completed cashouts (type=cashout + task/request ref, not reversed).
+    // Excludes cashout_request_deduct, cashout_decline_refund, redeem, pending/cancelled rows.
+    const isOut = FINANCIAL_OUT_TYPES.includes(type) && isFinalCashoutOut(row);
     if (!isIn && !isOut) {
       counts.excluded_type += 1;
       continue;

@@ -75,7 +75,7 @@ function fakeFinancialStore(records = []) {
       this.calls.push(uids);
       const completed = new Set(['completed']);
       const inTypes = new Set(['deposit', 'recharge']);
-      const outTypes = new Set(['cashout', 'redeem']);
+      const outTypes = new Set(['cashout']);
       const players = uids.map((uid) => {
         const seen = new Set();
         const totals = records
@@ -233,9 +233,9 @@ async function testMixedCompletedFinancialRecords() {
     const first = listRes.payload.vendors.find((vendor) => vendor.id === firstVendor.id);
     const second = listRes.payload.vendors.find((vendor) => vendor.id === secondVendor.id);
     assert.equal(first.totalIn, 125);
-    assert.equal(first.totalOut, 50);
-    assert.equal(first.net, 75);
-    assert.equal(first.lastActivity, '2026-01-05T00:00:00.000Z');
+    assert.equal(first.totalOut, 40);
+    assert.equal(first.net, 85);
+    assert.equal(first.lastActivity, '2026-01-03T00:00:00.000Z');
     assert.equal(second.totalIn, 7);
     assert.equal(second.totalOut, 0);
     assert.equal(second.net, 7);
@@ -246,12 +246,12 @@ async function testMixedCompletedFinancialRecords() {
       params: { id: String(firstVendor.id) }
     });
     assert.equal(detailRes.payload.vendor.totalIn, 125);
-    assert.equal(detailRes.payload.vendor.totalOut, 50);
+    assert.equal(detailRes.payload.vendor.totalOut, 40);
     assert.equal(detailRes.payload.vendor.totalIn, first.totalIn);
     assert.equal(detailRes.payload.vendor.totalOut, first.totalOut);
     assert.equal(detailRes.payload.vendor.net, first.net);
     assert.equal(detailRes.payload.players.find((player) => player.appbegPlayerUid === 'uid_a').totalIn, 125);
-    assert.equal(detailRes.payload.players.find((player) => player.appbegPlayerUid === 'uid_b').totalOut, 10);
+    assert.equal(detailRes.payload.players.find((player) => player.appbegPlayerUid === 'uid_b').totalOut, 0);
   });
 }
 

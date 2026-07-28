@@ -86,7 +86,7 @@ function fakeFinancialStore(records = []) {
       this.calls.push(uids);
       const completed = new Set(['completed']);
       const inTypes = new Set(['deposit', 'recharge']);
-      const outTypes = new Set(['cashout', 'redeem']);
+      const outTypes = new Set(['cashout']);
       const includedTypes = new Set([...inTypes, ...outTypes]);
       const players = uids.map((uid) => {
         const seen = new Set();
@@ -215,10 +215,10 @@ async function testDashboardSummaryAndListDetailParity() {
     assert.equal(listRes.payload.vendors[0].name, 'High Net');
     assert.equal(listRes.payload.vendors[0].activePlayersToday, 2);
     assert.equal(listRes.payload.vendors[0].totalIn, 600);
-    assert.equal(listRes.payload.vendors[0].totalOut, 100);
-    assert.equal(listRes.payload.vendors[0].net, 500);
-    assert.equal(listRes.payload.vendors[0].receivable, 100);
-    assert.equal(listRes.payload.vendors[0].outstanding, 59.25);
+    assert.equal(listRes.payload.vendors[0].totalOut, 0);
+    assert.equal(listRes.payload.vendors[0].net, 600);
+    assert.equal(listRes.payload.vendors[0].receivable, 120);
+    assert.equal(listRes.payload.vendors[0].outstanding, 79.25);
     assert.equal(listRes.payload.vendors[0].latestSettlementAmount, 15.25);
     assert.equal(listRes.payload.vendors[0].latestSettlementDate, '2026-06-10');
     assert.equal(listRes.payload.vendors[1].hasSettlements, false);
@@ -305,7 +305,7 @@ async function testActivePlayersTodayBoundariesAndEventFiltering() {
     const res = await list(app);
     assert.equal(res.payload.vendors[0].activePlayersToday, 2);
     assert.equal(res.payload.vendors[0].totalIn, 50);
-    assert.equal(res.payload.vendors[0].totalOut, 15);
+    assert.equal(res.payload.vendors[0].totalOut, 5);
   });
 }
 

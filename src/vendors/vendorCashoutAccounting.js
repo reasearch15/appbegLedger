@@ -2,6 +2,11 @@
  * Pure vendor cashout accounting helpers.
  * Vendor Total Out / Net / receivable are derived from AppBeg financial events
  * (authoritative) plus commission%; Ledger does not maintain a competing aggregate.
+ *
+ * Total Out = sum of unique completed `cashout` financial events (deduped by cashout task id).
+ * Game `redeem` events are NOT Total Out (they credit player cash from a game).
+ * Declined/cancelled cashouts never write type=cashout; request debits/refunds are excluded.
+ * Net = Total In − Total Out
  */
 
 export function roundCurrency(amount) {

@@ -2831,7 +2831,7 @@ function vendorPortalDashboardWorkspace() {
         </section>
         <section class="vp-metrics-grid financial">
           ${vpMetricCard({ label: 'Total In', value: fmtFinancialMoney(vendor, 'totalIn', 'total_in'), tone: 'positive', icon: 'inflow', hint: 'Player deposits attributed to you' })}
-          ${vpMetricCard({ label: 'Total Out', value: fmtFinancialMoney(vendor, 'totalOut', 'total_out'), tone: 'danger', icon: 'outflow', hint: 'Player withdrawals attributed to you' })}
+          ${vpMetricCard({ label: 'Total Out', value: fmtFinancialMoney(vendor, 'totalOut', 'total_out'), tone: 'danger', icon: 'outflow', hint: 'Completed player cashouts attributed to you' })}
           ${vpMetricCard({ label: 'Net', value: fmtFinancialMoney(vendor, 'net', 'net'), tone: netTone, icon: 'net', hint: 'Total In − Total Out' })}
           ${vpMetricCard({ label: 'Receivable', value: fmtFinancialMoney(vendor, 'receivable', 'receivable'), tone: 'accent', icon: 'receivable', hint: 'Net × commission %' })}
           ${vpMetricCard({ label: 'Outstanding', value: fmtFinancialMoney(vendor, 'outstanding', 'outstanding'), tone: 'warning', icon: 'outstanding', hint: 'Receivable − settlements paid' })}
