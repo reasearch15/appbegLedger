@@ -7,7 +7,9 @@ const READ_ONLY_CALLBACKS = new Set([
   'bot:main_menu',
   'bot:my_account',
   'bot:status',
-  'bot:how_it_works'
+  'bot:how_it_works',
+  'bot:support:menu',
+  'bot:support:custom_inquiry'
 ]);
 
 const PERSISTENT_NAVIGATION_CALLBACKS = new Set([
@@ -15,7 +17,9 @@ const PERSISTENT_NAVIGATION_CALLBACKS = new Set([
   'bot:deposit',
   'bot:main_menu',
   'bot:my_account',
-  'bot:how_it_works'
+  'bot:how_it_works',
+  'bot:support:menu',
+  'bot:support:custom_inquiry'
 ]);
 
 export function isPersistentNavigationCallbackAction(action) {
@@ -30,7 +34,7 @@ export function hasCallbackButtons(buttons = []) {
 export function isStateChangingCallbackAction(action) {
   const normalized = normalizeCallbackAction(action);
   if (!normalized) return false;
-  if (normalized === 'bot:how_it_works' || normalized.startsWith('bot:help:')) return false;
+  if (normalized === 'bot:how_it_works' || normalized.startsWith('bot:help:') || normalized.startsWith('bot:support:')) return false;
   if (READ_ONLY_CALLBACKS.has(normalized)) return false;
   return normalized.startsWith('bot:')
     || normalized.startsWith('register:')

@@ -10,7 +10,7 @@ import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
 import { accountViewSnapshotPatch, ACCOUNT_DETAILS_HIDDEN_TEXT, ACCOUNT_SENSITIVE_LOG_TEXT } from './accountView.js';
-import { deliverFreePlayOwnerNotification } from './freePlayRequest.js';
+import { sendSupportBotNotification, SUPPORT_DELIVERY_FAILED_TEXT } from './supportNotificationBot.js';
 import {
   DEPOSIT_BOT_SESSION_FLOW,
   DEPOSIT_BOT_SESSION_STEP_AMOUNT,
@@ -31,12 +31,13 @@ export function shouldUseRegistrationBot(job, automationState = {}, contact = nu
   if (job.force_entry_menu) return true;
   if (isActiveDepositSession(automationState, botSession)) return true;
   const flow = automationState.current_flow || automationState.currentFlow;
-  if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit') return true;
+  if (flow === 'bot_registration' || flow === 'registration_info' || flow === 'registered_deposit' || flow === 'contact_support') return true;
   const step = String(automationState.current_step || automationState.currentStep || '');
-  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'waiting_amount', 'waiting_payment_name'].includes(step)) return true;
+  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'waiting_amount', 'waiting_payment_name', 'awaiting_support_inquiry'].includes(step)) return true;
   const info = automationState.registration_info || automationState.registrationInfo || {};
   // Keep amount entry on the deposit bot even if flow was wiped while the prompt was shown.
   if (info.deposit_in_progress || info.deposit_awaiting_payment) return true;
+  if (info.support_request_status === 'awaiting_question') return true;
   const text = String(job.input_text || '').trim();
   if (/^\/(start|register|status|support|cancel|deposit)(@\w+)?(\s|$)/i.test(text)) return true;
   if (isGreetingEntryText(text)) return true;
@@ -490,24 +491,51 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       accountViewHandled = true;
     }
 
-    if (decision.freePlayOwnerNotify) {
-      try {
-        await deliverFreePlayOwnerNotification({
-          store,
-          contact,
-          bot: bot || globalThis.telegramBot || null,
-          notify: decision.freePlayOwnerNotify
-        });
-      } catch (error) {
-        if (
-          decision.freePlayOwnerNotify.claimedAt
-          && typeof store.releaseFreePlayRequestClaim === 'function'
-        ) {
-          await store.releaseFreePlayRequestClaim(
-            contact.id,
-            decision.freePlayOwnerNotify.claimedAt
-          ).catch(() => null);
+    if (decision.supportOwnerNotify) {
+      const notify = decision.supportOwnerNotify;
+      const delivery = await deliverSupportOwnerNotification({
+        store,
+        contact,
+        job,
+        notify
+      });
+
+      if (delivery.delivered || delivery.alreadySent) {
+        decision.replies = [{
+          text: notify.playerSuccessText || 'Your support request has been sent.'
+        }];
+        if (delivery.delivered && (notify.kind === 'support' || notify.kind === 'inquiry')) {
+          const currentInfo = (await store.getAutomationState(contact.id).catch(() => null))?.registration_info || {};
+          await store.updateAutomationState(contact.id, {
+            registrationInfo: {
+              ...currentInfo,
+              support_request_status: 'sent',
+              support_request_error: null,
+              support_request_sent_at: new Date().toISOString()
+            }
+          }).catch(() => null);
         }
+      } else {
+        const failureText = notify.playerFailureText || SUPPORT_DELIVERY_FAILED_TEXT;
+        if (notify.preserveMessageOnFailure || notify.kind === 'support' || notify.kind === 'inquiry') {
+          const currentInfo = (await store.getAutomationState(contact.id).catch(() => null))?.registration_info || {};
+          await store.updateAutomationState(contact.id, {
+            registrationInfo: {
+              ...currentInfo,
+              support_request_status: 'failed',
+              support_request_error: String(
+                delivery.error?.code || delivery.error?.message || delivery.reason || 'send_failed'
+              ).slice(0, 200)
+            }
+          }).catch(() => null);
+        }
+        await queueBotReply({
+          store,
+          user: contact,
+          text: failureText,
+          bot: bot || globalThis.telegramBot || null
+        });
+        const error = delivery.error || new Error(delivery.reason || 'Support notification delivery failed.');
         throw error;
       }
     }
@@ -668,6 +696,64 @@ async function sendDecisionReplies({ store, contact, decision, job, bot, beforeS
       await sendRegistrationRecoveryReply({ store, contact, bot });
       throw error;
     }
+  }
+}
+
+async function deliverSupportOwnerNotification({ store, contact, job, notify }) {
+  const kind = notify?.kind || 'support';
+  const fingerprint = String(notify?.fingerprint || kind);
+  let supportLock = null;
+
+  if (kind !== 'freeplay' && typeof store.tryAcquireSupportNotifyLock === 'function') {
+    supportLock = await store.tryAcquireSupportNotifyLock(contact.id, fingerprint);
+    if (!supportLock?.ok) {
+      return {
+        delivered: false,
+        alreadySent: Boolean(supportLock?.alreadySent),
+        reason: supportLock?.reason || 'lock_failed'
+      };
+    }
+  }
+
+  try {
+    const result = await sendSupportBotNotification({
+      kind,
+      text: notify.text,
+      meta: {
+        contactId: contact.id,
+        jobId: job?.id ?? null,
+        updateId: job?.update_id ?? null,
+        action: job?.action ?? null,
+        topic: notify.topic ?? null
+      }
+    });
+
+    if (kind === 'freeplay') {
+      if (typeof store.commitFreePlayRequest === 'function') {
+        await store.commitFreePlayRequest(contact.id, {
+          inflightAt: notify.freePlayInflightAt || null
+        });
+      }
+    } else if (supportLock && typeof store.commitSupportNotifyLock === 'function') {
+      await store.commitSupportNotifyLock(contact.id, {
+        fingerprint,
+        inflightAt: supportLock.inflightAt
+      });
+    }
+
+    return { delivered: true, messageId: result.messageId };
+  } catch (error) {
+    if (kind === 'freeplay' && typeof store.releaseFreePlaySendLock === 'function') {
+      await store.releaseFreePlaySendLock(contact.id, notify.freePlayInflightAt || null).catch(() => null);
+    } else if (supportLock && typeof store.releaseSupportNotifyLock === 'function') {
+      await store.releaseSupportNotifyLock(contact.id, supportLock.inflightAt).catch(() => null);
+    }
+    return {
+      delivered: false,
+      alreadySent: false,
+      reason: 'send_failed',
+      error
+    };
   }
 }
 

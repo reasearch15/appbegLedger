@@ -837,17 +837,21 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return user ? hydrateUser(user) : null;
   }
 
-  async function tryClaimFreePlayRequest(contactId, { cooldownMs = 12 * 60 * 60 * 1000 } = {}) {
+  async function tryAcquireFreePlaySendLock(contactId, {
+    cooldownMs = 12 * 60 * 60 * 1000,
+    inflightMs = 120000
+  } = {}) {
     const id = Number(contactId);
     if (!Number.isFinite(id) || id <= 0) {
       return { ok: false, reason: 'invalid_contact' };
     }
     const now = new Date();
     const nowText = now.toISOString();
-    const cutoff = new Date(now.getTime() - Math.max(0, Number(cooldownMs) || 0)).toISOString();
+    const cooldownCutoff = new Date(now.getTime() - Math.max(0, Number(cooldownMs) || 0)).toISOString();
+    const inflightCutoff = new Date(now.getTime() - Math.max(1000, Number(inflightMs) || 120000)).toISOString();
     const result = await db.prepare(`
       UPDATE telegram_users
-      SET freeplay_requested_at = ?,
+      SET freeplay_request_inflight_at = ?,
           updated_at = ?
       WHERE id = ?
         AND (
@@ -855,36 +859,182 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
           OR freeplay_requested_at = ''
           OR freeplay_requested_at <= ?
         )
-    `).run(nowText, nowText, id, cutoff);
+        AND (
+          freeplay_request_inflight_at IS NULL
+          OR freeplay_request_inflight_at = ''
+          OR freeplay_request_inflight_at <= ?
+        )
+    `).run(nowText, nowText, id, cooldownCutoff, inflightCutoff);
 
     if (!result.changes) {
       const row = await db.prepare(`
-        SELECT freeplay_requested_at
+        SELECT freeplay_requested_at, freeplay_request_inflight_at
         FROM telegram_users
         WHERE id = ?
       `).get(id);
+      const inflightActive = row?.freeplay_request_inflight_at
+        && row.freeplay_request_inflight_at > inflightCutoff;
       return {
         ok: false,
-        reason: 'cooldown_active',
-        requestedAt: row?.freeplay_requested_at || null
+        reason: inflightActive ? 'inflight' : 'cooldown_active',
+        requestedAt: row?.freeplay_requested_at || null,
+        inflightAt: row?.freeplay_request_inflight_at || null
       };
     }
 
-    return { ok: true, reason: 'claimed', requestedAt: nowText };
+    return { ok: true, reason: 'lock_acquired', inflightAt: nowText };
   }
 
-  async function releaseFreePlayRequestClaim(contactId, claimedAt) {
+  async function commitFreePlayRequest(contactId, { inflightAt = null } = {}) {
     const id = Number(contactId);
-    if (!Number.isFinite(id) || id <= 0 || !claimedAt) {
-      return { ok: false, reason: 'invalid_release' };
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false, reason: 'invalid_contact' };
     }
+    const nowText = nowIso();
+    const result = inflightAt
+      ? await db.prepare(`
+          UPDATE telegram_users
+          SET freeplay_requested_at = ?,
+              freeplay_request_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+            AND freeplay_request_inflight_at = ?
+        `).run(nowText, nowText, id, String(inflightAt))
+      : await db.prepare(`
+          UPDATE telegram_users
+          SET freeplay_requested_at = ?,
+              freeplay_request_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+        `).run(nowText, nowText, id);
+    return {
+      ok: Boolean(result.changes),
+      reason: result.changes ? 'committed' : 'not_matched',
+      requestedAt: nowText
+    };
+  }
+
+  async function releaseFreePlaySendLock(contactId, inflightAt = null) {
+    const id = Number(contactId);
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false, reason: 'invalid_contact' };
+    }
+    const result = inflightAt
+      ? await db.prepare(`
+          UPDATE telegram_users
+          SET freeplay_request_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+            AND freeplay_request_inflight_at = ?
+        `).run(nowIso(), id, String(inflightAt))
+      : await db.prepare(`
+          UPDATE telegram_users
+          SET freeplay_request_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+        `).run(nowIso(), id);
+    return { ok: Boolean(result.changes), reason: result.changes ? 'released' : 'not_matched' };
+  }
+
+  async function tryAcquireSupportNotifyLock(contactId, fingerprint, {
+    windowMs = 60000,
+    inflightMs = 120000
+  } = {}) {
+    const id = Number(contactId);
+    const key = String(fingerprint || '').trim().slice(0, 120);
+    if (!Number.isFinite(id) || id <= 0 || !key) {
+      return { ok: false, reason: 'invalid_lock' };
+    }
+    const now = new Date();
+    const nowText = now.toISOString();
+    const windowCutoff = new Date(now.getTime() - Math.max(1000, Number(windowMs) || 60000)).toISOString();
+    const inflightCutoff = new Date(now.getTime() - Math.max(1000, Number(inflightMs) || 120000)).toISOString();
+
+    const existing = await db.prepare(`
+      SELECT support_notify_inflight_at, support_notify_last_at, support_notify_last_key
+      FROM telegram_users
+      WHERE id = ?
+    `).get(id);
+
+    if (
+      existing?.support_notify_last_key === key
+      && existing?.support_notify_last_at
+      && existing.support_notify_last_at > windowCutoff
+    ) {
+      return {
+        ok: false,
+        reason: 'duplicate_recent',
+        alreadySent: true,
+        lastAt: existing.support_notify_last_at
+      };
+    }
+
     const result = await db.prepare(`
       UPDATE telegram_users
-      SET freeplay_requested_at = NULL,
+      SET support_notify_inflight_at = ?,
           updated_at = ?
       WHERE id = ?
-        AND freeplay_requested_at = ?
-    `).run(nowIso(), id, String(claimedAt));
+        AND (
+          support_notify_inflight_at IS NULL
+          OR support_notify_inflight_at = ''
+          OR support_notify_inflight_at <= ?
+        )
+    `).run(nowText, nowText, id, inflightCutoff);
+
+    if (!result.changes) {
+      return { ok: false, reason: 'inflight', alreadySent: false };
+    }
+
+    return { ok: true, reason: 'lock_acquired', inflightAt: nowText, fingerprint: key };
+  }
+
+  async function commitSupportNotifyLock(contactId, { fingerprint, inflightAt = null } = {}) {
+    const id = Number(contactId);
+    const key = String(fingerprint || '').trim().slice(0, 120);
+    if (!Number.isFinite(id) || id <= 0 || !key) {
+      return { ok: false, reason: 'invalid_commit' };
+    }
+    const nowText = nowIso();
+    const result = inflightAt
+      ? await db.prepare(`
+          UPDATE telegram_users
+          SET support_notify_last_at = ?,
+              support_notify_last_key = ?,
+              support_notify_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+            AND support_notify_inflight_at = ?
+        `).run(nowText, key, nowText, id, String(inflightAt))
+      : await db.prepare(`
+          UPDATE telegram_users
+          SET support_notify_last_at = ?,
+              support_notify_last_key = ?,
+              support_notify_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+        `).run(nowText, key, nowText, id);
+    return { ok: Boolean(result.changes), reason: result.changes ? 'committed' : 'not_matched' };
+  }
+
+  async function releaseSupportNotifyLock(contactId, inflightAt = null) {
+    const id = Number(contactId);
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false, reason: 'invalid_contact' };
+    }
+    const result = inflightAt
+      ? await db.prepare(`
+          UPDATE telegram_users
+          SET support_notify_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+            AND support_notify_inflight_at = ?
+        `).run(nowIso(), id, String(inflightAt))
+      : await db.prepare(`
+          UPDATE telegram_users
+          SET support_notify_inflight_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+        `).run(nowIso(), id);
     return { ok: Boolean(result.changes), reason: result.changes ? 'released' : 'not_matched' };
   }
 
@@ -6850,8 +7000,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listUsers,
     getStats,
     getUserProfile,
-    tryClaimFreePlayRequest,
-    releaseFreePlayRequestClaim,
+    tryAcquireFreePlaySendLock,
+    commitFreePlayRequest,
+    releaseFreePlaySendLock,
+    tryAcquireSupportNotifyLock,
+    commitSupportNotifyLock,
+    releaseSupportNotifyLock,
     listMessagesForUser,
     listNotesForUser,
     listTimelineForUser,
@@ -7317,6 +7471,10 @@ async function migrate(db) {
     ['registration_method', 'TEXT'],
     ['registration_payment_cooldown_until', 'TEXT'],
     ['freeplay_requested_at', 'TEXT'],
+    ['freeplay_request_inflight_at', 'TEXT'],
+    ['support_notify_inflight_at', 'TEXT'],
+    ['support_notify_last_at', 'TEXT'],
+    ['support_notify_last_key', 'TEXT'],
     ['bot_enabled', 'INTEGER NOT NULL DEFAULT 1'],
     ['bot_paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['needs_staff_review', 'INTEGER NOT NULL DEFAULT 0'],

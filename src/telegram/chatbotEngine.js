@@ -69,6 +69,17 @@ import {
   decideAskFreePlayRequest
 } from './freePlayRequest.js';
 import {
+  CONTACT_SUPPORT_FLOW,
+  SUPPORT_INQUIRY_STEP,
+  SUPPORT_MENU_ACTION,
+  SUPPORT_CUSTOM_INQUIRY_ACTION,
+  SUPPORT_TOPIC_PREFIX,
+  decideContactSupportAction,
+  decideSupportInquiryMessage,
+  isContactSupportAction,
+  isSupportInquiryStep
+} from './contactSupportFlow.js';
+import {
   ACCOUNT_DETAILS_HIDDEN_TEXT,
   buildMissingAccountButtons,
   buildMyAccountButtons,
@@ -192,6 +203,9 @@ export function isChatbotButtonAction(action) {
     || value === 'flow:registration_info'
     || value.startsWith('bot:payment_app:')
     || value.startsWith(HELP_TOPIC_PREFIX)
+    || value.startsWith(SUPPORT_TOPIC_PREFIX)
+    || value === SUPPORT_MENU_ACTION
+    || value === SUPPORT_CUSTOM_INQUIRY_ACTION
     || value.startsWith('payment_app:');
 }
 
@@ -411,6 +425,11 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     });
   }
 
+  // Use raw step — normalizeStep is registration-oriented and maps unknown steps to "welcome".
+  if (!action && isSupportInquiryStep(flow, step)) {
+    return decideSupportInquiryMessage({ contact, info, text });
+  }
+
   if (!action && !registrationInProgress && !depositSessionActive && isGreetingEntryText(text)) {
     return await buildStateAwareEntryMenu({
       store,
@@ -475,7 +494,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   }
 
   if (action === 'staff:takeover' || action === 'bot:talk_to_staff') {
-    return talkToStaffDecision();
+    return decideContactSupportAction({ action, contact, info });
   }
 
   if (action === 'bot:main_menu' || action === 'bot:status') {
@@ -501,6 +520,10 @@ export async function decideBotReply({ store, contact, messageText = '', action 
 
   if (action === ASK_FREEPLAY_ACTION) {
     return await decideAskFreePlayRequest({ store, contact, info });
+  }
+
+  if (isContactSupportAction(action) || String(action || '').startsWith(SUPPORT_TOPIC_PREFIX)) {
+    return decideContactSupportAction({ action, contact, info });
   }
 
   if (isHelpCenterAction(action)) {
@@ -703,19 +726,8 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   return await mainMenuDecision(contact, info, automationState, effective);
 }
 
-function talkToStaffDecision() {
-  return {
-    kind: 'contact_support',
-    replies: [{
-      text: 'No problem. Send your question here and our support team can follow the conversation.'
-    }],
-    statePatch: {
-      currentFlow: null,
-      currentStep: null
-    },
-    escalate: false,
-    logEvent: { event: 'button_clicked', action: 'staff:takeover' }
-  };
+function talkToStaffDecision(contact = null, info = {}) {
+  return decideContactSupportAction({ action: SUPPORT_MENU_ACTION, contact, info });
 }
 
 function clearedRegistrationInfo(contact, existingInfo = null) {
@@ -819,7 +831,7 @@ function isWelcomeThrottled(automationState) {
 
 function decideRegisteredSupport({ text, action, contact = null, effective = null }) {
   if (action === 'staff:takeover' || /\b(human|agent|staff)\b/i.test(text)) {
-    return talkToStaffDecision();
+    return talkToStaffDecision(contact);
   }
 
   if (!action && isRegisteredDepositDiscoveryText(text)) {
@@ -900,15 +912,11 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
     }
 
     if (parsedAccountAction.type === 'support') {
-      return {
-        kind: 'account_contact_support',
-        replies: [{
-          text: 'No problem. Send your question here and our support team can follow the conversation.'
-        }],
-        statePatch: null,
-        escalate: false,
-        logEvent: { event: 'button_clicked', action: 'account:support' }
-      };
+      return decideContactSupportAction({
+        action: SUPPORT_MENU_ACTION,
+        contact,
+        info
+      });
     }
 
     if (parsedAccountAction.type === 'back') {

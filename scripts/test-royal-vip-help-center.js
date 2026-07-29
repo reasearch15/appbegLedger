@@ -210,8 +210,9 @@ async function run() {
     contact: registeredContact(),
     action: 'menu:support'
   });
-  assert.equal(support.kind, 'contact_support');
-  assert.match(support.replies[0].text, /support team/i);
+  assert.equal(support.kind, 'contact_support_menu');
+  assert.match(support.replies[0].text, /Contact Support/);
+  assert.ok(support.replies[0].buttons.flat().some((button) => String(button.data || '').startsWith('bot:support:')));
   console.log('ok Help Home/Main Menu and Support navigation work');
 
   const staleHelp = await validateCallbackFreshness({

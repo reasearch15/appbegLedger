@@ -26,6 +26,13 @@ If `TELEGRAM_BOT_TOKEN` is missing, the dashboard and API still run, but the Tel
 
 User contacts are created only when a person interacts with the official BotFather bot configured by `TELEGRAM_BOT_TOKEN`.
 
+Owner/admin notifications from Contact Support, custom inquiries, and FreePlay are sent by a separate bot configured with:
+
+```env
+SUPPORT_NOTIFICATION_BOT_TOKEN=
+SUPPORT_NOTIFICATION_CHAT_ID=
+```
+
 Personal Telegram private-chat sync is disabled at startup and in `scripts/telegram_account_sync.py`. Do not enable `TELEGRAM_ACCOUNT_SYNC_ENABLED` for user support or registration.
 
 Payment notifications remain separate. Configure the payment group listener with:
