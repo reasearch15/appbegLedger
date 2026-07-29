@@ -224,6 +224,7 @@ export function decideContactSupportAction({ action, contact, info = {} } = {}) 
         kind: 'support',
         topic: option.topic,
         fingerprint: `support:${option.key}`,
+        username: resolved.username,
         text: buildSupportRequestNotificationText({
           username: resolved.username,
           topic: option.topic
@@ -294,6 +295,8 @@ export function decideSupportInquiryMessage({ contact, info = {}, text = '' } = 
       kind: 'inquiry',
       topic: 'Custom Inquiry',
       fingerprint: `inquiry:${hashText(question)}`,
+      username: resolved.username,
+      question,
       text: buildInquiryNotificationText({
         username: resolved.username,
         question

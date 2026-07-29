@@ -10,7 +10,7 @@ import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
 import { accountViewSnapshotPatch, ACCOUNT_DETAILS_HIDDEN_TEXT, ACCOUNT_SENSITIVE_LOG_TEXT } from './accountView.js';
-import { sendSupportBotNotification, SUPPORT_DELIVERY_FAILED_TEXT } from './supportNotificationBot.js';
+import { buildSupportRequestRecord, sendSupportBotNotification, SUPPORT_DELIVERY_FAILED_TEXT } from './supportNotificationBot.js';
 import {
   DEPOSIT_BOT_SESSION_FLOW,
   DEPOSIT_BOT_SESSION_STEP_AMOUNT,
@@ -716,10 +716,28 @@ async function deliverSupportOwnerNotification({ store, contact, job, notify }) 
   }
 
   try {
+    let supportRequest = null;
+    if (typeof store.createSupportRequest === 'function') {
+      const record = buildSupportRequestRecord({
+        kind,
+        username: notify.username,
+        topic: notify.topic,
+        question: notify.question,
+        message: notify.message
+      });
+      supportRequest = await store.createSupportRequest({
+        ...record,
+        contactId: contact.id,
+        sourceJobId: job?.id ?? null,
+        fingerprint
+      });
+    }
+
     const result = await sendSupportBotNotification({
       store,
       kind,
       text: notify.text,
+      request: supportRequest,
       meta: {
         contactId: contact.id,
         jobId: job?.id ?? null,

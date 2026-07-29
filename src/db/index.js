@@ -86,6 +86,13 @@ function normalizeAggregateStats(row, keys) {
   return normalized;
 }
 
+function safeStaffDisplayName(value, fallback = '') {
+  const text = String(value ?? '').replace(/[\u0000-\u001F\u007F<>]/g, '').trim();
+  if (text) return text.slice(0, 80);
+  const id = String(fallback ?? '').trim();
+  return id ? `Staff ${id}` : 'Staff';
+}
+
 export async function createDataStore(config = resolveDatabaseConfig()) {
   const driver = await createDriver(config);
   const db = driver;
@@ -1149,6 +1156,202 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       chatId
     );
     return { ok: Boolean(result.changes) };
+  }
+
+  async function getActiveSupportNotificationSubscriberByTelegramUserId(telegramUserId) {
+    const userId = String(telegramUserId ?? '').trim();
+    if (!userId) return null;
+    const row = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at,
+             last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE telegram_user_id = ?
+        AND is_active = ?
+      ORDER BY id ASC
+      LIMIT 1
+    `).get(userId, sql.boolParam(true));
+    return row ? { ...row, is_active: isSupportSubscriberActive(row.is_active) } : null;
+  }
+
+  async function createSupportRequest({
+    kind = 'support',
+    contactId = null,
+    sourceJobId = null,
+    username,
+    topic = null,
+    question = null,
+    message = null,
+    fingerprint = null
+  } = {}) {
+    const normalizedKind = ['freeplay', 'inquiry', 'support', 'faq'].includes(String(kind))
+      ? String(kind)
+      : 'support';
+    const cleanUsername = String(username ?? '').trim();
+    if (!cleanUsername) {
+      const error = new Error('Support request username is required.');
+      error.code = 'SUPPORT_REQUEST_USERNAME_REQUIRED';
+      throw error;
+    }
+    const nowText = nowIso();
+    let persistedSourceJobId = sourceJobId == null ? null : Number(sourceJobId);
+    if (persistedSourceJobId != null && Number.isFinite(persistedSourceJobId)) {
+      const jobRow = await db.prepare('SELECT id FROM bot_jobs WHERE id = ?').get(persistedSourceJobId);
+      if (!jobRow) persistedSourceJobId = null;
+    } else {
+      persistedSourceJobId = null;
+    }
+    const result = await db.prepare(`
+      INSERT INTO support_requests (
+        kind, contact_id, source_job_id, username, topic, question, message, fingerprint,
+        status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      normalizedKind,
+      contactId == null ? null : Number(contactId),
+      persistedSourceJobId,
+      cleanUsername.slice(0, 255),
+      topic == null ? null : String(topic).slice(0, 255),
+      question == null ? null : String(question).slice(0, 3500),
+      message == null ? null : String(message).slice(0, 3500),
+      fingerprint == null ? null : String(fingerprint).slice(0, 255),
+      nowText,
+      nowText
+    );
+    return getSupportRequest(result.lastInsertRowid);
+  }
+
+  async function getSupportRequest(id) {
+    const requestId = Number(id);
+    if (!Number.isFinite(requestId) || requestId <= 0) return null;
+    return await db.prepare(`
+      SELECT *
+      FROM support_requests
+      WHERE id = ?
+    `).get(requestId);
+  }
+
+  async function recordSupportRequestDelivery(requestId, {
+    subscriberId = null,
+    telegramChatId,
+    telegramMessageId = null,
+    status = 'sent',
+    error = null
+  } = {}) {
+    const id = Number(requestId);
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!Number.isFinite(id) || id <= 0 || !chatId) return { ok: false, reason: 'invalid_delivery' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      INSERT INTO support_request_deliveries (
+        request_id, subscriber_id, telegram_chat_id, telegram_message_id,
+        status, last_error, delivered_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      subscriberId == null ? null : Number(subscriberId),
+      chatId,
+      telegramMessageId == null ? null : Number(telegramMessageId),
+      String(status || 'sent').slice(0, 64),
+      error ? String(error).slice(0, 300) : null,
+      status === 'sent' ? nowText : null,
+      nowText,
+      nowText
+    );
+    return { ok: true, id: result.lastInsertRowid };
+  }
+
+  async function listSupportRequestDeliveries(requestId) {
+    const id = Number(requestId);
+    if (!Number.isFinite(id) || id <= 0) return [];
+    return await db.prepare(`
+      SELECT *
+      FROM support_request_deliveries
+      WHERE request_id = ?
+        AND telegram_message_id IS NOT NULL
+      ORDER BY id ASC
+    `).all(id);
+  }
+
+  async function markSupportRequestDeliveryEdit(requestId, telegramChatId, {
+    status = 'edited',
+    error = null
+  } = {}) {
+    const id = Number(requestId);
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!Number.isFinite(id) || id <= 0 || !chatId) return { ok: false };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_request_deliveries
+      SET status = ?,
+          last_error = ?,
+          last_edit_at = ?,
+          updated_at = ?
+      WHERE request_id = ?
+        AND telegram_chat_id = ?
+    `).run(
+      String(status || 'edited').slice(0, 64),
+      error ? String(error).slice(0, 300) : null,
+      error ? null : nowText,
+      nowText,
+      id,
+      chatId
+    );
+    return { ok: Boolean(result.changes) };
+  }
+
+  async function claimSupportRequest(requestId, {
+    telegramUserId,
+    displayName
+  } = {}) {
+    const id = Number(requestId);
+    const userId = String(telegramUserId ?? '').trim();
+    const name = safeStaffDisplayName(displayName, userId);
+    if (!Number.isFinite(id) || id <= 0 || !userId) return { ok: false, reason: 'invalid_claim' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_requests
+      SET status = 'claimed',
+          claimed_by_telegram_user_id = ?,
+          claimed_by_name = ?,
+          claimed_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'pending'
+    `).run(userId, name, nowText, nowText, id);
+    const request = await getSupportRequest(id);
+    return {
+      ok: result.changes === 1,
+      request,
+      reason: result.changes === 1 ? 'claimed' : (request?.status || 'not_found')
+    };
+  }
+
+  async function completeSupportRequest(requestId, {
+    telegramUserId,
+    displayName
+  } = {}) {
+    const id = Number(requestId);
+    const userId = String(telegramUserId ?? '').trim();
+    const name = safeStaffDisplayName(displayName, userId);
+    if (!Number.isFinite(id) || id <= 0 || !userId) return { ok: false, reason: 'invalid_complete' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_requests
+      SET status = 'completed',
+          completed_by_telegram_user_id = ?,
+          completed_by_name = ?,
+          completed_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'claimed'
+        AND claimed_by_telegram_user_id = ?
+    `).run(userId, name, nowText, nowText, id, userId);
+    const request = await getSupportRequest(id);
+    return {
+      ok: result.changes === 1,
+      request,
+      reason: result.changes === 1 ? 'completed' : (request?.status || 'not_found')
+    };
   }
 
   async function listMessagesForUser(id) {
@@ -7123,6 +7326,14 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     deactivateSupportNotificationSubscriber,
     listActiveSupportNotificationSubscribers,
     markSupportNotificationDelivery,
+    getActiveSupportNotificationSubscriberByTelegramUserId,
+    createSupportRequest,
+    getSupportRequest,
+    recordSupportRequestDelivery,
+    listSupportRequestDeliveries,
+    markSupportRequestDeliveryEdit,
+    claimSupportRequest,
+    completeSupportRequest,
     listMessagesForUser,
     listNotesForUser,
     listTimelineForUser,
@@ -7862,6 +8073,60 @@ async function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
       ON support_notification_subscribers(is_active, telegram_chat_id)
   `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS support_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK (kind IN ('freeplay', 'inquiry', 'support', 'faq')),
+      contact_id INTEGER,
+      source_job_id INTEGER,
+      username TEXT NOT NULL,
+      topic TEXT,
+      question TEXT,
+      message TEXT,
+      fingerprint TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'claimed', 'completed')),
+      claimed_by_telegram_user_id TEXT,
+      claimed_by_name TEXT,
+      claimed_at TEXT,
+      completed_by_telegram_user_id TEXT,
+      completed_by_name TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE SET NULL,
+      FOREIGN KEY (source_job_id) REFERENCES bot_jobs(id) ON DELETE SET NULL
+    )
+  `);
+  await addColumnIfMissing(db, 'support_requests', 'source_job_id', 'INTEGER');
+  await addColumnIfMissing(db, 'support_requests', 'fingerprint', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'claimed_by_telegram_user_id', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'claimed_by_name', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'claimed_at', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'completed_by_telegram_user_id', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'completed_by_name', 'TEXT');
+  await addColumnIfMissing(db, 'support_requests', 'completed_at', 'TEXT');
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_support_requests_status_created ON support_requests(status, created_at ASC, id ASC)');
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS support_request_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      subscriber_id INTEGER,
+      telegram_chat_id TEXT NOT NULL,
+      telegram_message_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'sent',
+      last_error TEXT,
+      delivered_at TEXT,
+      last_edit_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (request_id) REFERENCES support_requests(id) ON DELETE CASCADE,
+      FOREIGN KEY (subscriber_id) REFERENCES support_notification_subscribers(id) ON DELETE SET NULL
+    )
+  `);
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_support_request_deliveries_request ON support_request_deliveries(request_id, telegram_chat_id)');
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS coadmin_settings (

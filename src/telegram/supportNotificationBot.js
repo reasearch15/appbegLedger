@@ -7,6 +7,8 @@
 export const SUPPORT_REQUEST_SENT_TEXT = 'Your support request has been sent.';
 export const INQUIRY_REQUEST_SENT_TEXT = 'Your inquiry has been sent.';
 export const SUPPORT_DELIVERY_FAILED_TEXT = 'We could not send your request right now. Please try again.';
+export const SUPPORT_CLAIM_PREFIX = 'support:claim:';
+export const SUPPORT_DONE_PREFIX = 'support:done:';
 export const SUPPORT_ACCOUNT_NOT_FOUND_TEXT = 'We could not find your RoyalVIP account. Please contact support.';
 export const SUPPORT_SUBSCRIBED_TEXT = '✅ You are now subscribed to RoyalVIP support notifications.';
 export const SUPPORT_UNSUBSCRIBED_TEXT = 'Notifications disabled.';
@@ -84,6 +86,110 @@ export function buildFreePlayNotificationText({ username } = {}) {
   ].join('\n');
 }
 
+export function buildSupportRequestRecord({
+  kind = 'support',
+  username,
+  topic = null,
+  question = null,
+  message = null
+} = {}) {
+  return {
+    kind: ['freeplay', 'inquiry', 'support', 'faq'].includes(String(kind)) ? String(kind) : 'support',
+    username: sanitizePlain(username),
+    topic: sanitizePlain(topic),
+    question: sanitizePlain(question),
+    message: sanitizePlain(message)
+  };
+}
+
+export function buildSupportRequestMessage(request = {}) {
+  const kind = String(request.kind || 'support');
+  const status = String(request.status || 'pending');
+  const lines = [
+    supportRequestTitle(kind),
+    '',
+    `RoyalVIP Username: ${sanitizePlain(request.username)}`
+  ];
+
+  if (kind === 'support' || kind === 'faq') {
+    const topic = sanitizePlain(request.topic);
+    if (topic) lines.push(`Topic: ${topic}`);
+  }
+
+  if (kind === 'inquiry') {
+    lines.push('', 'Question:', sanitizePlain(request.question || request.message));
+  } else {
+    const body = sanitizePlain(request.message);
+    if (body) lines.push('', 'Message:', body);
+  }
+
+  lines.push('');
+
+  if (status === 'completed') {
+    lines.push(
+      'Status: 🟢 COMPLETED',
+      `Completed by: ${sanitizePlain(request.completed_by_name || request.claimed_by_name || 'Staff')}`,
+      `Completed at: ${formatSupportRequestTime(request.completed_at)}`,
+      '',
+      completedLine(kind)
+    );
+    return lines.join('\n');
+  }
+
+  if (status === 'claimed') {
+    lines.push(
+      'Status: 🔵 CLAIMED',
+      `Claimed by: ${sanitizePlain(request.claimed_by_name || 'Staff')}`,
+      `Claimed at: ${formatSupportRequestTime(request.claimed_at)}`
+    );
+    return lines.join('\n');
+  }
+
+  lines.push('Status: 🟡 PENDING');
+  return lines.join('\n');
+}
+
+export function buildSupportRequestReplyMarkup(request = {}) {
+  const id = Number(request.id);
+  if (!Number.isFinite(id) || id <= 0 || request.status === 'completed') return undefined;
+  if (request.status === 'claimed') {
+    return {
+      inline_keyboard: [[
+        { text: '🟢 Done', callback_data: `${SUPPORT_DONE_PREFIX}${id}` }
+      ]]
+    };
+  }
+  return {
+    inline_keyboard: [[
+      { text: '🔵 Claim', callback_data: `${SUPPORT_CLAIM_PREFIX}${id}` },
+      { text: '🟢 Done', callback_data: `${SUPPORT_DONE_PREFIX}${id}` }
+    ]]
+  };
+}
+
+export function supportRequestTitle(kind = 'support') {
+  if (kind === 'freeplay') return '🎁 FreePlay Request';
+  if (kind === 'inquiry') return '❓ New Inquiry';
+  return '🆘 Support Request';
+}
+
+function completedLine(kind = 'support') {
+  if (kind === 'freeplay') return '✅ Job completed';
+  if (kind === 'inquiry') return '✅ Inquiry completed';
+  return '✅ Support request completed';
+}
+
+export function formatSupportRequestTime(value) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return sanitizePlain(value);
+  return new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  }).format(date);
+}
+
 export function isPermanentSupportDeliveryError(errorCode, description = '') {
   const code = Number(errorCode);
   const desc = String(description || '').toLowerCase();
@@ -106,6 +212,7 @@ export async function sendSupportBotNotification({
   store,
   kind = 'support',
   text,
+  request = null,
   meta = {},
   env = process.env,
   fetchImpl = globalThis.fetch
@@ -162,7 +269,8 @@ export async function sendSupportBotNotification({
   }
 
   const url = `https://api.telegram.org/bot${config.token}/sendMessage`;
-  const bodyText = String(text || '');
+  const bodyText = request ? buildSupportRequestMessage(request) : String(text || '');
+  const replyMarkup = request ? buildSupportRequestReplyMarkup(request) : undefined;
   let successCount = 0;
   let failureCount = 0;
   let firstMessageId = null;
@@ -184,6 +292,7 @@ export async function sendSupportBotNotification({
         body: JSON.stringify({
           chat_id: chatId,
           text: bodyText,
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
           disable_web_page_preview: true
         })
       });
@@ -266,6 +375,22 @@ export async function sendSupportBotNotification({
         error: null,
         deactivate: false
       }).catch(() => null);
+    }
+    if (request?.id && typeof store.recordSupportRequestDelivery === 'function') {
+      await store.recordSupportRequestDelivery(request.id, {
+        subscriberId: subscriber.id ?? null,
+        telegramChatId: chatId,
+        telegramMessageId: messageId,
+        status: 'sent'
+      }).catch((error) => {
+        console.error('[chatbot] support_request_delivery_record_failed', {
+          ...logMeta,
+          request_id: request.id,
+          telegram_chat_id: chatId,
+          message_id: messageId,
+          error_code: error?.code || error?.message || 'record_failed'
+        });
+      });
     }
     console.log('[chatbot] support_notification_sent', {
       ...logMeta,

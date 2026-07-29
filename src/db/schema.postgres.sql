@@ -405,6 +405,48 @@ CREATE TABLE IF NOT EXISTS support_notification_subscribers (
 CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
   ON support_notification_subscribers(is_active, telegram_chat_id);
 
+CREATE TABLE IF NOT EXISTS support_requests (
+  id BIGSERIAL PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('freeplay', 'inquiry', 'support', 'faq')),
+  contact_id BIGINT REFERENCES telegram_users(id) ON DELETE SET NULL,
+  source_job_id BIGINT REFERENCES bot_jobs(id) ON DELETE SET NULL,
+  username TEXT NOT NULL,
+  topic TEXT,
+  question TEXT,
+  message TEXT,
+  fingerprint TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'claimed', 'completed')),
+  claimed_by_telegram_user_id TEXT,
+  claimed_by_name TEXT,
+  claimed_at TEXT,
+  completed_by_telegram_user_id TEXT,
+  completed_by_name TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_requests_status_created
+  ON support_requests(status, created_at ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS support_request_deliveries (
+  id BIGSERIAL PRIMARY KEY,
+  request_id BIGINT NOT NULL REFERENCES support_requests(id) ON DELETE CASCADE,
+  subscriber_id BIGINT REFERENCES support_notification_subscribers(id) ON DELETE SET NULL,
+  telegram_chat_id TEXT NOT NULL,
+  telegram_message_id BIGINT,
+  status TEXT NOT NULL DEFAULT 'sent',
+  last_error TEXT,
+  delivered_at TEXT,
+  last_edit_at TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_request_deliveries_request
+  ON support_request_deliveries(request_id, telegram_chat_id);
+
 CREATE TABLE IF NOT EXISTS coadmin_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   coadmin_name TEXT,

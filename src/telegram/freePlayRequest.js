@@ -54,6 +54,7 @@ export async function decideAskFreePlayRequest({ store, contact, info = {} }) {
       kind: 'freeplay',
       topic: 'FreePlay',
       fingerprint: 'freeplay',
+      username: resolved.username,
       text: buildFreePlayNotificationText({ username: resolved.username }),
       playerSuccessText: FREEPLAY_REQUEST_SENT_TEXT,
       playerFailureText: SUPPORT_DELIVERY_FAILED_TEXT,
