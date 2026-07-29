@@ -10,6 +10,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { CONVERSATION_STATUSES, createDataStore, DEFAULT_TAGS, REGISTRATION_STATUSES } from './db/index.js';
 import { resolveDatabaseConfig } from './db/config.js';
 import { startTelegramListener } from './telegram/bot.js';
+import { startSupportNotificationListener } from './telegram/supportNotificationListener.js';
 import { renderMenu } from './telegram/menuEngine.js';
 import { startRegistrationFlow } from './telegram/automationEngine.js';
 import { enqueueChatbotJob } from './telegram/chatbotProcessor.js';
@@ -1382,6 +1383,11 @@ globalThis.telegramBot = startTelegramListener({
   io
 });
 
+globalThis.supportNotificationBot = startSupportNotificationListener({
+  token: process.env.SUPPORT_NOTIFICATION_BOT_TOKEN,
+  store
+});
+
 globalThis.telegramAccountSync = await startTelegramAccountSync({
   rootDir,
   store,
@@ -1407,6 +1413,7 @@ async function shutdownWorkers(signal = 'shutdown') {
     globalThis.paymentWindowExpiryWorker?.stop?.(),
     globalThis.paymentFreezeWorker?.stop?.(),
     Promise.resolve(globalThis.telegramBot?.stop?.(signal)),
+    Promise.resolve(globalThis.supportNotificationBot?.stop?.(signal)),
     appbegStore?.close?.()
   ]);
 }

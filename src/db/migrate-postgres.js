@@ -188,6 +188,23 @@ export async function migratePostgres(driver) {
   `);
 
   await driver.exec(`
+    CREATE TABLE IF NOT EXISTS support_notification_subscribers (
+      id BIGSERIAL PRIMARY KEY,
+      telegram_chat_id TEXT NOT NULL UNIQUE,
+      telegram_user_id TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      subscribed_at TEXT NOT NULL,
+      last_delivery_at TEXT,
+      last_delivery_status TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
+      ON support_notification_subscribers(is_active, telegram_chat_id);
+  `);
+
+  await driver.exec(`
     ALTER TABLE coadmin_settings
       ADD COLUMN IF NOT EXISTS staff_ai_apprentice_mode_enabled BOOLEAN NOT NULL DEFAULT TRUE;
     ALTER TABLE coadmin_settings

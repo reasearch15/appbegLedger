@@ -389,6 +389,22 @@ CREATE TABLE IF NOT EXISTS bot_jobs (
   updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
 );
 
+CREATE TABLE IF NOT EXISTS support_notification_subscribers (
+  id BIGSERIAL PRIMARY KEY,
+  telegram_chat_id TEXT NOT NULL UNIQUE,
+  telegram_user_id TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  subscribed_at TEXT NOT NULL,
+  last_delivery_at TEXT,
+  last_delivery_status TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+  updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
+  ON support_notification_subscribers(is_active, telegram_chat_id);
+
 CREATE TABLE IF NOT EXISTS coadmin_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   coadmin_name TEXT,

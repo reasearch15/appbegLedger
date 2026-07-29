@@ -717,6 +717,7 @@ async function deliverSupportOwnerNotification({ store, contact, job, notify }) 
 
   try {
     const result = await sendSupportBotNotification({
+      store,
       kind,
       text: notify.text,
       meta: {

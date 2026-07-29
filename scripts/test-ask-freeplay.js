@@ -31,6 +31,16 @@ function createStore({ registrationInfo = {} } = {}) {
   };
   let freeplayRequestedAt = null;
   let freeplayInflightAt = null;
+  const subscribers = [{
+    id: 1,
+    telegram_chat_id: '99',
+    telegram_user_id: '99',
+    is_active: true,
+    subscribed_at: new Date().toISOString(),
+    last_delivery_at: null,
+    last_delivery_status: null,
+    last_error: null
+  }];
   return {
     async getUserProfile() { return contact(); },
     async ensureAutomationState() {
@@ -83,7 +93,18 @@ function createStore({ registrationInfo = {} } = {}) {
     },
     async tryAcquireSupportNotifyLock() { return { ok: true, inflightAt: new Date().toISOString() }; },
     async commitSupportNotifyLock() { return { ok: true }; },
-    async releaseSupportNotifyLock() { return { ok: true }; }
+    async releaseSupportNotifyLock() { return { ok: true }; },
+    async listActiveSupportNotificationSubscribers() {
+      return subscribers.filter((row) => row.is_active).map((row) => ({ ...row }));
+    },
+    async markSupportNotificationDelivery(telegramChatId, { status = 'sent', error = null, deactivate = false } = {}) {
+      const row = subscribers.find((item) => item.telegram_chat_id === String(telegramChatId));
+      if (!row) return { ok: false };
+      row.last_delivery_status = status;
+      row.last_error = error;
+      if (deactivate) row.is_active = false;
+      return { ok: true };
+    }
   };
 }
 
@@ -92,7 +113,7 @@ async function run() {
   const previousToken = process.env.SUPPORT_NOTIFICATION_BOT_TOKEN;
   const previousChat = process.env.SUPPORT_NOTIFICATION_CHAT_ID;
   process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = 'token';
-  process.env.SUPPORT_NOTIFICATION_CHAT_ID = '99';
+  delete process.env.SUPPORT_NOTIFICATION_CHAT_ID;
   const calls = [];
   globalThis.fetch = async (_url, options = {}) => {
     calls.push(JSON.parse(options.body || '{}'));
@@ -137,6 +158,7 @@ async function run() {
     created_at: new Date().toISOString()
   }, { bot });
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].chat_id, '99');
   assert.equal(calls[0].text, '🎁 FreePlay Request\nAppBeg Username: Amyfi02');
   assert.equal(player.at(-1), FREEPLAY_REQUEST_SENT_TEXT);
 

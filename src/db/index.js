@@ -1038,6 +1038,119 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return { ok: Boolean(result.changes), reason: result.changes ? 'released' : 'not_matched' };
   }
 
+  function isSupportSubscriberActive(value) {
+    return value === true || value === 1 || value === '1';
+  }
+
+  async function upsertSupportNotificationSubscriber({ telegramChatId, telegramUserId = null } = {}) {
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!chatId) return { ok: false, reason: 'missing_chat_id' };
+    const userId = telegramUserId == null || telegramUserId === ''
+      ? null
+      : String(telegramUserId).trim();
+    const nowText = nowIso();
+    const existing = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at
+      FROM support_notification_subscribers
+      WHERE telegram_chat_id = ?
+    `).get(chatId);
+
+    if (existing) {
+      const wasActive = isSupportSubscriberActive(existing.is_active);
+      await db.prepare(`
+        UPDATE support_notification_subscribers
+        SET is_active = ?,
+            telegram_user_id = COALESCE(?, telegram_user_id),
+            subscribed_at = ?,
+            last_error = NULL,
+            updated_at = ?
+        WHERE telegram_chat_id = ?
+      `).run(
+        sql.boolParam(true),
+        userId,
+        wasActive ? (existing.subscribed_at || nowText) : nowText,
+        nowText,
+        chatId
+      );
+      return {
+        ok: true,
+        created: false,
+        reactivated: !wasActive,
+        telegramChatId: chatId
+      };
+    }
+
+    await db.prepare(`
+      INSERT INTO support_notification_subscribers (
+        telegram_chat_id, telegram_user_id, is_active, subscribed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(chatId, userId, sql.boolParam(true), nowText, nowText, nowText);
+
+    return {
+      ok: true,
+      created: true,
+      reactivated: false,
+      telegramChatId: chatId
+    };
+  }
+
+  async function deactivateSupportNotificationSubscriber(telegramChatId, { reason = null } = {}) {
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!chatId) return { ok: false, reason: 'missing_chat_id' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_notification_subscribers
+      SET is_active = ?,
+          last_delivery_status = COALESCE(last_delivery_status, 'failed'),
+          last_error = COALESCE(?, last_error),
+          updated_at = ?
+      WHERE telegram_chat_id = ?
+    `).run(sql.boolParam(false), reason ? String(reason).slice(0, 300) : null, nowText, chatId);
+    return { ok: Boolean(result.changes), reason: result.changes ? 'disabled' : 'not_found' };
+  }
+
+  async function listActiveSupportNotificationSubscribers() {
+    const rows = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at,
+             last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE is_active = ?
+      ORDER BY id ASC
+    `).all(sql.boolParam(true));
+    return rows.map((row) => ({
+      ...row,
+      is_active: isSupportSubscriberActive(row.is_active)
+    }));
+  }
+
+  async function markSupportNotificationDelivery(telegramChatId, {
+    status = 'sent',
+    error = null,
+    deactivate = false
+  } = {}) {
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!chatId) return { ok: false, reason: 'missing_chat_id' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_notification_subscribers
+      SET last_delivery_at = ?,
+          last_delivery_status = ?,
+          last_error = ?,
+          is_active = CASE WHEN ? THEN ? ELSE is_active END,
+          updated_at = ?
+      WHERE telegram_chat_id = ?
+    `).run(
+      nowText,
+      String(status || 'sent').slice(0, 64),
+      error ? String(error).slice(0, 300) : null,
+      sql.boolParam(Boolean(deactivate)),
+      sql.boolParam(false),
+      nowText,
+      chatId
+    );
+    return { ok: Boolean(result.changes) };
+  }
+
   async function listMessagesForUser(id) {
     return await db.prepare(`
       SELECT m.*
@@ -7006,6 +7119,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     tryAcquireSupportNotifyLock,
     commitSupportNotifyLock,
     releaseSupportNotifyLock,
+    upsertSupportNotificationSubscriber,
+    deactivateSupportNotificationSubscriber,
+    listActiveSupportNotificationSubscribers,
+    markSupportNotificationDelivery,
     listMessagesForUser,
     listNotesForUser,
     listTimelineForUser,
@@ -7726,6 +7843,25 @@ async function migrate(db) {
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_created ON bot_jobs(contact_id, created_at DESC)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_contact_telegram_message ON bot_jobs(contact_id, job_type, incoming_telegram_message_id)');
   await db.exec('CREATE INDEX IF NOT EXISTS idx_bot_jobs_update_id ON bot_jobs(update_id)');
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS support_notification_subscribers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_chat_id TEXT NOT NULL UNIQUE,
+      telegram_user_id TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      subscribed_at TEXT NOT NULL,
+      last_delivery_at TEXT,
+      last_delivery_status TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
+      ON support_notification_subscribers(is_active, telegram_chat_id)
+  `);
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS coadmin_settings (

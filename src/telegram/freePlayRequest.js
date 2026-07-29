@@ -67,6 +67,7 @@ export async function decideAskFreePlayRequest({ store, contact, info = {} }) {
 export async function deliverFreePlayOwnerNotification(options = {}) {
   const notify = options.notify || {};
   return sendSupportBotNotification({
+    store: options.store,
     kind: 'freeplay',
     text: notify.text,
     meta: {

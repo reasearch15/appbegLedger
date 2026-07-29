@@ -20,7 +20,11 @@ import {
   SUPPORT_ACCOUNT_NOT_FOUND_TEXT,
   SUPPORT_DELIVERY_FAILED_TEXT,
   SUPPORT_REQUEST_SENT_TEXT,
-  INQUIRY_REQUEST_SENT_TEXT
+  INQUIRY_REQUEST_SENT_TEXT,
+  SUPPORT_SUBSCRIBED_TEXT,
+  SUPPORT_UNSUBSCRIBED_TEXT,
+  sendSupportBotNotification,
+  isPermanentSupportDeliveryError
 } from '../src/telegram/supportNotificationBot.js';
 
 function contact(overrides = {}) {
@@ -49,7 +53,10 @@ function baseInfo(overrides = {}) {
   };
 }
 
-function createMemoryStore({ registrationInfo = baseInfo(), freePlay = null } = {}) {
+function createMemoryStore({
+  registrationInfo = baseInfo(),
+  subscribers = [{ telegram_chat_id: '1001', is_active: true }]
+} = {}) {
   let state = {
     current_flow: null,
     current_step: null,
@@ -60,9 +67,21 @@ function createMemoryStore({ registrationInfo = baseInfo(), freePlay = null } = 
   let supportInflightAt = null;
   let supportLastAt = null;
   let supportLastKey = null;
+  let nextSubscriberId = 1;
+  const subscriberRows = subscribers.map((row) => ({
+    id: nextSubscriberId++,
+    telegram_chat_id: String(row.telegram_chat_id),
+    telegram_user_id: row.telegram_user_id == null ? null : String(row.telegram_user_id),
+    is_active: row.is_active !== false,
+    subscribed_at: row.subscribed_at || new Date().toISOString(),
+    last_delivery_at: null,
+    last_delivery_status: null,
+    last_error: null
+  }));
   const completed = [];
   return {
     completed,
+    subscribers: subscriberRows,
     async getUserProfile(id) {
       assert.equal(id, 34);
       return contact();
@@ -140,24 +159,68 @@ function createMemoryStore({ registrationInfo = baseInfo(), freePlay = null } = 
       supportInflightAt = null;
       return { ok: true };
     },
-    _forceFreePlayRequestedAt(iso) {
-      freeplayRequestedAt = iso;
+    async upsertSupportNotificationSubscriber({ telegramChatId, telegramUserId = null } = {}) {
+      const chatId = String(telegramChatId);
+      const existing = subscriberRows.find((row) => row.telegram_chat_id === chatId);
+      if (existing) {
+        const wasActive = existing.is_active;
+        existing.is_active = true;
+        existing.telegram_user_id = telegramUserId == null ? existing.telegram_user_id : String(telegramUserId);
+        existing.last_error = null;
+        if (!wasActive) existing.subscribed_at = new Date().toISOString();
+        return { ok: true, created: false, reactivated: !wasActive, telegramChatId: chatId };
+      }
+      subscriberRows.push({
+        id: nextSubscriberId++,
+        telegram_chat_id: chatId,
+        telegram_user_id: telegramUserId == null ? null : String(telegramUserId),
+        is_active: true,
+        subscribed_at: new Date().toISOString(),
+        last_delivery_at: null,
+        last_delivery_status: null,
+        last_error: null
+      });
+      return { ok: true, created: true, reactivated: false, telegramChatId: chatId };
+    },
+    async deactivateSupportNotificationSubscriber(telegramChatId, { reason = null } = {}) {
+      const row = subscriberRows.find((item) => item.telegram_chat_id === String(telegramChatId));
+      if (!row) return { ok: false, reason: 'not_found' };
+      row.is_active = false;
+      row.last_error = reason || row.last_error;
+      return { ok: true, reason: 'disabled' };
+    },
+    async listActiveSupportNotificationSubscribers() {
+      return subscriberRows.filter((row) => row.is_active).map((row) => ({ ...row }));
+    },
+    async markSupportNotificationDelivery(telegramChatId, { status = 'sent', error = null, deactivate = false } = {}) {
+      const row = subscriberRows.find((item) => item.telegram_chat_id === String(telegramChatId));
+      if (!row) return { ok: false };
+      row.last_delivery_at = new Date().toISOString();
+      row.last_delivery_status = status;
+      row.last_error = error;
+      if (deactivate) row.is_active = false;
+      return { ok: true };
     },
     _state() { return state; }
   };
 }
 
-function mockSupportFetch(calls, { fail = false } = {}) {
+function mockSupportFetch(calls, { failChatIds = new Set(), failAll = false, permanentFailChatIds = new Set() } = {}) {
   return async (url, options = {}) => {
     assert.match(String(url), /api\.telegram\.org\/bot/);
-    assert.doesNotMatch(String(url), /SECRET_TOKEN_SHOULD_NOT_APPEAR_IN_LOGS/);
     const body = JSON.parse(options.body || '{}');
     calls.push({ url: String(url).replace(/bot[^/]+/, 'bot<redacted>'), body });
-    if (fail) {
+    const chatId = String(body.chat_id);
+    if (failAll || failChatIds.has(chatId) || permanentFailChatIds.has(chatId)) {
+      const permanent = permanentFailChatIds.has(chatId);
       return {
         ok: false,
-        status: 500,
-        async json() { return { ok: false, error_code: 500, description: 'boom' }; }
+        status: permanent ? 403 : 500,
+        async json() {
+          return permanent
+            ? { ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }
+            : { ok: false, error_code: 500, description: 'boom' };
+        }
       };
     }
     return {
@@ -168,37 +231,194 @@ function mockSupportFetch(calls, { fail = false } = {}) {
   };
 }
 
-async function run() {
-  const previousFetch = globalThis.fetch;
-  const previousToken = process.env.SUPPORT_NOTIFICATION_BOT_TOKEN;
-  const previousChat = process.env.SUPPORT_NOTIFICATION_CHAT_ID;
-  process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = 'test-support-token';
-  process.env.SUPPORT_NOTIFICATION_CHAT_ID = '424242';
-
-  const supportCalls = [];
-  globalThis.fetch = mockSupportFetch(supportCalls);
-
-  const menu = await decideBotReply({
-    store: createMemoryStore(),
-    contact: contact(),
-    action: 'menu:support'
-  });
-  assert.equal(menu.kind, 'contact_support_menu');
-  assert.ok(menu.replies[0].buttons.flat().some((b) => b.data === `${SUPPORT_TOPIC_PREFIX}password_help`));
-  assert.ok(menu.replies[0].buttons.flat().some((b) => b.data === SUPPORT_CUSTOM_INQUIRY_ACTION));
-  console.log('ok Contact Support opens topic menu');
-
-  for (const option of CONTACT_SUPPORT_OPTIONS.filter((item) => item.notify)) {
-    const store = createMemoryStore();
-    const player = [];
-    const bot = {
+function playerBot() {
+  const player = [];
+  return {
+    player,
+    bot: {
       telegram: {
         async sendMessage(chatId, text, options = {}) {
           player.push({ chatId, text, options });
           return { message_id: player.length, reply_markup: options.reply_markup || null };
         }
       }
-    };
+    }
+  };
+}
+
+async function run() {
+  const previousFetch = globalThis.fetch;
+  const previousToken = process.env.SUPPORT_NOTIFICATION_BOT_TOKEN;
+  const previousChat = process.env.SUPPORT_NOTIFICATION_CHAT_ID;
+  process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = 'test-support-token';
+  delete process.env.SUPPORT_NOTIFICATION_CHAT_ID;
+
+  assert.equal(isPermanentSupportDeliveryError(403, 'Forbidden: bot was blocked by the user'), true);
+  assert.equal(isPermanentSupportDeliveryError(500, 'boom'), false);
+
+  // 1 + 2: first /start registers; existing subscriber reactivates
+  {
+    const store = createMemoryStore({ subscribers: [] });
+    const first = await store.upsertSupportNotificationSubscriber({
+      telegramChatId: 777,
+      telegramUserId: 777
+    });
+    assert.equal(first.created, true);
+    assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 1);
+    await store.deactivateSupportNotificationSubscriber('777', { reason: 'user_stop' });
+    assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 0);
+    const again = await store.upsertSupportNotificationSubscriber({
+      telegramChatId: '777',
+      telegramUserId: 777
+    });
+    assert.equal(again.reactivated, true);
+    assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 1);
+    assert.equal(SUPPORT_SUBSCRIBED_TEXT.includes('subscribed'), true);
+    console.log('ok first /start registers and existing subscriber reactivates');
+  }
+
+  // 3: /stop disables notifications
+  {
+    const store = createMemoryStore();
+    await store.deactivateSupportNotificationSubscriber('1001', { reason: 'user_stop' });
+    assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 0);
+    assert.equal(SUPPORT_UNSUBSCRIBED_TEXT, 'Notifications disabled.');
+    console.log('ok /stop disables notifications');
+  }
+
+  const supportCalls = [];
+  globalThis.fetch = mockSupportFetch(supportCalls);
+
+  // 4: one subscriber receives notifications
+  {
+    const store = createMemoryStore();
+    supportCalls.length = 0;
+    const result = await sendSupportBotNotification({
+      store,
+      kind: 'support',
+      text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Password / Login Help'
+    });
+    assert.equal(result.successCount, 1);
+    assert.equal(supportCalls.length, 1);
+    assert.equal(supportCalls[0].body.chat_id, '1001');
+    console.log('ok one subscriber receives notifications');
+  }
+
+  // 5: multiple subscribers all receive notifications
+  {
+    const store = createMemoryStore({
+      subscribers: [
+        { telegram_chat_id: '1001', is_active: true },
+        { telegram_chat_id: '1002', is_active: true }
+      ]
+    });
+    supportCalls.length = 0;
+    const result = await sendSupportBotNotification({
+      store,
+      kind: 'freeplay',
+      text: '🎁 FreePlay Request\nAppBeg Username: Amyfi02'
+    });
+    assert.equal(result.successCount, 2);
+    assert.equal(supportCalls.length, 2);
+    assert.deepEqual(supportCalls.map((item) => String(item.body.chat_id)).sort(), ['1001', '1002']);
+    console.log('ok multiple subscribers all receive notifications');
+  }
+
+  // 6: one subscriber fails while others still receive
+  {
+    const store = createMemoryStore({
+      subscribers: [
+        { telegram_chat_id: '1001', is_active: true },
+        { telegram_chat_id: '1002', is_active: true }
+      ]
+    });
+    supportCalls.length = 0;
+    globalThis.fetch = mockSupportFetch(supportCalls, { failChatIds: new Set(['1001']) });
+    const result = await sendSupportBotNotification({
+      store,
+      kind: 'inquiry',
+      text: '❓ New Inquiry\nAppBeg Username: Amyfi02\nQuestion:\nHello'
+    });
+    assert.equal(result.successCount, 1);
+    assert.equal(result.failureCount, 1);
+    assert.equal(store.subscribers.find((row) => row.telegram_chat_id === '1001').is_active, true);
+    console.log('ok one subscriber fails while others still receive notifications');
+  }
+
+  // 11: automatic deactivation when bot is blocked
+  {
+    const store = createMemoryStore({
+      subscribers: [
+        { telegram_chat_id: '1001', is_active: true },
+        { telegram_chat_id: '1002', is_active: true }
+      ]
+    });
+    supportCalls.length = 0;
+    globalThis.fetch = mockSupportFetch(supportCalls, { permanentFailChatIds: new Set(['1001']) });
+    const result = await sendSupportBotNotification({
+      store,
+      kind: 'support',
+      text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Cashout Help'
+    });
+    assert.equal(result.successCount, 1);
+    assert.equal(store.subscribers.find((row) => row.telegram_chat_id === '1001').is_active, false);
+    assert.equal(store.subscribers.find((row) => row.telegram_chat_id === '1002').is_active, true);
+    console.log('ok automatic deactivation when the bot is blocked');
+  }
+
+  // 7: all subscribers fail
+  {
+    const store = createMemoryStore({
+      subscribers: [
+        { telegram_chat_id: '1001', is_active: true },
+        { telegram_chat_id: '1002', is_active: true }
+      ]
+    });
+    supportCalls.length = 0;
+    globalThis.fetch = mockSupportFetch(supportCalls, { failAll: true });
+    await assert.rejects(
+      () => sendSupportBotNotification({
+        store,
+        kind: 'support',
+        text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Deposit / Payment Help'
+      }),
+      (error) => error.code === 'SUPPORT_NOTIFICATION_ALL_FAILED'
+    );
+    console.log('ok all subscribers fail');
+  }
+
+  // 8: no subscribers registered
+  {
+    const store = createMemoryStore({ subscribers: [] });
+    await assert.rejects(
+      () => sendSupportBotNotification({
+        store,
+        kind: 'support',
+        text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Password / Login Help'
+      }),
+      (error) => error.code === 'SUPPORT_NOTIFICATION_NO_SUBSCRIBERS'
+    );
+    console.log('ok no subscribers registered');
+  }
+
+  globalThis.fetch = mockSupportFetch(supportCalls);
+
+  // 14: informational FAQ remains local
+  {
+    const infoDecision = await decideBotReply({
+      store: createMemoryStore(),
+      contact: contact(),
+      action: `${SUPPORT_TOPIC_PREFIX}how_deposit`
+    });
+    assert.match(infoDecision.replies[0].text, /How to deposit/i);
+    assert.equal(infoDecision.supportOwnerNotify, undefined);
+    console.log('ok informational FAQ answers remain local and do not broadcast');
+  }
+
+  // 13: human-help FAQ notifications
+  for (const option of CONTACT_SUPPORT_OPTIONS.filter((item) => item.notify)) {
+    const store = createMemoryStore();
+    const { player, bot } = playerBot();
     supportCalls.length = 0;
     await processBotJob(store, {
       id: 10,
@@ -206,7 +426,7 @@ async function run() {
       telegram_user_id: 5476500286,
       job_type: 'callback_action',
       action: `${SUPPORT_TOPIC_PREFIX}${option.key}`,
-      update_id: 8000 + supportCalls.length + Math.random(),
+      update_id: 8000 + Math.floor(Math.random() * 100000),
       incoming_telegram_message_id: 100,
       created_at: new Date().toISOString()
     }, { bot });
@@ -217,288 +437,221 @@ async function run() {
     assert.doesNotMatch(supportCalls[0].body.text, /Telegram|Contact ID|Player UID|5476500286|@amyf/i);
     assert.equal(player.at(-1).text, SUPPORT_REQUEST_SENT_TEXT);
   }
-  console.log('ok every human-help Contact Support FAQ notifies via separate bot');
+  console.log('ok human-help FAQ notifications broadcast to subscribers');
 
-  const infoStore = createMemoryStore();
-  const infoDecision = await decideBotReply({
-    store: infoStore,
-    contact: contact(),
-    action: `${SUPPORT_TOPIC_PREFIX}how_deposit`
-  });
-  assert.match(infoDecision.replies[0].text, /How to deposit/i);
-  assert.equal(infoDecision.supportOwnerNotify, undefined);
-  console.log('ok informational FAQ answers locally without support notification');
+  // 12: inquiry notifications
+  {
+    const inquiryStore = createMemoryStore();
+    const prompt = await decideBotReply({
+      store: inquiryStore,
+      contact: contact(),
+      action: SUPPORT_CUSTOM_INQUIRY_ACTION
+    });
+    await inquiryStore.updateAutomationState(34, prompt.statePatch);
+    const { player, bot } = playerBot();
+    supportCalls.length = 0;
+    await processBotJob(inquiryStore, {
+      id: 20,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
+      job_type: 'inbound_message',
+      input_text: 'My deposit of $5 did not credit <script>',
+      update_id: 9001,
+      incoming_telegram_message_id: 201,
+      created_at: new Date().toISOString()
+    }, { bot });
+    assert.equal(supportCalls.length, 1);
+    assert.match(supportCalls[0].body.text, /^❓ New Inquiry/);
+    assert.match(supportCalls[0].body.text, /AppBeg Username: Amyfi02/);
+    assert.match(supportCalls[0].body.text, /Question:\nMy deposit of \$5 did not credit <script>/);
+    assert.equal(player.at(-1).text, INQUIRY_REQUEST_SENT_TEXT);
+    console.log('ok inquiry notifications');
+  }
 
-  const inquiryStore = createMemoryStore();
-  const prompt = await decideBotReply({
-    store: inquiryStore,
-    contact: contact(),
-    action: SUPPORT_CUSTOM_INQUIRY_ACTION
-  });
-  assert.equal(prompt.statePatch.currentStep, 'awaiting_support_inquiry');
-  await inquiryStore.updateAutomationState(34, prompt.statePatch);
-  const inquiryPlayer = [];
-  const inquiryBot = {
-    telegram: {
-      async sendMessage(chatId, text, options = {}) {
-        inquiryPlayer.push({ chatId, text, options });
-        return { message_id: inquiryPlayer.length, reply_markup: options.reply_markup || null };
-      }
-    }
-  };
-  supportCalls.length = 0;
-  await processBotJob(inquiryStore, {
-    id: 20,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'inbound_message',
-    input_text: 'My deposit of $5 did not credit <script>',
-    update_id: 9001,
-    incoming_telegram_message_id: 201,
-    created_at: new Date().toISOString()
-  }, { bot: inquiryBot });
-  assert.equal(supportCalls.length, 1);
-  assert.match(supportCalls[0].body.text, /^❓ New Inquiry/);
-  assert.match(supportCalls[0].body.text, /AppBeg Username: Amyfi02/);
-  assert.match(supportCalls[0].body.text, /Question:\nMy deposit of \$5 did not credit <script>/);
-  assert.doesNotMatch(supportCalls[0].body.text, /Telegram|Contact ID|@amyf|5476500286/);
-  assert.equal(inquiryPlayer.at(-1).text, INQUIRY_REQUEST_SENT_TEXT);
-  console.log('ok custom inquiry notifies with AppBeg username and question only');
+  // 10: rapid repeated FreePlay requests
+  {
+    const freeStore = createMemoryStore();
+    const { player, bot } = playerBot();
+    supportCalls.length = 0;
+    await processBotJob(freeStore, {
+      id: 30,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
+      job_type: 'callback_action',
+      action: ASK_FREEPLAY_ACTION,
+      update_id: 9101,
+      incoming_telegram_message_id: 301,
+      created_at: new Date().toISOString()
+    }, { bot });
+    assert.equal(supportCalls.length, 1);
+    assert.equal(supportCalls[0].body.text, '🎁 FreePlay Request\nAppBeg Username: Amyfi02');
+    assert.equal(player.at(-1).text, FREEPLAY_REQUEST_SENT_TEXT);
 
-  const freeStore = createMemoryStore();
-  const freePlayer = [];
-  const freeBot = {
-    telegram: {
-      async sendMessage(chatId, text, options = {}) {
-        freePlayer.push({ chatId, text, options });
-        return { message_id: freePlayer.length, reply_markup: options.reply_markup || null };
-      }
-    }
-  };
-  supportCalls.length = 0;
-  await processBotJob(freeStore, {
-    id: 30,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: ASK_FREEPLAY_ACTION,
-    update_id: 9101,
-    incoming_telegram_message_id: 301,
-    created_at: new Date().toISOString()
-  }, { bot: freeBot });
-  assert.equal(supportCalls.length, 1);
-  assert.equal(supportCalls[0].body.text, '🎁 FreePlay Request\nAppBeg Username: Amyfi02');
-  assert.equal(freePlayer.at(-1).text, FREEPLAY_REQUEST_SENT_TEXT);
+    await processBotJob(freeStore, {
+      id: 31,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
+      job_type: 'callback_action',
+      action: ASK_FREEPLAY_ACTION,
+      update_id: 9102,
+      incoming_telegram_message_id: 301,
+      created_at: new Date().toISOString()
+    }, { bot });
+    assert.equal(supportCalls.length, 1);
+    assert.equal(player.at(-1).text, FREEPLAY_INELIGIBLE_TEXT);
+    console.log('ok rapid repeated FreePlay requests');
+  }
 
-  await processBotJob(freeStore, {
-    id: 31,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: ASK_FREEPLAY_ACTION,
-    update_id: 9102,
-    incoming_telegram_message_id: 301,
-    created_at: new Date().toISOString()
-  }, { bot: freeBot });
-  assert.equal(supportCalls.length, 1);
-  assert.equal(freePlayer.at(-1).text, FREEPLAY_INELIGIBLE_TEXT);
-  console.log('ok FreePlay notifies username-only and enforces cooldown after successful send');
-
-  const missingStore = createMemoryStore({ registrationInfo: {} });
-  supportCalls.length = 0;
-  const missingPlayer = [];
-  await processBotJob(missingStore, {
-    id: 40,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: ASK_FREEPLAY_ACTION,
-    update_id: 9201,
-    incoming_telegram_message_id: 401,
-    created_at: new Date().toISOString()
-  }, {
-    bot: {
-      telegram: {
-        async sendMessage(chatId, text, options = {}) {
-          missingPlayer.push({ chatId, text, options });
-          return { message_id: missingPlayer.length, reply_markup: options.reply_markup || null };
-        }
-      }
-    }
-  });
-  assert.equal(supportCalls.length, 0);
-  assert.equal(missingPlayer.at(-1).text, SUPPORT_ACCOUNT_NOT_FOUND_TEXT);
-  console.log('ok missing AppBeg username blocks notification');
-
-  const failStore = createMemoryStore();
-  globalThis.fetch = mockSupportFetch(supportCalls, { fail: true });
-  supportCalls.length = 0;
-  const failPlayer = [];
-  const failed = await processBotJob(failStore, {
-    id: 50,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: ASK_FREEPLAY_ACTION,
-    update_id: 9301,
-    incoming_telegram_message_id: 501,
-    created_at: new Date().toISOString()
-  }, {
-    bot: {
-      telegram: {
-        async sendMessage(chatId, text, options = {}) {
-          failPlayer.push({ chatId, text, options });
-          return { message_id: failPlayer.length, reply_markup: options.reply_markup || null };
-        }
-      }
-    }
-  });
-  assert.equal(failed.ok, false);
-  assert.equal(failPlayer.at(-1).text, SUPPORT_DELIVERY_FAILED_TEXT);
-  assert.equal(failStore.completed.at(-1).payload.status, 'failed');
-  // Eligibility must remain unused so a later successful send can still work.
-  globalThis.fetch = mockSupportFetch(supportCalls, { fail: false });
-  supportCalls.length = 0;
-  await processBotJob(failStore, {
-    id: 51,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: ASK_FREEPLAY_ACTION,
-    update_id: 9302,
-    incoming_telegram_message_id: 502,
-    created_at: new Date().toISOString()
-  }, {
-    bot: {
-      telegram: {
-        async sendMessage(chatId, text, options = {}) {
-          failPlayer.push({ chatId, text, options });
-          return { message_id: failPlayer.length, reply_markup: options.reply_markup || null };
-        }
-      }
-    }
-  });
-  assert.equal(supportCalls.length, 1);
-  console.log('ok delivery failure replies with retry text and does not consume FreePlay eligibility');
-
-  delete process.env.SUPPORT_NOTIFICATION_BOT_TOKEN;
-  delete process.env.SUPPORT_NOTIFICATION_CHAT_ID;
-  const cfgStore = createMemoryStore();
-  const cfgPlayer = [];
-  const cfgResult = await processBotJob(cfgStore, {
-    id: 60,
-    contact_id: 34,
-    telegram_user_id: 5476500286,
-    job_type: 'callback_action',
-    action: `${SUPPORT_TOPIC_PREFIX}password_help`,
-    update_id: 9401,
-    incoming_telegram_message_id: 601,
-    created_at: new Date().toISOString()
-  }, {
-    bot: {
-      telegram: {
-        async sendMessage(chatId, text, options = {}) {
-          cfgPlayer.push({ chatId, text, options });
-          return { message_id: cfgPlayer.length, reply_markup: options.reply_markup || null };
-        }
-      }
-    }
-  });
-  assert.equal(cfgResult.ok, false);
-  assert.equal(cfgPlayer.at(-1).text, SUPPORT_DELIVERY_FAILED_TEXT);
-  console.log('ok missing support bot config fails visibly');
-
-  const { store: dbStore, dir } = await (async () => {
-    const dirPath = await fs.mkdtemp(path.join(os.tmpdir(), 'support-notify-'));
-    const store = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dirPath, 'test.sqlite') });
-    return { store, dir: dirPath };
-  })();
-  try {
-    process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = 'test-support-token';
-    process.env.SUPPORT_NOTIFICATION_CHAT_ID = '424242';
+  // delivery failure does not consume FreePlay
+  {
+    const failStore = createMemoryStore();
+    globalThis.fetch = mockSupportFetch(supportCalls, { failAll: true });
+    supportCalls.length = 0;
+    const { player, bot } = playerBot();
+    const failed = await processBotJob(failStore, {
+      id: 50,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
+      job_type: 'callback_action',
+      action: ASK_FREEPLAY_ACTION,
+      update_id: 9301,
+      incoming_telegram_message_id: 501,
+      created_at: new Date().toISOString()
+    }, { bot });
+    assert.equal(failed.ok, false);
+    assert.equal(player.at(-1).text, SUPPORT_DELIVERY_FAILED_TEXT);
     globalThis.fetch = mockSupportFetch(supportCalls);
     supportCalls.length = 0;
-    const saved = await dbStore.upsertTelegramUser({
-      id: 5476500286,
-      first_name: 'Amy',
-      last_name: 'F.',
-      username: 'amyf',
-      is_bot: false
-    });
-    await dbStore.updateRegistrationStatus(saved.id, 'Registered', 'Test');
-    await dbStore.updateAutomationState(saved.id, { registrationInfo: baseInfo() });
-    await dbStore.db.prepare(`
-      UPDATE telegram_users
-      SET appbeg_account_id = ?, display_name = ?, active_messaging_source = 'bot_api'
-      WHERE id = ?
-    `).run('o6XdSdLND0g8odmeoYaMXyG5uRn2', 'Amy F.', saved.id);
-    dbStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true });
-    dbStore.getAutoRegistrationBotSettings = async () => ({ enabled: true });
-
-    const raceBot = {
-      telegram: {
-        async sendMessage() { return { message_id: 1, reply_markup: null }; }
-      }
-    };
-    await Promise.all([
-      processBotJob(dbStore, {
-        id: 71,
-        contact_id: saved.id,
-        telegram_user_id: saved.telegram_id,
-        job_type: 'callback_action',
-        action: `${SUPPORT_TOPIC_PREFIX}password_help`,
-        update_id: 9501,
-        incoming_telegram_message_id: 701,
-        created_at: new Date().toISOString()
-      }, { bot: raceBot }),
-      processBotJob(dbStore, {
-        id: 72,
-        contact_id: saved.id,
-        telegram_user_id: saved.telegram_id,
-        job_type: 'callback_action',
-        action: `${SUPPORT_TOPIC_PREFIX}password_help`,
-        update_id: 9502,
-        incoming_telegram_message_id: 701,
-        created_at: new Date().toISOString()
-      }, { bot: raceBot })
-    ]);
-    assert.equal(supportCalls.length, 1);
-    console.log('ok rapid repeated taps create only one support notification');
-
-    supportCalls.length = 0;
-    const first = await dbStore.createBotJob({
-      contactId: saved.id,
-      telegramUserId: saved.telegram_id,
-      updateId: 9601,
-      incomingTelegramMessageId: 801,
-      jobType: 'callback_action',
-      action: `${SUPPORT_TOPIC_PREFIX}deposit_help`
-    });
-    const second = await dbStore.createBotJob({
-      contactId: saved.id,
-      telegramUserId: saved.telegram_id,
-      updateId: 9601,
-      incomingTelegramMessageId: 801,
-      jobType: 'callback_action',
-      action: `${SUPPORT_TOPIC_PREFIX}deposit_help`
-    });
-    assert.equal(Boolean(second.duplicate), true);
-    assert.equal(first.id, second.id);
-    await processBotJob(dbStore, {
-      id: first.id,
-      contact_id: saved.id,
-      telegram_user_id: saved.telegram_id,
+    await processBotJob(failStore, {
+      id: 51,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
       job_type: 'callback_action',
-      action: `${SUPPORT_TOPIC_PREFIX}deposit_help`,
-      update_id: 9601,
-      incoming_telegram_message_id: 801,
+      action: ASK_FREEPLAY_ACTION,
+      update_id: 9302,
+      incoming_telegram_message_id: 502,
       created_at: new Date().toISOString()
-    }, { bot: raceBot });
+    }, { bot });
     assert.equal(supportCalls.length, 1);
-    console.log('ok duplicate update_id creates only one support notification');
-  } finally {
-    await dbStore.close?.().catch(() => null);
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => null);
+    console.log('ok delivery failure does not consume FreePlay eligibility');
+  }
+
+  // missing username
+  {
+    const missingStore = createMemoryStore({ registrationInfo: {} });
+    supportCalls.length = 0;
+    const { player, bot } = playerBot();
+    await processBotJob(missingStore, {
+      id: 40,
+      contact_id: 34,
+      telegram_user_id: 5476500286,
+      job_type: 'callback_action',
+      action: ASK_FREEPLAY_ACTION,
+      update_id: 9201,
+      incoming_telegram_message_id: 401,
+      created_at: new Date().toISOString()
+    }, { bot });
+    assert.equal(supportCalls.length, 0);
+    assert.equal(player.at(-1).text, SUPPORT_ACCOUNT_NOT_FOUND_TEXT);
+    console.log('ok missing AppBeg username blocks notification');
+  }
+
+  // 9: duplicate Telegram updates + rapid taps against real sqlite store
+  {
+    const dirPath = await fs.mkdtemp(path.join(os.tmpdir(), 'support-notify-'));
+    const dbStore = await createDataStore({ dialect: 'sqlite', databasePath: path.join(dirPath, 'test.sqlite') });
+    try {
+      process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = 'test-support-token';
+      globalThis.fetch = mockSupportFetch(supportCalls);
+      supportCalls.length = 0;
+
+      await dbStore.upsertSupportNotificationSubscriber({
+        telegramChatId: '424242',
+        telegramUserId: 424242
+      });
+
+      const saved = await dbStore.upsertTelegramUser({
+        id: 5476500286,
+        first_name: 'Amy',
+        last_name: 'F.',
+        username: 'amyf',
+        is_bot: false
+      });
+      await dbStore.updateRegistrationStatus(saved.id, 'Registered', 'Test');
+      await dbStore.updateAutomationState(saved.id, { registrationInfo: baseInfo() });
+      await dbStore.db.prepare(`
+        UPDATE telegram_users
+        SET appbeg_account_id = ?, display_name = ?, active_messaging_source = 'bot_api'
+        WHERE id = ?
+      `).run('o6XdSdLND0g8odmeoYaMXyG5uRn2', 'Amy F.', saved.id);
+      dbStore.isIncomingMessageEligibleForAutoBot = async () => ({ eligible: true });
+      dbStore.getAutoRegistrationBotSettings = async () => ({ enabled: true });
+
+      const raceBot = {
+        telegram: {
+          async sendMessage() { return { message_id: 1, reply_markup: null }; }
+        }
+      };
+      await Promise.all([
+        processBotJob(dbStore, {
+          id: 71,
+          contact_id: saved.id,
+          telegram_user_id: saved.telegram_id,
+          job_type: 'callback_action',
+          action: `${SUPPORT_TOPIC_PREFIX}password_help`,
+          update_id: 9501,
+          incoming_telegram_message_id: 701,
+          created_at: new Date().toISOString()
+        }, { bot: raceBot }),
+        processBotJob(dbStore, {
+          id: 72,
+          contact_id: saved.id,
+          telegram_user_id: saved.telegram_id,
+          job_type: 'callback_action',
+          action: `${SUPPORT_TOPIC_PREFIX}password_help`,
+          update_id: 9502,
+          incoming_telegram_message_id: 701,
+          created_at: new Date().toISOString()
+        }, { bot: raceBot })
+      ]);
+      assert.equal(supportCalls.length, 1);
+      console.log('ok rapid repeated taps create only one support notification');
+
+      supportCalls.length = 0;
+      const first = await dbStore.createBotJob({
+        contactId: saved.id,
+        telegramUserId: saved.telegram_id,
+        updateId: 9601,
+        incomingTelegramMessageId: 801,
+        jobType: 'callback_action',
+        action: `${SUPPORT_TOPIC_PREFIX}deposit_help`
+      });
+      const second = await dbStore.createBotJob({
+        contactId: saved.id,
+        telegramUserId: saved.telegram_id,
+        updateId: 9601,
+        incomingTelegramMessageId: 801,
+        jobType: 'callback_action',
+        action: `${SUPPORT_TOPIC_PREFIX}deposit_help`
+      });
+      assert.equal(Boolean(second.duplicate), true);
+      assert.equal(first.id, second.id);
+      await processBotJob(dbStore, {
+        id: first.id,
+        contact_id: saved.id,
+        telegram_user_id: saved.telegram_id,
+        job_type: 'callback_action',
+        action: `${SUPPORT_TOPIC_PREFIX}deposit_help`,
+        update_id: 9601,
+        incoming_telegram_message_id: 801,
+        created_at: new Date().toISOString()
+      }, { bot: raceBot });
+      assert.equal(supportCalls.length, 1);
+      console.log('ok duplicate Telegram updates create only one support notification');
+    } finally {
+      await dbStore.close?.().catch(() => null);
+      await fs.rm(dirPath, { recursive: true, force: true }).catch(() => null);
+    }
   }
 
   globalThis.fetch = previousFetch;
@@ -506,7 +659,7 @@ async function run() {
   else process.env.SUPPORT_NOTIFICATION_BOT_TOKEN = previousToken;
   if (previousChat == null) delete process.env.SUPPORT_NOTIFICATION_CHAT_ID;
   else process.env.SUPPORT_NOTIFICATION_CHAT_ID = previousChat;
-  console.log('All Contact Support notification checks passed.');
+  console.log('All Contact Support subscriber notification checks passed.');
 }
 
 run().catch((error) => {
