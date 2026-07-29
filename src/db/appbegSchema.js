@@ -52,7 +52,7 @@ async function findExistingTable(pool, candidates) {
 export async function discoverAppBegSchema(pool) {
   const playersTable = await findExistingTable(pool, PLAYER_TABLE_CANDIDATES);
   if (!playersTable) {
-    throw new Error('AppBeg database is missing a players table (expected players_cache or players).');
+    throw new Error('RoyalVIP database is missing a players table (expected players_cache or players).');
   }
 
   const balancesTable = await findExistingTable(pool, BALANCE_TABLE_CANDIDATES);

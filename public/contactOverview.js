@@ -20,10 +20,10 @@ export const REGISTRATION_WIZARD_STEPS = [
   {
     key: 'username',
     title: 'Collect username',
-    description: 'Enter the player’s preferred AppBeg username.',
+    description: 'Enter the player’s preferred RoyalVIP username.',
     field: 'appbegUsername',
     required: true,
-    placeholder: 'AppBeg username'
+    placeholder: 'RoyalVIP username'
   },
   {
     key: 'payment_app',
@@ -115,7 +115,7 @@ export function renderContactOverview({ contact, automationState, wizard, coadmi
         <div class="card-title">Quick context</div>
         ${infoRow('Telegram ID', contact.telegram_id)}
         ${infoRow('Last message', contact.last_message || 'No messages yet')}
-        ${infoRow('AppBeg username', info.preferred_appbeg_username || contact.appbeg_account_id || '—')}
+        ${infoRow('RoyalVIP username', info.preferred_appbeg_username || contact.appbeg_account_id || '—')}
         ${infoRow('Payment tag', info.payment_tag || '—')}
       </section>
     </section>
@@ -133,7 +133,7 @@ function renderRegisteredCard(contact, info, { isAdmin = false, revokeState = nu
         <p>Registration is complete. Open the conversation when you need to assist, or review the player profile.</p>
         <div class="status-card-meta">
           ${infoRow('Registered at', contact.registered_at ? formatShort(contact.registered_at) : '—')}
-          ${infoRow('AppBeg', info.preferred_appbeg_username || contact.appbeg_account_id || '—')}
+          ${infoRow('RoyalVIP', info.preferred_appbeg_username || contact.appbeg_account_id || '—')}
           ${info.appbeg_player_uid ? infoRow('Player UID', info.appbeg_player_uid) : ''}
         </div>
         <div class="status-card-actions">
@@ -166,16 +166,16 @@ function renderReadyToCreateCard(contact, info, coadminSettings, appbegCreateSta
     <section class="status-card status-card-info">
       <div class="status-card-icon" aria-hidden="true">📝</div>
       <div class="status-card-body">
-        <h3>Ready to create AppBeg player</h3>
-        <p>Telegram registration is complete. Review the details below, then create the AppBeg account.</p>
+        <h3>Ready to create RoyalVIP player</h3>
+        <p>Telegram registration is complete. Review the details below, then create the RoyalVIP account.</p>
         <div class="status-card-meta wizard-review">
-          ${infoRow('AppBeg username', info.preferred_appbeg_username || '—')}
+          ${infoRow('RoyalVIP username', info.preferred_appbeg_username || '—')}
           ${infoRow('Password', info.appbeg_password ? '••••••••' : '—')}
           ${infoRow('Referral code', info.referral_code || 'None')}
           ${paymentLines}
           ${infoRow('Coadmin UID', coadminUid || 'Not configured')}
         </div>
-        ${!coadminUid ? '<p class="modal-error">Configure AppBeg coadmin UID in Settings before creating a player.</p>' : ''}
+        ${!coadminUid ? '<p class="modal-error">Configure RoyalVIP coadmin UID in Settings before creating a player.</p>' : ''}
         ${error ? `<div class="modal-error">${escapeHtml(error)}</div>` : ''}
         <div class="status-card-actions">
           <button
@@ -183,7 +183,7 @@ function renderReadyToCreateCard(contact, info, coadminSettings, appbegCreateSta
             class="button"
             data-overview-action="create-appbeg-player"
             ${creating || !coadminUid ? 'disabled' : ''}
-          >${creating ? 'Creating…' : 'Create AppBeg Player'}</button>
+          >${creating ? 'Creating…' : 'Create RoyalVIP Player'}</button>
           <button type="button" class="button secondary" data-overview-action="open-chat">Open Conversation</button>
         </div>
       </div>
@@ -290,7 +290,7 @@ function renderWizardStepBody({ step, form, info, contact, coadminSettings, savi
       <div class="wizard-review">
         ${infoRow('Player', contact.display_name)}
         ${infoRow('Telegram', contact.username ? '@' + contact.username : contact.telegram_id)}
-        ${infoRow('AppBeg username', form.appbegUsername || info.preferred_appbeg_username || '—')}
+        ${infoRow('RoyalVIP username', form.appbegUsername || info.preferred_appbeg_username || '—')}
         ${infoRow('Payment app', form.paymentApp || info.preferred_game || '—')}
         ${infoRow('Payment tag', form.paymentTag || info.payment_tag || '—')}
         ${infoRow('Assigned coadmin', info.coadmin_name || settings.coadmin_name || '—')}
@@ -303,7 +303,7 @@ function renderWizardStepBody({ step, form, info, contact, coadminSettings, savi
 }
 
 function summarizeProgress(info, contact) {
-  if (isReadyToCreateAppBegPlayer(contact, info)) return 'Ready to create AppBeg player';
+  if (isReadyToCreateAppBegPlayer(contact, info)) return 'Ready to create RoyalVIP player';
   const hasUsername = Boolean(info.preferred_appbeg_username || contact.appbeg_account_id);
   const hasPassword = Boolean(info.appbeg_password);
   const hasTag = Boolean(info.payment_tag || info.payment_display_name);

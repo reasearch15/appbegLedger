@@ -10,6 +10,7 @@ import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
 import { accountViewSnapshotPatch, ACCOUNT_DETAILS_HIDDEN_TEXT, ACCOUNT_SENSITIVE_LOG_TEXT } from './accountView.js';
+import { deliverFreePlayOwnerNotification } from './freePlayRequest.js';
 import {
   DEPOSIT_BOT_SESSION_FLOW,
   DEPOSIT_BOT_SESSION_STEP_AMOUNT,
@@ -489,6 +490,28 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       accountViewHandled = true;
     }
 
+    if (decision.freePlayOwnerNotify) {
+      try {
+        await deliverFreePlayOwnerNotification({
+          store,
+          contact,
+          bot: bot || globalThis.telegramBot || null,
+          notify: decision.freePlayOwnerNotify
+        });
+      } catch (error) {
+        if (
+          decision.freePlayOwnerNotify.claimedAt
+          && typeof store.releaseFreePlayRequestClaim === 'function'
+        ) {
+          await store.releaseFreePlayRequestClaim(
+            contact.id,
+            decision.freePlayOwnerNotify.claimedAt
+          ).catch(() => null);
+        }
+        throw error;
+      }
+    }
+
     if (decision.createAppBegPlayer) {
       try {
         const created = await createAppBegPlayerForContact(store, {
@@ -513,7 +536,7 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
         console.log(`[chatbot] create_player_failed contact=${contact.id} error=${error.message}`);
         const currentInfo = (await store.getAutomationState(contact.id).catch(() => null))?.registration_info || {};
         const decisionInfo = decision.statePatch?.registrationInfo || {};
-        const safeErrorMessage = String(error.message || 'AppBeg player creation failed.').slice(0, 500);
+        const safeErrorMessage = String(error.message || 'RoyalVIP player creation failed.').slice(0, 500);
         await store.updateAutomationState(contact.id, {
           currentStep: 'review',
           registrationInfo: {

@@ -130,10 +130,10 @@ async function initAppBegStore() {
     appbegStore = {
       configured: false,
       async listPlayers() {
-        throw new Error(error.message || 'AppBeg database connection failed.');
+        throw new Error(error.message || 'RoyalVIP database connection failed.');
       },
       async getFilterOptions() {
-        throw new Error(error.message || 'AppBeg database connection failed.');
+        throw new Error(error.message || 'RoyalVIP database connection failed.');
       },
       async getPlayerByUid() {
         return null;
@@ -149,13 +149,13 @@ async function initAppBegStore() {
           }));
         return {
           configured: false,
-          reason: error.message || 'AppBeg database connection failed.',
+          reason: error.message || 'RoyalVIP database connection failed.',
           players,
           summary: { total_in: 0, total_out: 0, net: 0, last_activity: null }
         };
       },
       async exportPlayersCsv() {
-        throw new Error(error.message || 'AppBeg database connection failed.');
+        throw new Error(error.message || 'RoyalVIP database connection failed.');
       }
     };
   }

@@ -151,7 +151,7 @@ async function buildFinancialPlan(pool) {
       reason: 'table_missing',
       table: FINANCIAL_TABLE
     });
-    return { configured: false, reason: 'AppBeg financial events cache table was not found.' };
+    return { configured: false, reason: 'RoyalVIP financial events cache table was not found.' };
   }
 
   const columns = await loadTableColumns(pool, table);
@@ -188,7 +188,7 @@ async function buildFinancialPlan(pool) {
     });
     return {
       configured: false,
-      reason: `AppBeg financial events cache is missing required ${missing.join(', ')} column(s).`
+      reason: `RoyalVIP financial events cache is missing required ${missing.join(', ')} column(s).`
     };
   }
 
@@ -577,12 +577,12 @@ export async function createAppBegStore(env = process.env) {
     return {
       configured: false,
       async listPlayers() {
-        const error = new Error('AppBeg database is not configured.');
+        const error = new Error('RoyalVIP database is not configured.');
         error.code = 'APPBEG_NOT_CONFIGURED';
         throw error;
       },
       async getFilterOptions() {
-        const error = new Error('AppBeg database is not configured.');
+        const error = new Error('RoyalVIP database is not configured.');
         error.code = 'APPBEG_NOT_CONFIGURED';
         throw error;
       }
@@ -713,11 +713,11 @@ export async function createAppBegStore(env = process.env) {
       logFinancialTrace('vendor_totals_query', {
         configured: false,
         requested_players: uids.length,
-        reason: financialPlan?.reason || 'AppBeg financial reporting is not configured.'
+        reason: financialPlan?.reason || 'RoyalVIP financial reporting is not configured.'
       });
       return {
         configured: false,
-        reason: financialPlan?.reason || 'AppBeg financial reporting is not configured.',
+        reason: financialPlan?.reason || 'RoyalVIP financial reporting is not configured.',
         players,
         summary: summarizeFinancialRows(players)
       };

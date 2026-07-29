@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     CHECK (active_messaging_source IN ('bot_api', 'none')),
   registration_method TEXT,
   registration_payment_cooldown_until TEXT,
+  freeplay_requested_at TEXT,
   bot_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   bot_paused BOOLEAN NOT NULL DEFAULT FALSE,
   needs_staff_review BOOLEAN NOT NULL DEFAULT FALSE,

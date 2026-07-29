@@ -53,7 +53,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         setState({
           appbegPlayersConfigured: false,
           appbegPlayersLoading: false,
-          appbegPlayersError: payload.error || 'AppBeg database is not configured.',
+          appbegPlayersError: payload.error || 'RoyalVIP database is not configured.',
           appbegPlayers: [],
           appbegPlayersPagination: null
         });
@@ -71,7 +71,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
         appbegPlayersShowTestData: Boolean(payload.showTestData)
       });
     } catch (error) {
-      const message = error.body?.error || error.message || 'Could not load AppBeg players.';
+      const message = error.body?.error || error.message || 'Could not load RoyalVIP players.';
       setState({
         appbegPlayersLoading: false,
         appbegPlayersError: message,
@@ -191,7 +191,7 @@ export function createAppBegPlayersController({ api, getState, setState, render,
     const filters = state.appbegPlayersFilters || { statuses: [], coadmins: [] };
     return `
       <div class="appbeg-terminal-toolbar">
-        <span class="appbeg-terminal-brand">AppBeg Players</span>
+        <span class="appbeg-terminal-brand">RoyalVIP Players</span>
         <input
           id="appbegPlayersSearch"
           class="appbeg-terminal-search"
@@ -233,10 +233,10 @@ export function createAppBegPlayersController({ api, getState, setState, render,
       return `
         <main class="ops-main appbeg-terminal">
           <div class="appbeg-terminal-toolbar">
-            <span class="appbeg-terminal-brand">AppBeg Players</span>
+            <span class="appbeg-terminal-brand">RoyalVIP Players</span>
           </div>
           <div class="appbeg-terminal-config-error">
-            <strong>${escapeHtml(state.appbegPlayersError || 'AppBeg database is not configured.')}</strong>
+            <strong>${escapeHtml(state.appbegPlayersError || 'RoyalVIP database is not configured.')}</strong>
             <span>Set <code>APPBEG_DATABASE_URL</code> and restart the server.</span>
           </div>
         </main>

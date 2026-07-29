@@ -5,7 +5,7 @@ function mergeCreatePlayerFailureRegistrationInfo(currentInfo, decisionInfo, err
     ...currentInfo,
     ...decisionInfo,
     create_account_in_progress: false,
-    create_account_error: String(error.message || 'AppBeg player creation failed.').slice(0, 500)
+    create_account_error: String(error.message || 'RoyalVIP player creation failed.').slice(0, 500)
   };
 }
 

@@ -18,7 +18,7 @@ export async function createAppBegPlayerViaApi({
   const token = String(process.env.APPBEG_LEDGER_INTERNAL_TOKEN || '').trim();
 
   if (!baseUrl || !token) {
-    throw new Error('AppBeg player creation is not configured (APPBEG_API_URL / APPBEG_LEDGER_INTERNAL_TOKEN).');
+    throw new Error('RoyalVIP player creation is not configured (APPBEG_API_URL / APPBEG_LEDGER_INTERNAL_TOKEN).');
   }
 
   const controller = new AbortController();
@@ -51,14 +51,14 @@ export async function createAppBegPlayerViaApi({
     }
 
     if (!response.ok) {
-      const message = payload?.error || payload?.message || rawText || `AppBeg create-player failed (${response.status})`;
+      const message = payload?.error || payload?.message || rawText || `RoyalVIP create-player failed (${response.status})`;
       const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
       error.status = response.status;
       throw error;
     }
 
     if (!payload?.ok) {
-      throw new Error(payload?.error || 'AppBeg create-player returned an unsuccessful response.');
+      throw new Error(payload?.error || 'RoyalVIP create-player returned an unsuccessful response.');
     }
 
     return {

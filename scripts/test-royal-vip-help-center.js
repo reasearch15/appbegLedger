@@ -163,6 +163,11 @@ async function run() {
   });
   assert.match(freePlay.replies[0].text, /FreePlay Gift Box/);
   assert.match(freePlay.replies[0].text, /referral rewards/);
+  assert.ok(freePlay.replies[0].buttons.flat().some((button) => button.data === 'bot:help:ask_freeplay'));
+  assert.equal(
+    freePlay.replies[0].buttons.flat().find((button) => button.data === 'bot:help:ask_freeplay')?.text,
+    '🎁 Ask FreePlay'
+  );
   console.log('ok Help reflects inspected Royal VIP deposit, cashout, Vault, and Free Play features');
 
   const activeRegistrationStore = createStore({

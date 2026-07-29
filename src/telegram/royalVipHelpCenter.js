@@ -1,6 +1,9 @@
+import { ASK_FREEPLAY_ACTION } from './freePlayRequest.js';
+
 export const HELP_HOME_ACTION = 'bot:how_it_works';
 export const HELP_TOPIC_PREFIX = 'bot:help:';
 export const HELP_HOME_TITLE = '📖 Royal VIP Help Center';
+export { ASK_FREEPLAY_ACTION };
 
 const ROYAL_VIP_URL = 'https://royal.youplatform.org';
 
@@ -213,6 +216,14 @@ export function helpTopicButtons(topicKey = '') {
       { label: '🏠 Main Menu', text: '🏠 Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }
     ]
   ];
+  if (topic?.key === 'free_play') {
+    rows.unshift([{
+      label: '🎁 Ask FreePlay',
+      text: '🎁 Ask FreePlay',
+      action: ASK_FREEPLAY_ACTION,
+      data: ASK_FREEPLAY_ACTION
+    }]);
+  }
   if (topic?.supportOnly) {
     rows.unshift([{ label: '☎ Contact Support', text: '☎ Contact Support', action: 'menu:support', data: 'menu:support' }]);
   }

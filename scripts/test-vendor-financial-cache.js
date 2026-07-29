@@ -361,7 +361,7 @@ async function testMissingRequiredSchemaStaysUnavailable() {
         async getFinancialReportForPlayerUids(playerUids = []) {
           return {
             configured: false,
-            reason: 'AppBeg financial events cache is missing required amount column(s).',
+            reason: 'RoyalVIP financial events cache is missing required amount column(s).',
             source: 'financial_events_cache',
             players: playerUids.map((uid) => ({ uid, financial_available: false })),
             summary: null

@@ -13,8 +13,8 @@ const STEP_LABELS = {
   await_payment: 'Waiting for Payment',
   await_payment_done: 'Waiting for Payment',
   waiting_for_payment_confirmation: 'Waiting for Payment Confirmation',
-  username: 'Entering AppBeg Username',
-  enter_appbeg_username: 'Entering AppBeg Username',
+  username: 'Entering RoyalVIP Username',
+  enter_appbeg_username: 'Entering RoyalVIP Username',
   password: 'Entering Password',
   enter_appbeg_password: 'Entering Password',
   referral_code: 'Entering Referral Code',
@@ -26,7 +26,7 @@ const STEP_LABELS = {
   deposit_payment_name: 'Entering Deposit Payment Name',
   deposit_amount: 'Entering Deposit Amount',
   deposit_await_payment: 'Waiting for Deposit Payment',
-  appbeg_username: 'Entering AppBeg Username',
+  appbeg_username: 'Entering RoyalVIP Username',
   confirm: 'Confirming'
 };
 

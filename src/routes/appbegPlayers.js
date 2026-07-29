@@ -39,7 +39,7 @@ export function registerAppBegPlayerRoutes(app, { appbegStore }) {
     if (!appbegStore.configured) {
       return res.status(503).json({
         configured: false,
-        error: 'AppBeg database is not configured.'
+        error: 'RoyalVIP database is not configured.'
       });
     }
 
@@ -78,7 +78,7 @@ export function registerAppBegPlayerRoutes(app, { appbegStore }) {
       console.error('[appbeg-players] list failed:', error);
       res.status(500).json({
         configured: true,
-        error: error.message || 'Could not load AppBeg players.'
+        error: error.message || 'Could not load RoyalVIP players.'
       });
     }
   });

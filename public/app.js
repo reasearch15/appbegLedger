@@ -775,7 +775,7 @@ async function completeRegistrationWizard() {
   const paymentApp = String(form.paymentApp || '').trim();
 
   if (!appbegUsername) {
-    state.registrationWizard = { ...wizard, form, step: 'username', error: 'AppBeg username is required.' };
+    state.registrationWizard = { ...wizard, form, step: 'username', error: 'RoyalVIP username is required.' };
     render();
     return;
   }
@@ -852,7 +852,7 @@ async function createAppBegPlayerForContact() {
     await refreshPlayers({ keepSelection: true, silent: true });
     render();
   } catch (error) {
-    state.appbegCreateState = { creating: false, error: error.message || 'Failed to create AppBeg player.' };
+    state.appbegCreateState = { creating: false, error: error.message || 'Failed to create RoyalVIP player.' };
     render();
   }
 }
@@ -1089,7 +1089,7 @@ async function saveRegistrationModal() {
   };
 
   if (!form.appbegUsername) {
-    state.registrationModal.error = 'AppBeg username is required.';
+    state.registrationModal.error = 'RoyalVIP username is required.';
     render();
     return;
   }
@@ -1697,7 +1697,7 @@ function staffAiUserStateDebugLabel(draft) {
     || state.contact?.appbeg_account_id
     || null;
   if (registered) {
-    return `User state: Registered${username ? `\nAppBeg username: ${username}` : ''}`;
+    return `User state: Registered${username ? `\nRoyalVIP username: ${username}` : ''}`;
   }
   const step = draft?.registration_step || entities.registration_step || 'none';
   return `User state: Unregistered\nRegistration step: ${step}`;
@@ -1878,7 +1878,7 @@ function computeLocalProgress(contact, info) {
   }
   const steps = [
     { key: 'telegram', label: 'Telegram Connected', done: Boolean(contact.telegram_id) },
-    { key: 'appbeg', label: 'AppBeg Username', done: Boolean(info.preferred_appbeg_username) },
+    { key: 'appbeg', label: 'RoyalVIP Username', done: Boolean(info.preferred_appbeg_username) },
     { key: 'payment', label: 'Payment Tag', done: Boolean(info.payment_tag || info.payment_display_name) },
     { key: 'submitted', label: 'Submitted for Review', done: ['Pending Verification', 'Registered'].includes(contact.registration_status) }
   ];
@@ -1895,7 +1895,7 @@ function coadminInfoRows(info = {}) {
   return `
     ${infoRow('Assigned Coadmin', name)}
     ${infoRow('Coadmin Code', code)}
-    ${infoRow('AppBeg Coadmin UID', uid)}
+    ${infoRow('RoyalVIP Coadmin UID', uid)}
     ${infoRow('Ownership', assigned ? 'Assigned' : 'Pending assignment from settings')}
   `;
 }
@@ -1912,7 +1912,7 @@ function registrationPanel() {
     ${infoRow('Registered', contact.registration_status === 'Registered' ? 'Yes' : 'No')}
     ${infoRow('Status', contact.registration_status || 'New')}
     ${infoRow('Current Step', state.automationState?.current_step || '-')}
-    ${infoRow('AppBeg Username', info.preferred_appbeg_username || contact.appbeg_account_id || '-')}
+    ${infoRow('RoyalVIP Username', info.preferred_appbeg_username || contact.appbeg_account_id || '-')}
     ${infoRow('Payment App', info.payment_method_name || info.payment_app || '-')}
     ${infoRow('Payment Account', paymentAccount)}
     ${infoRow('Payment Name', info.payment_display_name || '-')}
@@ -1976,7 +1976,7 @@ function automationPanel() {
       ${intentPill('support_needed', intents.support_needed)}
     </div>
     <div class="registration-info-form">
-      <input id="regUsername" value="${escapeHtml(info.preferred_appbeg_username || '')}" placeholder="Preferred AppBeg username" />
+      <input id="regUsername" value="${escapeHtml(info.preferred_appbeg_username || '')}" placeholder="Preferred RoyalVIP username" />
       <input id="regPaymentTag" value="${escapeHtml(info.payment_tag || '')}" placeholder="Payment tag" />
       <input id="regGame" value="${escapeHtml(info.preferred_game || '')}" placeholder="Preferred game / platform" />
       <textarea id="regNote" placeholder="Optional note">${escapeHtml(info.note || '')}</textarea>
@@ -2242,7 +2242,7 @@ function paymentDetailPanel() {
           </label>
           <div class="status-card-actions payment-detail-actions">
             <button type="button" class="button secondary" data-payment-action="link" ${busy ? 'disabled' : ''}>Link</button>
-            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark AppBeg Owned</button>
+            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark RoyalVIP Owned</button>
           </div>
         </div>
       </section>
@@ -2580,7 +2580,7 @@ function manualReviewDetailPanel() {
           </label>
           <div class="status-card-actions payment-detail-actions">
             <button type="button" class="button secondary" data-payment-action="link" ${busy ? 'disabled' : ''}>Match to Window</button>
-            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark AppBeg Owned</button>
+            <button type="button" class="button" data-payment-action="mark-owned" ${busy ? 'disabled' : ''}>Mark RoyalVIP Owned</button>
           </div>
         </div>
       </section>
@@ -2625,8 +2625,8 @@ function settingsWorkspace() {
               <input id="coadminCode" value="${escapeHtml(settings.coadmin_code || '')}" placeholder="e.g. SAYU" />
             </label>
             <label class="field-label">
-              <span>AppBeg Coadmin UID / ID</span>
-              <input id="appbegCoadminUid" value="${escapeHtml(settings.appbeg_coadmin_uid || '')}" placeholder="AppBeg coadmin identifier" />
+              <span>RoyalVIP Coadmin UID / ID</span>
+              <input id="appbegCoadminUid" value="${escapeHtml(settings.appbeg_coadmin_uid || '')}" placeholder="RoyalVIP coadmin identifier" />
             </label>
             <div class="form-section-label">Telegram Business Account (historical)</div>
             <p class="subtle">These fields are kept for historical configuration only. They do not control BotFather contact coadmin assignment.</p>
@@ -3319,14 +3319,14 @@ function vendorsWorkspace() {
             ${state.vendorPlayers.length ? `
               <div class="vendor-players-table">
                 <div class="vendor-players-header">
-                  <span>AppBeg Username</span>
+                  <span>RoyalVIP Username</span>
                   <span>Total In</span>
                   <span>Total Out</span>
                   <span>Net</span>
                   <span>Last Activity</span>
                   <span>Telegram Name</span>
                   <span>Telegram Username</span>
-                  <span>AppBeg UID</span>
+                  <span>RoyalVIP UID</span>
                   <span>Linked Date</span>
                 </div>
                 ${state.vendorPlayers.map((player) => `
@@ -3421,7 +3421,7 @@ async function handlePaymentAction(action, button) {
       const contactId = Number(document.querySelector('#paymentLinkContactId')?.value || 0);
       const registrationPaymentWindowId = Number(document.querySelector('#paymentLinkWindowId')?.value || 0);
       if (!contactId || !registrationPaymentWindowId) {
-        throw new Error('Contact ID and Payment Window ID are required to mark AppBeg owned.');
+        throw new Error('Contact ID and Payment Window ID are required to mark RoyalVIP owned.');
       }
       await api(`/api/payments/${paymentId}/mark-owned`, {
         method: 'POST',
@@ -3455,7 +3455,7 @@ function render() {
   ] : [
     { id: 'contacts', label: 'Contacts', icon: '💬' },
     { id: 'players', label: 'Players', icon: '👥' },
-    { id: 'appbeg-players', label: 'AppBeg Players', icon: '📊' },
+    { id: 'appbeg-players', label: 'RoyalVIP Players', icon: '📊' },
     { id: 'payments', label: 'Payments', icon: '💳' },
     {
       id: 'ongoing',
@@ -3491,7 +3491,7 @@ function render() {
     <div class="ops-shell ${isVendor() ? 'vendor-portal' : ''} section-${escapeHtml(state.section)} ${state.navOpen ? 'nav-open' : ''} ${state.section === 'contacts' && state.mobileContactsPane !== 'list' ? 'chat-focused' : ''}">
       <button type="button" class="nav-drawer-backdrop" data-nav-close aria-label="Close menu"></button>
       <aside class="sidebar" id="appSidebar">
-        <div class="brand">AppBeg Ledger</div>
+        <div class="brand">RoyalVIP Ledger</div>
         <nav class="sidebar-nav" aria-label="Primary">
           ${navHtml}
         </nav>
@@ -3569,7 +3569,7 @@ function renderRevokeRegistrationModal() {
         </div>
         <p>
           This will clear local registration data for ${escapeHtml(modal.contactName)} and let the user register again from the beginning.
-          Telegram conversation history, notes, tags, AppBeg ledger history, and the AppBeg player account will not be deleted.
+          Telegram conversation history, notes, tags, RoyalVIP ledger history, and the RoyalVIP player account will not be deleted.
         </p>
         <p class="modal-error">
           A new registration will require a new payment. Already consumed payment events will stay consumed and will not be reused.

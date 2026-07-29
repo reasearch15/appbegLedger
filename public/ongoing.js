@@ -236,7 +236,7 @@ export function createOngoingController({ api, getState, setState, render, openC
         <div class="ongoing-card-body">
           ${infoLine('Registration Step', kind === 'registration' ? escapeHtml(item.current_step_label || item.current_step || '—') : '')}
           ${infoLine('Deposit Step', kind === 'deposit' ? escapeHtml(item.current_step_label || item.current_step || '—') : '')}
-          ${infoLine('AppBeg Username', item.appbeg_username ? escapeHtml(item.appbeg_username) : '')}
+          ${infoLine('RoyalVIP Username', item.appbeg_username ? escapeHtml(item.appbeg_username) : '')}
           ${infoLine('Payment Tag', item.payment_tag ? escapeHtml(item.payment_tag) : '')}
           ${infoLine('Deposit Amount', amount ? escapeHtml(amount) : '')}
           ${infoLine('Assigned Staff', escapeHtml(item.assigned_staff_name || 'Unassigned'))}

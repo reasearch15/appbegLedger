@@ -28,13 +28,13 @@ export function renderRegistrationModal(state) {
           ${modalInfoRow('Telegram ID', contact.telegram_id)}
           ${modalInfoRow('Assigned Coadmin', coadmin.name || '—')}
           ${modalInfoRow('Coadmin Code', coadmin.code || '—')}
-          ${modalInfoRow('AppBeg Coadmin UID', coadmin.uid || '—')}
+          ${modalInfoRow('RoyalVIP Coadmin UID', coadmin.uid || '—')}
         </section>
 
         <form id="registrationModalForm" class="modal-form">
           <label class="field-label">
-            <span>AppBeg Username <em class="required">*</em></span>
-            <input id="modalAppbegUsername" value="${escapeHtml(form.appbegUsername ?? info.preferred_appbeg_username ?? '')}" placeholder="AppBeg username" ${saving ? 'disabled' : ''} />
+            <span>RoyalVIP Username <em class="required">*</em></span>
+            <input id="modalAppbegUsername" value="${escapeHtml(form.appbegUsername ?? info.preferred_appbeg_username ?? '')}" placeholder="RoyalVIP username" ${saving ? 'disabled' : ''} />
           </label>
           <label class="field-label">
             <span>Payment App Name / Payment Tag <em class="required">*</em></span>

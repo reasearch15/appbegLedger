@@ -169,7 +169,7 @@ export function createPlayersController({ api, getState, setState, render }) {
         <section class="players-layout">
           <section class="players-feed">
             <div class="players-toolbar">
-              <input id="playerSearchInput" class="search" value="${escapeHtml(state.playerQuery)}" placeholder="Search name, username, ID, AppBeg, payment tag, coadmin, phone, notes, tags" />
+              <input id="playerSearchInput" class="search" value="${escapeHtml(state.playerQuery)}" placeholder="Search name, username, ID, RoyalVIP, payment tag, coadmin, phone, notes, tags" />
               <div class="filter-row">${playerFilterButtons(state.playerFilter)}</div>
             </div>
             <div class="players-table-shell">
@@ -178,7 +178,7 @@ export function createPlayersController({ api, getState, setState, render }) {
                 <span>Status</span>
                 <span>Progress</span>
                 <span>Coadmin</span>
-                <span>AppBeg</span>
+                <span>RoyalVIP</span>
                 <span>Payment</span>
                 <span>Last Seen</span>
                 <span>Registered</span>
@@ -337,7 +337,7 @@ function playerDetailPanel(player, detail, helpers = {}) {
       <div class="card-title">Coadmin</div>
       ${infoRow('Coadmin Name', player.coadmin_name || '—')}
       ${infoRow('Coadmin Code', player.coadmin_code || '—')}
-      ${infoRow('AppBeg Coadmin UID', player.appbeg_coadmin_uid || '—')}
+      ${infoRow('RoyalVIP Coadmin UID', player.appbeg_coadmin_uid || '—')}
     </section>
 
     <section class="card panel-section">
@@ -345,7 +345,7 @@ function playerDetailPanel(player, detail, helpers = {}) {
       ${infoRow('Status', statusBadge(player.registration_status))}
       ${progressBar(player.registration_progress)}
       ${progressChecklist(player.registration_progress)}
-      ${infoRow('AppBeg Username', player.appbeg_username || '—')}
+      ${infoRow('RoyalVIP Username', player.appbeg_username || '—')}
       ${infoRow('Payment Tag', player.payment_tag || '—')}
       ${infoRow('Method', player.registration_method || '—')}
       ${infoRow('Registered At', helpers.fmtDateTime ? helpers.fmtDateTime(player.registered_at) : (player.registered_at || '—'))}
@@ -361,7 +361,7 @@ function playerDetailPanel(player, detail, helpers = {}) {
         <button type="button" class="button secondary" data-panel-action="suspend">Suspend</button>
         <button type="button" class="button secondary" data-panel-action="open-chat">Open Chat</button>
         <button class="button secondary" data-panel-action="copy" data-copy-value="${escapeHtml(player.telegram_id)}">Copy Telegram ID</button>
-        <button class="button secondary" data-panel-action="copy" data-copy-value="${escapeHtml(player.appbeg_username || '')}">Copy AppBeg Username</button>
+        <button class="button secondary" data-panel-action="copy" data-copy-value="${escapeHtml(player.appbeg_username || '')}">Copy RoyalVIP Username</button>
         <button class="button secondary" data-panel-action="copy" data-copy-value="${escapeHtml(player.payment_tag || '')}">Copy Payment Tag</button>
       </div>
     </section>

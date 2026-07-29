@@ -3,7 +3,7 @@ const DEFAULT_TIMEOUT_MS = 30000;
 export function buildPaymentEventIdempotencyKey(paymentEventId) {
   const id = Number(paymentEventId);
   if (!Number.isInteger(id) || id <= 0) {
-    throw new Error('Valid paymentEventId is required for AppBeg credit idempotency.');
+    throw new Error('Valid paymentEventId is required for RoyalVIP credit idempotency.');
   }
   return `appbegledger-payment-event:${id}`;
 }
@@ -22,7 +22,7 @@ export async function creditAppBegDepositViaApi({
   const token = String(process.env.APPBEG_LEDGER_INTERNAL_TOKEN || '').trim();
 
   if (!baseUrl || !token) {
-    throw new Error('AppBeg deposit credit is not configured (APPBEG_API_URL / APPBEG_LEDGER_INTERNAL_TOKEN).');
+    throw new Error('RoyalVIP deposit credit is not configured (APPBEG_API_URL / APPBEG_LEDGER_INTERNAL_TOKEN).');
   }
 
   const controller = new AbortController();
@@ -57,7 +57,7 @@ export async function creditAppBegDepositViaApi({
     }
 
     if (!response.ok) {
-      const message = payload?.error || payload?.message || rawText || `AppBeg deposit credit failed (${response.status})`;
+      const message = payload?.error || payload?.message || rawText || `RoyalVIP deposit credit failed (${response.status})`;
       const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
       error.status = response.status;
       throw error;
@@ -65,7 +65,7 @@ export async function creditAppBegDepositViaApi({
 
     const status = payload?.status;
     if (status !== 'credited' && status !== 'already_credited') {
-      throw new Error(payload?.error || 'AppBeg deposit credit returned an unexpected response.');
+      throw new Error(payload?.error || 'RoyalVIP deposit credit returned an unexpected response.');
     }
 
     return {

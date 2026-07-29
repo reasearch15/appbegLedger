@@ -837,6 +837,57 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return user ? hydrateUser(user) : null;
   }
 
+  async function tryClaimFreePlayRequest(contactId, { cooldownMs = 12 * 60 * 60 * 1000 } = {}) {
+    const id = Number(contactId);
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false, reason: 'invalid_contact' };
+    }
+    const now = new Date();
+    const nowText = now.toISOString();
+    const cutoff = new Date(now.getTime() - Math.max(0, Number(cooldownMs) || 0)).toISOString();
+    const result = await db.prepare(`
+      UPDATE telegram_users
+      SET freeplay_requested_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND (
+          freeplay_requested_at IS NULL
+          OR freeplay_requested_at = ''
+          OR freeplay_requested_at <= ?
+        )
+    `).run(nowText, nowText, id, cutoff);
+
+    if (!result.changes) {
+      const row = await db.prepare(`
+        SELECT freeplay_requested_at
+        FROM telegram_users
+        WHERE id = ?
+      `).get(id);
+      return {
+        ok: false,
+        reason: 'cooldown_active',
+        requestedAt: row?.freeplay_requested_at || null
+      };
+    }
+
+    return { ok: true, reason: 'claimed', requestedAt: nowText };
+  }
+
+  async function releaseFreePlayRequestClaim(contactId, claimedAt) {
+    const id = Number(contactId);
+    if (!Number.isFinite(id) || id <= 0 || !claimedAt) {
+      return { ok: false, reason: 'invalid_release' };
+    }
+    const result = await db.prepare(`
+      UPDATE telegram_users
+      SET freeplay_requested_at = NULL,
+          updated_at = ?
+      WHERE id = ?
+        AND freeplay_requested_at = ?
+    `).run(nowIso(), id, String(claimedAt));
+    return { ok: Boolean(result.changes), reason: result.changes ? 'released' : 'not_matched' };
+  }
+
   async function listMessagesForUser(id) {
     return await db.prepare(`
       SELECT m.*
@@ -2178,7 +2229,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       telegramUserId: userId,
       eventType: 'registration_completed',
       title: 'Registration Completed',
-      body: 'AppBeg player created and contact marked Registered.',
+      body: 'RoyalVIP player created and contact marked Registered.',
       actorName,
       metadata: {
         playerUid,
@@ -3626,7 +3677,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       || ''
     ).trim();
     if (!resolvedPlayerUid) {
-      throw new Error('AppBeg player UID is required before crediting a deposit.');
+      throw new Error('RoyalVIP player UID is required before crediting a deposit.');
     }
 
     const idempotencyKey = buildPaymentEventIdempotencyKey(eventId);
@@ -3700,8 +3751,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       await logEvent({
         telegramUserId: id,
         eventType: 'deposit_credit_failed',
-        title: 'AppBeg Deposit Credit Failed',
-        body: error.message || 'AppBeg deposit credit failed.',
+        title: 'RoyalVIP Deposit Credit Failed',
+        body: error.message || 'RoyalVIP deposit credit failed.',
         actorName,
         metadata: {
           paymentEventId: eventId,
@@ -3747,7 +3798,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     await logEvent({
       telegramUserId: id,
       eventType: result.alreadyCredited ? 'deposit_credit_already_credited' : 'deposit_credit_succeeded',
-      title: result.alreadyCredited ? 'AppBeg Deposit Already Credited' : 'AppBeg Deposit Credited',
+      title: result.alreadyCredited ? 'RoyalVIP Deposit Already Credited' : 'RoyalVIP Deposit Credited',
       body: `${sourceFlow} ${result.alreadyCredited ? 'already credited' : 'credited'} for ${authoritativeAmount}.`,
       actorName,
       metadata: {
@@ -6799,6 +6850,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listUsers,
     getStats,
     getUserProfile,
+    tryClaimFreePlayRequest,
+    releaseFreePlayRequestClaim,
     listMessagesForUser,
     listNotesForUser,
     listTimelineForUser,
@@ -7263,6 +7316,7 @@ async function migrate(db) {
     ['active_messaging_source', "TEXT NOT NULL DEFAULT 'bot_api'"],
     ['registration_method', 'TEXT'],
     ['registration_payment_cooldown_until', 'TEXT'],
+    ['freeplay_requested_at', 'TEXT'],
     ['bot_enabled', 'INTEGER NOT NULL DEFAULT 1'],
     ['bot_paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['needs_staff_review', 'INTEGER NOT NULL DEFAULT 0'],

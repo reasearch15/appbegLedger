@@ -153,6 +153,7 @@ export async function migratePostgres(driver) {
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_reason TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS staff_review_at TEXT;
     ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS registration_payment_cooldown_until TEXT;
+    ALTER TABLE telegram_users ADD COLUMN IF NOT EXISTS freeplay_requested_at TEXT;
   `);
   await driver.exec(`
     CREATE TABLE IF NOT EXISTS bot_jobs (

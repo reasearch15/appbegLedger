@@ -65,6 +65,10 @@ import {
   isHelpCenterAction
 } from './royalVipHelpCenter.js';
 import {
+  ASK_FREEPLAY_ACTION,
+  decideAskFreePlayRequest
+} from './freePlayRequest.js';
+import {
   ACCOUNT_DETAILS_HIDDEN_TEXT,
   buildMissingAccountButtons,
   buildMyAccountButtons,
@@ -493,6 +497,10 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       };
     }
     return await mainMenuDecision(contact, info, automationState, effective, { forceFull: true });
+  }
+
+  if (action === ASK_FREEPLAY_ACTION) {
+    return await decideAskFreePlayRequest({ store, contact, info });
   }
 
   if (isHelpCenterAction(action)) {

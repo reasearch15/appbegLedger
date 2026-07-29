@@ -243,7 +243,7 @@ async function loadFinancialByUid(appbegStore, players) {
       configured: !uids.length,
       players: new Map(),
       source: null,
-      reason: !uids.length ? null : 'AppBeg financial reporting is not available.'
+      reason: !uids.length ? null : 'RoyalVIP financial reporting is not available.'
     };
   }
   try {

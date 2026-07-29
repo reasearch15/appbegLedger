@@ -32,7 +32,7 @@ function registrationInfoForCreate(info = {}) {
     throw new Error('Payment has not been confirmed for this registration.');
   }
   if (info.appbeg_creation_complete) {
-    throw new Error('AppBeg player has already been created for this contact.');
+    throw new Error('RoyalVIP player has already been created for this contact.');
   }
 
   const referralCode = String(info.referral_code || info.referralCode || '').trim();
@@ -62,7 +62,7 @@ async function findExistingEquivalentPlayer(username, coadminUid) {
   if (playerUsername !== String(username || '').trim().toLowerCase()) return null;
   const playerCoadmin = String(player.coadmin_uid || player.created_by || '').trim();
   if (coadminUid && playerCoadmin && playerCoadmin !== coadminUid) {
-    throw new Error('Existing AppBeg player username belongs to a different coadmin.');
+    throw new Error('Existing RoyalVIP player username belongs to a different coadmin.');
   }
   return {
     ok: true,
@@ -129,7 +129,7 @@ export async function createAppBegPlayerForContact(store, {
     || ''
   ).trim();
   if (!coadminUid) {
-    throw new Error('AppBeg coadmin UID is not configured in Settings.');
+    throw new Error('RoyalVIP coadmin UID is not configured in Settings.');
   }
 
   console.log(`[ledger] create_player_requested contact=${id} username=${username}`);
@@ -137,8 +137,8 @@ export async function createAppBegPlayerForContact(store, {
   await store.logEvent({
     telegramUserId: id,
     eventType: 'create_player_requested',
-    title: 'AppBeg Player Creation Requested',
-    body: `AppBeg player creation requested for ${username}.`,
+    title: 'RoyalVIP Player Creation Requested',
+    body: `RoyalVIP player creation requested for ${username}.`,
     actorName,
     metadata: {
       username,
@@ -181,7 +181,7 @@ export async function createAppBegPlayerForContact(store, {
     });
 
     if (typeof store.creditRegisteredDeposit !== 'function') {
-      throw new Error('AppBeg deposit credit helper is not available.');
+      throw new Error('RoyalVIP deposit credit helper is not available.');
     }
 
     const windowId = Number(nextInfo.registration_payment_window_id);
@@ -303,8 +303,8 @@ export async function createAppBegPlayerForContact(store, {
     await store.logEvent({
       telegramUserId: id,
       eventType: 'create_player_success',
-      title: 'AppBeg Player Created',
-      body: `AppBeg player ${result.username || username} created successfully.`,
+      title: 'RoyalVIP Player Created',
+      body: `RoyalVIP player ${result.username || username} created successfully.`,
       actorName,
       metadata: {
         playerUid: result.playerUid,
@@ -338,8 +338,8 @@ export async function createAppBegPlayerForContact(store, {
     await store.logEvent({
       telegramUserId: id,
       eventType: 'create_player_failed',
-      title: 'AppBeg Player Creation Failed',
-      body: error.message || 'AppBeg player creation failed.',
+      title: 'RoyalVIP Player Creation Failed',
+      body: error.message || 'RoyalVIP player creation failed.',
       actorName,
       metadata: {
         username,
