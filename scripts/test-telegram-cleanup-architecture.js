@@ -41,22 +41,49 @@ async function testBotContactUpsertSource() {
 async function testCallbackJobDedupe() {
   const { store } = await createTempStore();
   const user = await store.upsertTelegramUser({ id: 99, first_name: 'Callback', is_bot: false });
+
+  // Exact Telegram update redelivery (same update_id) must dedupe.
   const first = await store.createBotJob({
     contactId: user.id,
     telegramUserId: user.telegram_id,
+    updateId: 9001,
     incomingTelegramMessageId: 777,
     jobType: 'callback_action',
-    action: 'bot:register'
+    action: 'bot:my_account'
   });
-  const second = await store.createBotJob({
+  const sameUpdate = await store.createBotJob({
     contactId: user.id,
     telegramUserId: user.telegram_id,
+    updateId: 9001,
     incomingTelegramMessageId: 777,
     jobType: 'callback_action',
-    action: 'bot:register'
+    action: 'bot:my_account'
   });
-  assert.equal(second.id, first.id);
-  assert.equal(second.duplicate, true);
+  assert.equal(sameUpdate.id, first.id);
+  assert.equal(sameUpdate.duplicate, true);
+
+  // Later click of the same menu button (same message_id + action, new update_id) must create a new job.
+  const laterClick = await store.createBotJob({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    updateId: 9002,
+    incomingTelegramMessageId: 777,
+    jobType: 'callback_action',
+    action: 'bot:my_account'
+  });
+  assert.notEqual(laterClick.id, first.id);
+  assert.notEqual(laterClick.duplicate, true);
+
+  const thirdClick = await store.createBotJob({
+    contactId: user.id,
+    telegramUserId: user.telegram_id,
+    updateId: 9003,
+    incomingTelegramMessageId: 777,
+    jobType: 'callback_action',
+    action: 'bot:my_account'
+  });
+  assert.notEqual(thirdClick.id, laterClick.id);
+  assert.notEqual(thirdClick.duplicate, true);
   await store.close?.();
 }
 

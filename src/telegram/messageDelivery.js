@@ -3,13 +3,14 @@ import { resolvePaymentQrTelegramInput } from '../payments/methodUtils.js';
 import { recordActiveBotMessage } from './callbackSafety.js';
 
 export function createBotReplySender(bot, store) {
-  return async function sendReply({ user, text, buttons = [], messageType = 'text' }) {
+  return async function sendReply({ user, text, buttons = [], messageType = 'text', storeText = null } = {}) {
     const normalizedButtons = normalizeButtonRows(buttons);
     const replyMarkup = normalizedButtons.length
       ? {
         inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton))
       }
       : undefined;
+    const persistedText = storeText == null ? text : storeText;
 
     console.log(`[telegram-outbound] bot_api send contact=${user.id} buttons=${JSON.stringify(normalizedButtons)}`);
     if (replyMarkup) {
@@ -36,12 +37,16 @@ export function createBotReplySender(bot, store) {
     await store.storeOutgoingMessage({
       telegramUserId: user.id,
       telegramMessageId: telegramResponse.message_id,
-      text,
+      text: persistedText,
       payload: {
-        telegramResponse,
+        // Avoid persisting raw Telegram response bodies that may echo sensitive text.
+        telegramResponse: storeText == null
+          ? telegramResponse
+          : { message_id: telegramResponse.message_id },
         buttons: normalizedButtons,
         reply_markup: returnedMarkup,
-        channel: 'bot_api'
+        channel: 'bot_api',
+        ...(storeText == null ? {} : { sensitive: true })
       },
       senderType: 'bot',
       source: 'bot_api',

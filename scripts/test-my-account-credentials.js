@@ -117,12 +117,20 @@ async function run() {
     action: 'menu:my_account'
   });
   assert.equal(account.kind, 'account_credentials');
-  assert.match(account.replies[0].text, /👤 Royal VIP Account/);
-  assert.match(account.replies[0].text, /Username:\nAmyVip01/);
-  assert.match(account.replies[0].text, /Password:\nSecret123/);
+  assert.match(account.replies[0].text, /^Royal VIP Account/);
+  assert.match(account.replies[0].text, /Username: AmyVip01/);
+  assert.match(account.replies[0].text, /Password: Secret123/);
   assert.match(account.replies[0].text, /Keep these details private/);
   assert.doesNotMatch(account.replies[0].text, /AppBeg/);
   assert.deepEqual(account.replies[0].buttons[0][0].web_app, { url: 'https://royal.youplatform.org' });
+  assert.match(account.replies[0].buttons[0][0].text, /Open Royal VIP/);
+  const accountButtonActions = account.replies[0].buttons.flat().map((button) => button.action || button.data);
+  assert.ok(accountButtonActions.includes('bot:main_menu'));
+  assert.ok(accountButtonActions.some((action) => String(action).startsWith('account:support:')));
+  assert.deepEqual(
+    account.replies[0].buttons.flat().map((button) => button.text),
+    ['🔴 Open Royal VIP', 'Main Menu', 'Support']
+  );
   assert.equal(JSON.stringify(account.replies[0].buttons), JSON.stringify(account.replies[0].buttons).includes('Secret123') ? 'password leaked' : JSON.stringify(account.replies[0].buttons));
   console.log('ok registered user sees own Royal VIP credentials with Web App button');
 
@@ -152,18 +160,77 @@ async function run() {
     action: 'menu:my_account'
   });
   assert.equal(missing.kind, 'account_credentials_missing');
-  assert.match(missing.replies[0].text, /not available yet/);
+  assert.match(missing.replies[0].text, /Royal VIP account information is currently unavailable/);
+  assert.match(missing.replies[0].text, /Please contact Support/);
   assert.doesNotMatch(missing.replies[0].text, /Password:\s*$/);
-  assert.deepEqual(missing.replies[0].buttons.flat().map((button) => button.text), ['Support', 'Back']);
+  assert.ok(missing.replies[0].text.trim().length > 0);
+  assert.deepEqual(missing.replies[0].buttons.flat().map((button) => button.text), ['Support', 'Main Menu']);
   console.log('ok missing credentials show safe fallback');
+
+  const missingProcessStore = createStore({
+    initialState: { registration_info: { appbeg_player_uid: 'playeruid123456' } }
+  });
+  const missingCalls = [];
+  const missingBot = {
+    telegram: {
+      async sendMessage(chatId, text, options = {}) {
+        missingCalls.push({ method: 'sendMessage', chatId, text, options });
+        return { message_id: 601, reply_markup: options.reply_markup || null };
+      }
+    }
+  };
+  await processBotJob(missingProcessStore, {
+    id: 10,
+    contact_id: 77,
+    telegram_user_id: 9077,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'bot:my_account',
+    incoming_telegram_message_id: 401,
+    update_id: 20001,
+    message_id: null
+  }, { bot: missingBot });
+  assert.equal(missingCalls.length, 1);
+  assert.equal(missingCalls[0].chatId, 9077);
+  assert.match(missingCalls[0].text, /contact Support/i);
+  assert.equal(missingProcessStore.completed[0].payload.status, 'completed');
+  assert.doesNotMatch(JSON.stringify(missingProcessStore.logs), /Password:/i);
+  console.log('ok missing credentials deliver Support message (no silent completion)');
+
+  const undeliveredStore = createStore({ initialState: { registration_info: baseInfo } });
+  const undeliveredBot = {
+    telegram: {
+      async sendMessage() {
+        throw new Error('telegram_send_failed');
+      }
+    }
+  };
+  const undelivered = await processBotJob(undeliveredStore, {
+    id: 11,
+    contact_id: 77,
+    telegram_user_id: 9077,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'bot:my_account',
+    incoming_telegram_message_id: 402,
+    update_id: 20002,
+    message_id: null
+  }, { bot: undeliveredBot });
+  assert.equal(undelivered.ok, false);
+  assert.equal(undeliveredStore.completed[0].payload.status, 'failed');
+  assert.match(String(undeliveredStore.completed[0].payload.errorText || ''), /telegram_send_failed/);
+  assert.doesNotMatch(JSON.stringify(undeliveredStore.completed), /Secret123/);
+  console.log('ok undelivered account credentials mark job failed');
 
   const processStore = createStore({ initialState: { registration_info: baseInfo } });
   const calls = [];
+  let nextMessageId = 500;
   const bot = {
     telegram: {
       async sendMessage(chatId, text, options = {}) {
+        nextMessageId += 1;
         calls.push({ method: 'sendMessage', chatId, text, options });
-        return { message_id: 501, reply_markup: options.reply_markup || null };
+        return { message_id: nextMessageId, reply_markup: options.reply_markup || null };
       },
       async editMessageText(chatId, messageId, inlineMessageId, text, options = {}) {
         calls.push({ method: 'editMessageText', chatId, messageId, inlineMessageId, text, options });
@@ -184,14 +251,19 @@ async function run() {
     input_text: '',
     action: 'bot:my_account',
     incoming_telegram_message_id: 400,
+    update_id: 10001,
     message_id: null
   }, { bot });
   assert.equal(calls[0].method, 'sendMessage');
+  assert.equal(calls[0].chatId, 9077);
   assert.match(calls[0].text, /Secret123/);
   assert.equal(processStore.outbound[0].text, '[sensitive account details omitted]');
   assert.equal(processStore.logs[0].responseSent, '[sensitive account details omitted]');
   assert.doesNotMatch(JSON.stringify(processStore.logs), /Secret123/);
+  assert.doesNotMatch(JSON.stringify(processStore.outbound), /Secret123/);
   assert.doesNotMatch(JSON.stringify(calls[0].options), /Secret123/);
+  assert.equal(processStore.completed[0].payload.status, 'completed');
+  assert.ok(!processStore.completed[0].payload.errorText);
   const saved = await processStore.getAutomationState();
   assert.equal(saved.registration_info.account_view_message_id, 501);
   console.log('ok account view sends once without logging password');
@@ -204,13 +276,16 @@ async function run() {
     input_text: '',
     action: 'bot:my_account',
     incoming_telegram_message_id: 400,
+    update_id: 10002,
     message_id: null
   }, { bot });
-  assert.equal(calls.some((call) => call.method === 'editMessageText' && call.messageId === 501 && /Secret123/.test(call.text)), true);
-  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 1);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 2);
+  assert.equal(calls.some((call) => call.method === 'editMessageText'), false);
+  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.messageId === 501), true);
   const editedState = await processStore.getAutomationState();
   const token = editedState.registration_info.account_view_token;
-  console.log('ok double tapping My Account edits existing account message');
+  assert.equal(editedState.registration_info.account_view_message_id, 502);
+  console.log('ok double tapping My Account sends a fresh account message');
 
   await processBotJob(processStore, {
     id: 3,
@@ -219,11 +294,12 @@ async function run() {
     job_type: 'callback_action',
     input_text: '',
     action: `account:hide:${token}`,
-    incoming_telegram_message_id: 501,
+    incoming_telegram_message_id: 502,
+    update_id: 10003,
     message_id: null
   }, { bot });
-  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.messageId === 501), true);
-  console.log('ok Hide Details deletes the credential message');
+  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.messageId === 502), true);
+  console.log('ok account hide action deletes the credential message');
 
   const stale = await decideBotReply({
     store: processStore,
@@ -324,13 +400,14 @@ async function testCredentialSnapshotPersistsInRealStore() {
       windowMinutes: 7
     });
     const now = new Date().toISOString();
+    // Use a claimable routing_status — claimPaymentWindowMatch refuses already-matched rows.
     const paymentResult = await store.db.prepare(`
       INSERT INTO payment_events (
         telegram_message_id, telegram_group_id, sender_name, message_text, raw_payload_json,
         processing_status, parsed_amount, parsed_sender_name, parsed_payment_app,
         routing_status, contact_id, registration_payment_window_id, message_date, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, 'Parsed', ?, ?, ?, 'registration_payment_matched', ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, 'Parsed', ?, ?, ?, 'pending_match', ?, NULL, ?, ?, ?)
     `).run(
       9100101,
       -1001,
@@ -341,7 +418,6 @@ async function testCredentialSnapshotPersistsInRealStore() {
       'Persist Check',
       'Chime',
       savedContact.id,
-      window.id,
       now,
       now,
       now

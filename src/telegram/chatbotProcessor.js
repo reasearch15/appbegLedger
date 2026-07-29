@@ -9,8 +9,7 @@ import { generateCustomerSupportReply } from './customerSupportAi.js';
 import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
-import { normalizeButtonRows, toTelegramInlineButton } from './messageDelivery.js';
-import { accountViewSnapshotPatch } from './accountView.js';
+import { accountViewSnapshotPatch, ACCOUNT_DETAILS_HIDDEN_TEXT, ACCOUNT_SENSITIVE_LOG_TEXT } from './accountView.js';
 import {
   DEPOSIT_BOT_SESSION_FLOW,
   DEPOSIT_BOT_SESSION_STEP_AMOUNT,
@@ -478,12 +477,15 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
     }
 
     if (decision.accountView) {
-      await handleAccountViewDecision({
+      const accountDelivery = await handleAccountViewDecision({
         store,
         contact,
         decision,
         bot: bot || globalThis.telegramBot || null
       });
+      if (decision.accountView.action === 'show' && !accountDelivery?.delivered) {
+        throw new Error('Account credentials response was not delivered.');
+      }
       accountViewHandled = true;
     }
 
@@ -564,7 +566,7 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
       incomingTelegramMessageId: job.incoming_telegram_message_id,
       actionTaken: `chatbot:${decision.kind}`,
       responseSent: decision.sensitive
-        ? '[sensitive account details omitted]'
+        ? ACCOUNT_SENSITIVE_LOG_TEXT
         : (decision.replies || []).map((item) => item.text).join('\n---\n'),
       metadata: {
         jobId: job.id,
@@ -736,18 +738,16 @@ function shouldRedactRegistrationText({ beforeState = null, decision = null, nex
 
 async function handleAccountViewDecision({ store, contact, decision, bot = null }) {
   const view = decision.accountView || {};
-  if (!bot?.telegram) {
-    for (const reply of decision.replies || []) {
-      await queueBotReply({ store, user: contact, text: reply.text, buttons: reply.buttons || [], bot });
-    }
-    return;
-  }
+  const activeBot = bot || globalThis.telegramBot || null;
 
   if (view.action === 'hide') {
+    if (!activeBot?.telegram) {
+      throw new Error('Telegram bot is required to hide account details.');
+    }
     const messageId = Number(view.messageId || 0) || null;
-    if (messageId && bot.telegram.deleteMessage) {
+    if (messageId && activeBot.telegram.deleteMessage) {
       try {
-        await bot.telegram.deleteMessage(contact.telegram_id, messageId);
+        await activeBot.telegram.deleteMessage(contact.telegram_id, messageId);
         const state = await store.getAutomationState(contact.id).catch(() => null);
         await store.updateAutomationState(contact.id, {
           registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
@@ -756,14 +756,14 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
             hidden: true
           })
         }).catch(() => null);
-        return;
+        return { delivered: true, messageId, action: 'hide' };
       } catch (error) {
         console.log(`[chatbot] account_view_delete_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
       }
     }
-    if (messageId && bot.telegram.editMessageText) {
+    if (messageId && activeBot.telegram.editMessageText) {
       try {
-        await bot.telegram.editMessageText(contact.telegram_id, messageId, undefined, view.fallbackText || 'Account details hidden.');
+        await activeBot.telegram.editMessageText(contact.telegram_id, messageId, undefined, view.fallbackText || 'Account details hidden.');
         const state = await store.getAutomationState(contact.id).catch(() => null);
         await store.updateAutomationState(contact.id, {
           registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
@@ -772,58 +772,71 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
             hidden: true
           })
         }).catch(() => null);
-        return;
+        return { delivered: true, messageId, action: 'hide' };
       } catch (error) {
         console.log(`[chatbot] account_view_hide_edit_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
       }
     }
-    return;
-  }
-
-  if (view.action !== 'show') return;
-
-  const normalizedButtons = normalizeButtonRows(view.buttons || []);
-  const replyMarkup = normalizedButtons.length
-    ? { inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton)) }
-    : undefined;
-  const previousMessageId = Number(view.previousMessageId || 0) || null;
-  let messageId = null;
-
-  if (previousMessageId && bot.telegram.editMessageText) {
-    try {
-      await bot.telegram.editMessageText(
-        contact.telegram_id,
-        previousMessageId,
-        undefined,
-        view.text,
-        replyMarkup ? { reply_markup: replyMarkup } : undefined
-      );
-      messageId = previousMessageId;
-    } catch (error) {
-      console.log(`[chatbot] account_view_edit_previous_failed contact=${contact.id} message_id=${previousMessageId} reason=${error.message}`);
-    }
-  }
-
-  if (!messageId) {
-    const sent = await bot.telegram.sendMessage(
-      contact.telegram_id,
-      view.text,
-      replyMarkup ? { reply_markup: replyMarkup } : undefined
-    );
-    messageId = sent?.message_id || null;
-    await store.storeOutgoingMessage({
-      telegramUserId: contact.id,
-      telegramMessageId: messageId,
-      text: decision.sensitive ? '[sensitive account details omitted]' : view.text,
-      payload: {
-        channel: 'bot_api',
-        accountView: true,
-        buttons: normalizedButtons
-      },
-      senderType: 'bot',
-      source: 'bot_api',
-      messageType: normalizedButtons.length ? 'buttons' : 'text'
+    // Fall through to a visible confirmation when delete/edit is unavailable.
+    const hideText = view.fallbackText || ACCOUNT_DETAILS_HIDDEN_TEXT;
+    await queueBotReply({
+      store,
+      user: contact,
+      text: hideText,
+      buttons: [],
+      bot: activeBot
     });
+    return { delivered: true, messageId: null, action: 'hide' };
+  }
+
+  if (view.action !== 'show') {
+    return { delivered: false, reason: 'unsupported_account_view_action' };
+  }
+
+  const replyText = String(view.text || decision.replies?.[0]?.text || '').trim();
+  if (!replyText) {
+    throw new Error('Account credentials decision has no user-visible text.');
+  }
+
+  const buttons = view.buttons || decision.replies?.[0]?.buttons || [];
+  const previousMessageId = Number(view.previousMessageId || 0) || null;
+
+  // Always send a fresh private message through the standard outbound pipeline.
+  // Never edit an older account_view_message_id — that looked silent in production.
+  // Never persist/log credential plaintext — storeText redacts durable storage.
+  let sendResult;
+  try {
+    sendResult = await queueBotReply({
+      store,
+      user: contact,
+      text: replyText,
+      buttons,
+      bot: activeBot,
+      storeText: decision.sensitive ? ACCOUNT_SENSITIVE_LOG_TEXT : null
+    });
+  } catch (error) {
+    console.error('[chatbot] account_view_send_failed', {
+      contact_id: contact.id,
+      stack: error?.stack || String(error)
+    });
+    throw error;
+  }
+
+  const messageId = Number(sendResult?.messageId || 0) || null;
+  const deliveredOrQueued = Boolean(sendResult?.queued) || Boolean(messageId);
+  if (!deliveredOrQueued) {
+    throw new Error('Account credentials response was not delivered or queued.');
+  }
+
+  if (previousMessageId && previousMessageId !== messageId && activeBot?.telegram?.deleteMessage) {
+    try {
+      await activeBot.telegram.deleteMessage(contact.telegram_id, previousMessageId);
+    } catch (error) {
+      console.log(
+        `[chatbot] account_view_previous_cleanup_skipped contact=${contact.id} ` +
+        `message_id=${previousMessageId} reason=${error.message}`
+      );
+    }
   }
 
   if (messageId) {
@@ -836,6 +849,13 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
       })
     });
   }
+
+  return {
+    delivered: true,
+    messageId,
+    queued: Boolean(sendResult?.queued),
+    action: 'show'
+  };
 }
 
 function formatLogExtra(logEvent = {}) {

@@ -5,7 +5,7 @@ import { createReplySender, normalizeButtonRows } from './messageDelivery.js';
  * accounts often cannot render callback buttons). Text-only replies still go
  * through the existing outbound queue when that is the preferred channel.
  */
-export async function queueBotReply({ store, user, text, buttons = [], bot = null }) {
+export async function queueBotReply({ store, user, text, buttons = [], bot = null, storeText = null } = {}) {
   const normalizedButtons = normalizeButtonRows(buttons);
   const sendReply = await createReplySender({
     store,
@@ -17,7 +17,8 @@ export async function queueBotReply({ store, user, text, buttons = [], bot = nul
     user,
     text,
     buttons: normalizedButtons,
-    messageType: normalizedButtons.length ? 'buttons' : 'text'
+    messageType: normalizedButtons.length ? 'buttons' : 'text',
+    ...(storeText == null ? {} : { storeText })
   });
   const buttonCount = normalizedButtons.flat().length;
   if (result?.queued) {

@@ -432,6 +432,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   }
 
   async function findExistingBotJobForTelegramMessage({ contactId, incomingTelegramMessageId, jobType = 'inbound_message', action = null, updateId = null }) {
+    // Exact Telegram update redelivery: one job per update_id.
     if (updateId != null && updateId !== '') {
       const existingByUpdate = await db.prepare(`
         SELECT *
@@ -443,6 +444,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       `).get(updateId);
       if (existingByUpdate) return existingByUpdate;
     }
+
+    // Callbacks reuse the parent menu message_id on every button press. Deduping by
+    // (message_id, action) incorrectly blocks legitimate later clicks with new update_ids.
+    // Callback idempotency is therefore update_id-only.
+    if (jobType === 'callback_action') return null;
+
     if (incomingTelegramMessageId == null || incomingTelegramMessageId === '') return null;
     const actionClause = action ? 'AND action = ?' : '';
     const params = action
@@ -471,19 +478,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     inputText = '',
     action = null
   }) {
-    // Dedupe by Telegram message_id / callback action so the same Telegram
-    // update cannot create duplicate replies or duplicate registration actions.
-    if ((jobType === 'inbound_message' || jobType === 'callback_action') && incomingTelegramMessageId != null && incomingTelegramMessageId !== '') {
-      const existing = await findExistingBotJobForTelegramMessage({
-        contactId,
-        incomingTelegramMessageId,
-        jobType,
-        action: jobType === 'callback_action' ? action : null,
-        updateId
-      });
-      if (existing) {
-        return { ...existing, duplicate: true };
-      }
+    // Inbound: dedupe by update_id and/or telegram message_id.
+    // Callbacks: dedupe only by update_id (see findExistingBotJobForTelegramMessage).
+    const existing = await findExistingBotJobForTelegramMessage({
+      contactId,
+      incomingTelegramMessageId,
+      jobType,
+      action: jobType === 'callback_action' ? action : null,
+      updateId
+    });
+    if (existing) {
+      return { ...existing, duplicate: true };
     }
 
     const now = nowIso();

@@ -1,10 +1,13 @@
 import crypto from 'node:crypto';
-import { registeredMenuButtons } from './botRegistrationState.js';
 
 export const ACCOUNT_VIEW_TOKEN_BYTES = 6;
 export const ACCOUNT_DETAILS_HIDDEN_TEXT = 'Account details hidden.';
-export const ACCOUNT_DETAILS_UNAVAILABLE_TEXT = 'Your Royal VIP account details are not available yet. Please contact Support.';
+export const ACCOUNT_DETAILS_UNAVAILABLE_TEXT = [
+  'Royal VIP account information is currently unavailable.',
+  'Please contact Support.'
+].join('\n');
 export const ACCOUNT_PRIVACY_WARNING = 'Keep these details private. Anyone with access to this Telegram chat may be able to see them.';
+export const ACCOUNT_SENSITIVE_LOG_TEXT = '[sensitive account details omitted]';
 
 export function createAccountViewToken() {
   return crypto.randomBytes(ACCOUNT_VIEW_TOKEN_BYTES).toString('hex');
@@ -68,39 +71,38 @@ export function resolveRoyalVipCredentials({ contact = {}, info = {} } = {}) {
 export function buildMyAccountText(credentials) {
   if (!credentials?.ok) return ACCOUNT_DETAILS_UNAVAILABLE_TEXT;
   return [
-    '👤 Royal VIP Account',
-    '',
-    'Username:',
-    sanitizeCredentialText(credentials.username),
-    '',
-    'Password:',
-    sanitizeCredentialText(credentials.password),
+    'Royal VIP Account',
+    `Username: ${sanitizeCredentialText(credentials.username)}`,
+    `Password: ${sanitizeCredentialText(credentials.password)}`,
     '',
     ACCOUNT_PRIVACY_WARNING
   ].join('\n');
 }
 
-export function buildMyAccountButtons(token, { includeHide = true, includeBack = true } = {}) {
-  const royalVipButton = registeredMenuButtons()[0][1];
+export function buildMyAccountButtons(token, { includeHide = false } = {}) {
+  const royalVipButton = {
+    label: '🔴 Open Royal VIP',
+    text: '🔴 Open Royal VIP',
+    web_app: { url: 'https://royal.youplatform.org' },
+    style: 'danger'
+  };
   const rows = [
     [royalVipButton],
+    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }],
     [
       includeHide
         ? { label: '🙈 Hide Details', text: '🙈 Hide Details', action: `account:hide:${token}`, data: `account:hide:${token}` }
         : null,
-      { label: 'Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }
+      { label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }
     ].filter(Boolean)
   ];
-  if (includeBack) {
-    rows.push([{ label: 'Back', text: 'Back', action: `account:back:${token}`, data: `account:back:${token}` }]);
-  }
   return rows;
 }
 
 export function buildMissingAccountButtons(token) {
   return [
-    [{ label: 'Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }],
-    [{ label: 'Back', text: 'Back', action: `account:back:${token}`, data: `account:back:${token}` }]
+    [{ label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }],
+    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }]
   ];
 }
 

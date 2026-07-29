@@ -53,20 +53,33 @@ async function run() {
     callbackMessageId: 101
   });
   assert.equal(doubleClick.ok, true);
-  assert.equal(doubleClick.activeMessageId, 101);
+  // Deposit is persistent navigation: freshness accepts repeats without requiring
+  // the recorded active_bot_message_id on the returned payload.
+  assert.equal(doubleClick.stateChanging, true);
+  assert.equal(doubleClick.persistentNavigation, true);
   console.log('ok current state-changing callback and double click are accepted');
+
+  const staleDeposit = await validateCallbackFreshness({
+    store: activeStore,
+    user,
+    action: 'menu:deposit',
+    callbackMessageId: 100
+  });
+  assert.equal(staleDeposit.ok, true);
+  assert.equal(staleDeposit.persistentNavigation, true);
+  console.log('ok Deposit from older menu messages remains accessible');
 
   const stale = await validateCallbackFreshness({
     store: activeStore,
     user,
-    action: 'menu:deposit',
+    action: 'deposit:choose_payment',
     callbackMessageId: 100
   });
   assert.equal(stale.ok, false);
   assert.equal(stale.reason, 'expired_callback');
   assert.equal(stale.activeMessageId, 101);
   assert.equal(stale.pressedMessageId, 100);
-  console.log('ok stale Deposit callback is rejected before job enqueue');
+  console.log('ok stale one-time Deposit flow callback is rejected before job enqueue');
 
   const staleRegister = await validateCallbackFreshness({
     store: activeStore,
@@ -80,7 +93,7 @@ async function run() {
   const noRecordedMenu = await validateCallbackFreshness({
     store: createStore(),
     user,
-    action: 'menu:deposit',
+    action: 'deposit:choose_payment',
     callbackMessageId: 100
   });
   assert.equal(noRecordedMenu.ok, false);
