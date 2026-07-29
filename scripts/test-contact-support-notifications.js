@@ -296,7 +296,7 @@ async function run() {
     const result = await sendSupportBotNotification({
       store,
       kind: 'support',
-      text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Password / Login Help'
+      text: '🆘 Support Request\nRoyalVIP Username: Amyfi02\nTopic: Password / Login Help'
     });
     assert.equal(result.successCount, 1);
     assert.equal(supportCalls.length, 1);
@@ -316,7 +316,7 @@ async function run() {
     const result = await sendSupportBotNotification({
       store,
       kind: 'freeplay',
-      text: '🎁 FreePlay Request\nAppBeg Username: Amyfi02'
+      text: '🎁 FreePlay Request\nRoyalVIP Username: Amyfi02'
     });
     assert.equal(result.successCount, 2);
     assert.equal(supportCalls.length, 2);
@@ -337,7 +337,7 @@ async function run() {
     const result = await sendSupportBotNotification({
       store,
       kind: 'inquiry',
-      text: '❓ New Inquiry\nAppBeg Username: Amyfi02\nQuestion:\nHello'
+      text: '❓ New Inquiry\nRoyalVIP Username: Amyfi02\nQuestion:\nHello'
     });
     assert.equal(result.successCount, 1);
     assert.equal(result.failureCount, 1);
@@ -358,7 +358,7 @@ async function run() {
     const result = await sendSupportBotNotification({
       store,
       kind: 'support',
-      text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Cashout Help'
+      text: '🆘 Support Request\nRoyalVIP Username: Amyfi02\nTopic: Cashout Help'
     });
     assert.equal(result.successCount, 1);
     assert.equal(store.subscribers.find((row) => row.telegram_chat_id === '1001').is_active, false);
@@ -380,7 +380,7 @@ async function run() {
       () => sendSupportBotNotification({
         store,
         kind: 'support',
-        text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Deposit / Payment Help'
+        text: '🆘 Support Request\nRoyalVIP Username: Amyfi02\nTopic: Deposit / Payment Help'
       }),
       (error) => error.code === 'SUPPORT_NOTIFICATION_ALL_FAILED'
     );
@@ -394,7 +394,7 @@ async function run() {
       () => sendSupportBotNotification({
         store,
         kind: 'support',
-        text: '🆘 Support Request\nAppBeg Username: Amyfi02\nTopic: Password / Login Help'
+        text: '🆘 Support Request\nRoyalVIP Username: Amyfi02\nTopic: Password / Login Help'
       }),
       (error) => error.code === 'SUPPORT_NOTIFICATION_NO_SUBSCRIBERS'
     );
@@ -432,7 +432,8 @@ async function run() {
     }, { bot });
     assert.equal(supportCalls.length, 1);
     assert.match(supportCalls[0].body.text, /^🆘 Support Request/);
-    assert.match(supportCalls[0].body.text, /AppBeg Username: Amyfi02/);
+    assert.match(supportCalls[0].body.text, /RoyalVIP Username: Amyfi02/);
+    assert.doesNotMatch(supportCalls[0].body.text, /AppBeg Username:/);
     assert.match(supportCalls[0].body.text, new RegExp(`Topic: ${option.topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.doesNotMatch(supportCalls[0].body.text, /Telegram|Contact ID|Player UID|5476500286|@amyf/i);
     assert.equal(player.at(-1).text, SUPPORT_REQUEST_SENT_TEXT);
@@ -462,7 +463,8 @@ async function run() {
     }, { bot });
     assert.equal(supportCalls.length, 1);
     assert.match(supportCalls[0].body.text, /^❓ New Inquiry/);
-    assert.match(supportCalls[0].body.text, /AppBeg Username: Amyfi02/);
+    assert.match(supportCalls[0].body.text, /RoyalVIP Username: Amyfi02/);
+    assert.doesNotMatch(supportCalls[0].body.text, /AppBeg Username:/);
     assert.match(supportCalls[0].body.text, /Question:\nMy deposit of \$5 did not credit <script>/);
     assert.equal(player.at(-1).text, INQUIRY_REQUEST_SENT_TEXT);
     console.log('ok inquiry notifications');
@@ -484,7 +486,8 @@ async function run() {
       created_at: new Date().toISOString()
     }, { bot });
     assert.equal(supportCalls.length, 1);
-    assert.equal(supportCalls[0].body.text, '🎁 FreePlay Request\nAppBeg Username: Amyfi02');
+    assert.equal(supportCalls[0].body.text, '🎁 FreePlay Request\nRoyalVIP Username: Amyfi02');
+    assert.doesNotMatch(supportCalls[0].body.text, /AppBeg Username:/);
     assert.equal(player.at(-1).text, FREEPLAY_REQUEST_SENT_TEXT);
 
     await processBotJob(freeStore, {

@@ -58,7 +58,7 @@ export function resolveAppBegUsernameForSupport({ contact = {}, info = {} } = {}
 export function buildSupportRequestNotificationText({ username, topic, message = null } = {}) {
   const lines = [
     '🆘 Support Request',
-    `AppBeg Username: ${sanitizePlain(username)}`,
+    `RoyalVIP Username: ${sanitizePlain(username)}`,
     `Topic: ${sanitizePlain(topic)}`
   ];
   const body = String(message || '').trim();
@@ -71,7 +71,7 @@ export function buildSupportRequestNotificationText({ username, topic, message =
 export function buildInquiryNotificationText({ username, question } = {}) {
   return [
     '❓ New Inquiry',
-    `AppBeg Username: ${sanitizePlain(username)}`,
+    `RoyalVIP Username: ${sanitizePlain(username)}`,
     'Question:',
     sanitizePlain(question)
   ].join('\n');
@@ -80,7 +80,7 @@ export function buildInquiryNotificationText({ username, question } = {}) {
 export function buildFreePlayNotificationText({ username } = {}) {
   return [
     '🎁 FreePlay Request',
-    `AppBeg Username: ${sanitizePlain(username)}`
+    `RoyalVIP Username: ${sanitizePlain(username)}`
   ].join('\n');
 }
 

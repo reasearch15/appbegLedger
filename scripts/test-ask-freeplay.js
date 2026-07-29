@@ -159,7 +159,8 @@ async function run() {
   }, { bot });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].chat_id, '99');
-  assert.equal(calls[0].text, '🎁 FreePlay Request\nAppBeg Username: Amyfi02');
+  assert.equal(calls[0].text, '🎁 FreePlay Request\nRoyalVIP Username: Amyfi02');
+  assert.doesNotMatch(calls[0].text, /AppBeg Username:/);
   assert.equal(player.at(-1), FREEPLAY_REQUEST_SENT_TEXT);
 
   await processBotJob(store, {
