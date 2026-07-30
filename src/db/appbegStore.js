@@ -51,13 +51,40 @@ const FINANCIAL_COLUMN_CANDIDATES = {
   meta: ['meta']
 };
 const FINANCIAL_DEDUPE_COLUMN_CANDIDATES = ['external_reference', 'externalReference', 'idempotency_key', 'payment_event_id', 'paymentEventId', 'firebase_id', 'id'];
-const FINANCIAL_IN_TYPES = ['deposit', 'recharge'];
+// Vendor Total In = all real money received from a player:
+//   A) Ledger automatic deposit credits (registration / registered-user)
+//   B) Coadmin panel "Add coin" (type=coadmin_coin_add, source=authority_balance_adjust)
+//   C) Staff panel "Load Coins" (type=staff_wallet_coin_load, source=authority_staff_wallet_load)
+// Do NOT treat type=deposit/recharge alone as Total In — game recharge completions
+// also use type=deposit with source=authority_game_request_complete (moving existing
+// AppBeg balance into a game), which must never increase Vendor Total In.
+//
+// ASSUMPTION (approved business rule): AppBeg Coadmin "Add coin" has no paid/free flag.
+// All positive coadmin_coin_add + authority_balance_adjust + actor_role=coadmin events
+// are treated as paid manual loads. Free Play is a separate event
+// (freeplay / authority_freeplay_claim) and must never count.
+const FINANCIAL_LEDGER_CREDIT_TYPES = ['ledger_deposit_credit'];
+const FINANCIAL_LEDGER_SOURCE_FLOWS = ['registration_initial_deposit', 'registered_user_deposit'];
+const FINANCIAL_EXTERNAL_DEPOSIT_SOURCES = ['authority_ledger_deposit_credit'];
+const FINANCIAL_EXCLUDED_IN_SOURCES = [
+  'authority_game_request_complete',
+  'authority_transfer',
+  'authority_freeplay_claim',
+  'authority_bonus_initiate_play',
+  'authority_recharge_create',
+  'authority_dismiss_recharge',
+  'authority_cashout_decline',
+  'authority_cashout_create',
+  'authority_cashout_complete'
+];
+const FINANCIAL_COADMIN_PAID_COIN_TYPE = 'coadmin_coin_add';
+const FINANCIAL_COADMIN_PAID_COIN_SOURCE = 'authority_balance_adjust';
+const FINANCIAL_STAFF_PAID_COIN_TYPE = 'staff_wallet_coin_load';
+const FINANCIAL_STAFF_PAID_COIN_SOURCE = 'authority_staff_wallet_load';
 // Vendor Total Out is staff/player cash withdrawals only.
 // Game `redeem` credits player cash from a game balance — it must not count as Total Out
 // (otherwise redeem + later cashout double-counts the same funds).
 const FINANCIAL_OUT_TYPES = ['cashout'];
-const FINANCIAL_LEDGER_CREDIT_TYPES = ['coadmin_coin_add', 'ledger_deposit_credit'];
-const FINANCIAL_LEDGER_SOURCE_FLOWS = ['registration_initial_deposit', 'registered_user_deposit'];
 const FINANCIAL_COMPLETED_STATUSES = ['completed'];
 const FINANCIAL_QUERY_CHUNK_SIZE = 500;
 const DEFAULT_BUSINESS_TIME_ZONE = 'Asia/Kathmandu';
@@ -403,24 +430,90 @@ function metaValue(row, key) {
   return String(row?.[`meta_${key}`] ?? meta[key] ?? '').trim();
 }
 
-function isLedgerCreditIn(row) {
-  const type = String(row.event_type || '').trim().toLowerCase();
-  if (!FINANCIAL_LEDGER_CREDIT_TYPES.includes(type)) return false;
+function eventAmount(row) {
+  return Number(row.amount_npr ?? row.amountNpr ?? row.amount ?? 0);
+}
+
+/**
+ * True for authoritative Vendor Total In credits (new real money from a player).
+ *
+ * Includes:
+ *   A) Ledger deposit credits (authority_ledger_deposit_credit + registration flows)
+ *   B) Coadmin "Add coin" paid/manual loads (coadmin_coin_add + authority_balance_adjust)
+ *      — ASSUMPTION: AppBeg has no paid/free flag on Add coin; all positive Coadmin
+ *        Add coin actions count as paid manual loads per approved business rule.
+ *        Free Play uses a separate freeplay / authority_freeplay_claim event.
+ *   C) Staff "Load Coins" (staff_wallet_coin_load + authority_staff_wallet_load)
+ *   D) Legacy coadmin_coin_add rows written via appbeg_ledger registration/deposit credit
+ *
+ * Explicitly rejects game-load / recharge-completion sources even when type=deposit.
+ * Never includes freeplay, bonus, redeem, transfers, refunds, cashouts, or cash adds.
+ */
+function isExternalDepositCreditIn(row) {
   const source = String(row.source || '').trim().toLowerCase();
-  if (source === 'authority_ledger_deposit_credit') return true;
-  const actorUid = String(row.actor_uid || '').trim().toLowerCase();
+  if (FINANCIAL_EXCLUDED_IN_SOURCES.includes(source)) return false;
+
+  const type = String(row.event_type || '').trim().toLowerCase();
   const actorRole = String(row.actor_role || '').trim().toLowerCase();
-  if (actorUid === 'appbeg_ledger' && actorRole === 'ledger') return true;
+  const amount = eventAmount(row);
   const sourceFlow = String(row.source_flow || metaValue(row, 'sourceFlow')).trim().toLowerCase();
+  const actorUid = String(row.actor_uid || '').trim().toLowerCase();
   const metaPaymentEventId = metaValue(row, 'paymentEventId');
   const metaExternalReference = metaValue(row, 'externalReference');
-  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow) && (metaPaymentEventId || metaExternalReference)) return true;
-  if (type === 'ledger_deposit_credit') return false;
-  if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
   const paymentEventId = String(row.payment_event_id || '').trim();
   const dedupeKey = String(row.dedupe_key || '').trim();
-  return source === 'appbeg_ledger'
-    && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
+
+  // B) Coadmin panel "Add coin" — type + source + coadmin actor + positive amount.
+  if (
+    type === FINANCIAL_COADMIN_PAID_COIN_TYPE
+    && source === FINANCIAL_COADMIN_PAID_COIN_SOURCE
+    && actorRole === 'coadmin'
+    && amount > 0
+  ) {
+    return true;
+  }
+
+  // C) Staff panel "Load Coins" — player-credit only (not staff wallet funding).
+  if (
+    type === FINANCIAL_STAFF_PAID_COIN_TYPE
+    && source === FINANCIAL_STAFF_PAID_COIN_SOURCE
+    && actorRole === 'staff'
+    && amount > 0
+  ) {
+    return true;
+  }
+
+  // A) Ledger-driven automatic deposit credits.
+  if (type === 'ledger_deposit_credit') {
+    if (FINANCIAL_EXTERNAL_DEPOSIT_SOURCES.includes(source)) {
+      if (!sourceFlow || FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
+      return false;
+    }
+    if (actorUid === 'appbeg_ledger' && actorRole === 'ledger') {
+      if (!sourceFlow || FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
+    }
+    if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow) && (metaPaymentEventId || metaExternalReference)) {
+      return true;
+    }
+    return source === 'appbeg_ledger'
+      && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
+  }
+
+  // D) Legacy registration/deposit credits written as coadmin_coin_add via appbeg_ledger
+  // (not Coadmin panel Add coin — those use authority_balance_adjust above).
+  if (type === FINANCIAL_COADMIN_PAID_COIN_TYPE) {
+    if (actorUid === 'appbeg_ledger' && actorRole === 'ledger') {
+      if (!sourceFlow || FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow)) return true;
+    }
+    if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow) && (metaPaymentEventId || metaExternalReference || paymentEventId)) {
+      return true;
+    }
+    if (FINANCIAL_LEDGER_SOURCE_FLOWS.includes(sourceFlow) && source === 'appbeg_ledger') return true;
+    return source === 'appbeg_ledger'
+      && (Boolean(paymentEventId) || dedupeKey.startsWith('appbegledger-payment-event:'));
+  }
+
+  return false;
 }
 
 function hasCashoutReversalEvidence(row) {
@@ -476,7 +569,8 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
       counts.excluded_status += 1;
       continue;
     }
-    const isIn = FINANCIAL_IN_TYPES.includes(type) || isLedgerCreditIn(row);
+    // Total In is source/flow-aware — never type=deposit/recharge alone.
+    const isIn = isExternalDepositCreditIn(row);
     // Only authoritative completed cashouts (type=cashout + task/request ref, not reversed).
     // Excludes cashout_request_deduct, cashout_decline_refund, redeem, pending/cancelled rows.
     const isOut = FINANCIAL_OUT_TYPES.includes(type) && isFinalCashoutOut(row);
@@ -899,5 +993,6 @@ export async function createAppBegStore(env = process.env) {
 export const appBegFinancialTesting = {
   buildFinancialPlan,
   aggregateFinancialEventsForUids,
-  businessDayBounds
+  businessDayBounds,
+  isExternalDepositCreditIn
 };

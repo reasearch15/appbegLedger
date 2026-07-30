@@ -196,14 +196,14 @@ async function testRegistrationCreditInclusionAndExclusionRules() {
     activeBounds,
     timeZone: activeBounds.timeZone
   });
-  assert.equal(players[0].total_in, 35);
+  assert.equal(players[0].total_in, 25);
   assert.equal(players[0].total_out, 5);
-  assert.equal(players[0].net, 30);
+  assert.equal(players[0].net, 20);
   assert.equal(players[0].active_today, true);
-  assert.equal(counts.included, 3);
+  assert.equal(counts.included, 2);
   assert.equal(counts.deduped, 1);
   assert.equal(counts.excluded_status, 2);
-  assert.equal(counts.excluded_type, 3);
+  assert.equal(counts.excluded_type, 4);
 }
 
 async function testProductionLedgerDepositCreditShapeCountsOnce() {

@@ -208,10 +208,13 @@ function testTotalInNetSettlementReceivableRemainCorrect() {
   const { players } = aggregate([
     {
       uid: PLAYER,
-      event_type: 'deposit',
+      event_type: 'ledger_deposit_credit',
       amount_npr: 200,
       status: 'completed',
-      dedupe_key: 'dep-1',
+      source: 'authority_ledger_deposit_credit',
+      source_flow: 'registered_user_deposit',
+      meta: { sourceFlow: 'registered_user_deposit', paymentEventId: 'pay-200' },
+      firebase_id: 'dep-ledger-1',
       activity_at: '2026-07-28T08:00:00+05:45'
     },
     {
