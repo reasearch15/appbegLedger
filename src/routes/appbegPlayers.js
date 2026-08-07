@@ -11,15 +11,15 @@ const CSV_COLUMNS = [
   ['status', 'Status'],
   ['coadmin_uid', 'Coadmin UID'],
   ['created_by', 'Created By'],
+  ...ROYALVIP_GAME_PLATFORMS.map((platform) => [
+    gameUsernameColumnKey(platform.key),
+    platform.label
+  ]),
   ['coin', 'Coin'],
   ['cash', 'Cash'],
   ['cash_box_npr', 'Cash Box NPR'],
   ['promo_locked_coins', 'Promo Locked Coins'],
   ['referral_bonus_coins', 'Referral Bonus Coins'],
-  ...ROYALVIP_GAME_PLATFORMS.map((platform) => [
-    gameUsernameColumnKey(platform.key),
-    platform.label
-  ]),
   ['source', 'Source'],
   ['created_at', 'Created At'],
   ['updated_at', 'Updated At']

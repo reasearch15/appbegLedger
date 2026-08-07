@@ -8,7 +8,10 @@ const BASE_LEDGER_COLUMNS = [
   { key: 'role', label: 'Role' },
   { key: 'status', label: 'Status' },
   { key: 'coadmin_uid', label: 'Coadmin UID', mono: true },
-  { key: 'created_by', label: 'Created By' },
+  { key: 'created_by', label: 'Created By' }
+];
+
+const FINANCIAL_LEDGER_COLUMNS = [
   { key: 'coin', label: 'Coins', sortable: 'coin', num: true },
   { key: 'cash', label: 'Cash', sortable: 'cash', num: true },
   { key: 'cash_box_npr', label: 'NPR', num: true },
@@ -22,10 +25,11 @@ const TRAILING_LEDGER_COLUMNS = [
   { key: 'updated_at', label: 'Updated', sortable: 'updated_at', date: true }
 ];
 
-/** Fixed platform columns — always rendered, even when every cell is empty. */
+/** Fixed platform columns — always rendered between Created By and Coins. */
 const LEDGER_COLUMNS = [
   ...BASE_LEDGER_COLUMNS,
   ...buildGamePlatformColumns(),
+  ...FINANCIAL_LEDGER_COLUMNS,
   ...TRAILING_LEDGER_COLUMNS
 ];
 
