@@ -222,8 +222,31 @@ export function buildMyAccountButtons(token, {
   return rows;
 }
 
-export function buildGameDetailButtons(token, { includeHide = true, mode = 'game' } = {}) {
+export function buildGameDetailButtons(token, {
+  includeHide = true,
+  mode = 'game',
+  username = '',
+  password = ''
+} = {}) {
+  // Fix empty copy username: Telegram requires 1-256 chars; never invent credentials.
+  // If username is empty, omit Copy Username button entirely.
+  const copyUsername = sanitizeCredentialText(username);
+  const copyPassword = sanitizeCredentialText(password) || GAME_PASSWORD_UNAVAILABLE;
+  const copyRow = [];
+  if (copyUsername) {
+    copyRow.push({
+      label: '📋 Copy Username',
+      text: '📋 Copy Username',
+      copy_text: { text: copyUsername }
+    });
+  }
+  copyRow.push({
+    label: '🔑 Copy Password',
+    text: '🔑 Copy Password',
+    copy_text: { text: copyPassword }
+  });
   const rows = [
+    copyRow,
     [{
       label: '⬅️ Back to Games',
       text: '⬅️ Back to Games',
@@ -247,7 +270,7 @@ export function buildGameDetailButtons(token, { includeHide = true, mode = 'game
     data: 'bot:main_menu'
   });
   rows.push(footer);
-  return rows;
+  return rows.filter((row) => row.length);
 }
 
 export function buildMissingAccountButtons(token) {

@@ -200,13 +200,18 @@ export function normalizeButtonRows(buttons = []) {
         .map((button) => {
           if (!button || typeof button !== 'object') return null;
           const text = String(button.text || button.label || '').trim();
+          if (!text) return null;
+          const style = normalizeButtonStyle(button.style);
+          const copyText = normalizeCopyText(button.copy_text || button.copyText);
+          if (copyText) {
+            return { text, copy_text: copyText, ...(style ? { style } : {}) };
+          }
           const url = String(button.url || '').trim();
           const webAppUrl = String(button.web_app?.url || button.webAppUrl || '').trim();
-          const style = normalizeButtonStyle(button.style);
-          if (text && webAppUrl) return { text, web_app: { url: webAppUrl }, ...(style ? { style } : {}) };
-          if (text && url) return { text, url, ...(style ? { style } : {}) };
+          if (webAppUrl) return { text, web_app: { url: webAppUrl }, ...(style ? { style } : {}) };
+          if (url) return { text, url, ...(style ? { style } : {}) };
           const data = String(button.data || button.action || button.callback_data || '').trim();
-          if (!text || !data) return null;
+          if (!data) return null;
           const encoded = Buffer.from(data, 'utf8');
           if (encoded.length > 64) {
             console.warn(`[telegram-outbound] callback_data too long (${encoded.length} bytes): ${data}`);
@@ -220,6 +225,13 @@ export function normalizeButtonRows(buttons = []) {
 }
 
 export function toTelegramInlineButton(button) {
+  if (button.copy_text?.text) {
+    return {
+      text: button.text,
+      ...(button.style ? { style: button.style } : {}),
+      copy_text: { text: button.copy_text.text }
+    };
+  }
   if (button.web_app?.url) {
     return {
       text: button.text,
@@ -248,4 +260,14 @@ function countButtons(rows) {
 function normalizeButtonStyle(style) {
   const value = String(style || '').trim().toLowerCase();
   return ['success', 'danger', 'primary'].includes(value) ? value : '';
+}
+
+/** Telegram CopyTextButton.text must be 1–256 characters. */
+function normalizeCopyText(value) {
+  if (value == null) return null;
+  const text = typeof value === 'object'
+    ? String(value.text || '').trim()
+    : String(value || '').trim();
+  if (!text) return null;
+  return { text: text.slice(0, 256) };
 }

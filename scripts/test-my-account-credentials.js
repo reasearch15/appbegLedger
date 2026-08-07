@@ -322,6 +322,13 @@ async function run() {
   assert.equal(afterGameState.registration_info.account_view_mode, 'game');
   assert.equal(afterGameState.registration_info.account_view_platform_key, 'orion_stars');
   assert.ok(JSON.stringify(gameEdit[0].options?.reply_markup || {}).includes('Back to Games'));
+  const gameMarkup = JSON.stringify(gameEdit[0].options?.reply_markup || {});
+  assert.ok(gameMarkup.includes('Copy Username'));
+  assert.ok(gameMarkup.includes('Copy Password'));
+  assert.ok(gameMarkup.includes('"copy_text":{"text":"amyniv_0OS"}'));
+  assert.ok(gameMarkup.includes('"copy_text":{"text":"os-secret"}'));
+  assert.doesNotMatch(gameMarkup, /callback_data":"amyniv_0OS"|callback_data":"os-secret"/);
+  assert.doesNotMatch(gameMarkup, /account:copy/);
   console.log('ok game button edits same message with that game credentials');
 
   const beforeHideEdits = calls.filter((call) => call.method === 'editMessageText').length;
@@ -342,6 +349,10 @@ async function run() {
   assert.match(hideEdit[0].text, /Username:\namyniv_0OS/);
   assert.match(hideEdit[0].text, /Password:\n••••••••/);
   assert.doesNotMatch(hideEdit[0].text, /os-secret/);
+  const hideMarkup = JSON.stringify(hideEdit[0].options?.reply_markup || {});
+  assert.ok(hideMarkup.includes('"copy_text":{"text":"amyniv_0OS"}'));
+  assert.ok(hideMarkup.includes('"copy_text":{"text":"••••••••"}'));
+  assert.doesNotMatch(hideMarkup, /os-secret/);
   console.log('ok hide details masks game password on same message');
 
   const beforeBackEdits = calls.filter((call) => call.method === 'editMessageText').length;

@@ -81,6 +81,7 @@ import {
 } from './contactSupportFlow.js';
 import {
   ACCOUNT_DETAILS_HIDDEN_TEXT,
+  ACCOUNT_PASSWORD_MASK,
   buildGameAccountDetailText,
   buildGameDetailButtons,
   buildMissingAccountButtons,
@@ -88,6 +89,7 @@ import {
   buildMyAccountMainText,
   createAccountViewToken,
   findGameAccount,
+  GAME_PASSWORD_UNAVAILABLE,
   isFreshAccountAction,
   parseAccountAction,
   resolveRoyalVipCredentials
@@ -990,7 +992,12 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
       }
 
       const text = buildGameAccountDetailText(account, { hidePassword: false });
-      const buttons = buildGameDetailButtons(token, { includeHide: true, mode: 'game' });
+      const buttons = buildGameDetailButtons(token, {
+        includeHide: true,
+        mode: 'game',
+        username: account.username,
+        password: account.password || GAME_PASSWORD_UNAVAILABLE
+      });
       return {
         kind: 'account_game_detail',
         replies: [],
@@ -1073,7 +1080,12 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
           };
         }
         const text = buildGameAccountDetailText(account, { hidePassword: true });
-        const buttons = buildGameDetailButtons(token, { includeHide: false, mode: 'game_hidden' });
+        const buttons = buildGameDetailButtons(token, {
+          includeHide: false,
+          mode: 'game_hidden',
+          username: account.username,
+          password: ACCOUNT_PASSWORD_MASK
+        });
         return {
           kind: 'account_hide_details',
           replies: [],
