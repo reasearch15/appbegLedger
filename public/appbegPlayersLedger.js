@@ -1,6 +1,7 @@
 import { escapeHtml } from './playerUtils.js';
+import { buildGamePlatformColumns } from './appbegGamePlatforms.js';
 
-const LEDGER_COLUMNS = [
+const BASE_LEDGER_COLUMNS = [
   { key: 'username', label: 'Username', sortable: 'username', sticky: true },
   { key: 'uid', label: 'UID', mono: true },
   { key: 'email', label: 'Email' },
@@ -12,10 +13,20 @@ const LEDGER_COLUMNS = [
   { key: 'cash', label: 'Cash', sortable: 'cash', num: true },
   { key: 'cash_box_npr', label: 'NPR', num: true },
   { key: 'promo_locked_coins', label: 'Promo Locked', num: true },
-  { key: 'referral_bonus_coins', label: 'Referral Bonus', num: true },
+  { key: 'referral_bonus_coins', label: 'Referral Bonus', num: true }
+];
+
+const TRAILING_LEDGER_COLUMNS = [
   { key: 'source', label: 'Source' },
   { key: 'created_at', label: 'Created', sortable: 'created_at', date: true },
   { key: 'updated_at', label: 'Updated', sortable: 'updated_at', date: true }
+];
+
+/** Fixed platform columns — always rendered, even when every cell is empty. */
+const LEDGER_COLUMNS = [
+  ...BASE_LEDGER_COLUMNS,
+  ...buildGamePlatformColumns(),
+  ...TRAILING_LEDGER_COLUMNS
 ];
 
 const EMPTY_REAL_PLAYERS_MESSAGE = 'No real players found. Test/Codex data is hidden. Enable Show test data to view it.';

@@ -1,3 +1,8 @@
+import {
+  gameUsernameColumnKey,
+  ROYALVIP_GAME_PLATFORMS
+} from '../db/appbegGamePlatforms.js';
+
 const CSV_COLUMNS = [
   ['uid', 'UID'],
   ['username', 'Username'],
@@ -11,6 +16,10 @@ const CSV_COLUMNS = [
   ['cash_box_npr', 'Cash Box NPR'],
   ['promo_locked_coins', 'Promo Locked Coins'],
   ['referral_bonus_coins', 'Referral Bonus Coins'],
+  ...ROYALVIP_GAME_PLATFORMS.map((platform) => [
+    gameUsernameColumnKey(platform.key),
+    platform.label
+  ]),
   ['source', 'Source'],
   ['created_at', 'Created At'],
   ['updated_at', 'Updated At']

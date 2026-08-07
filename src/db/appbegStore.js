@@ -1,5 +1,10 @@
 import pg from 'pg';
 import { resolveAppBegDatabaseConfig } from './appbegConfig.js';
+import {
+  emptyGameUsernameFields,
+  pivotGameUsernames,
+  ROYALVIP_GAME_PLATFORMS
+} from './appbegGamePlatforms.js';
 
 const { Pool } = pg;
 const DEFAULT_LIMIT = 50;
@@ -30,6 +35,13 @@ const OPTIONAL_COLUMNS = [
 
 const UID_COLUMN_CANDIDATES = ['uid', 'firebase_id'];
 const FINANCIAL_TABLE = 'financial_events_cache';
+const GAME_LOGINS_TABLE = 'player_game_logins_cache';
+const GAME_LOGINS_REQUIRED_COLUMNS = [
+  'player_uid',
+  'normalized_game_name',
+  'game_username',
+  'deleted_at'
+];
 const FINANCIAL_COLUMN_CANDIDATES = {
   playerUid: ['player_uid', 'appbeg_player_uid', 'uid'],
   type: ['event_type', 'type'],
@@ -272,7 +284,45 @@ async function buildFinancialPlan(pool) {
   };
 }
 
-function toPublicPlayer(row) {
+async function buildGameLoginsPlan(pool) {
+  const table = await findExistingTable(pool, [GAME_LOGINS_TABLE]);
+  if (!table) {
+    return {
+      configured: false,
+      reason: `Missing table ${GAME_LOGINS_TABLE}`
+    };
+  }
+
+  const columns = await loadTableColumns(pool, table);
+  const missing = GAME_LOGINS_REQUIRED_COLUMNS.filter((name) => !columns.has(name));
+  if (missing.length) {
+    return {
+      configured: false,
+      reason: `Table ${table} missing columns: ${missing.join(', ')}`
+    };
+  }
+
+  return {
+    configured: true,
+    table,
+    columns: {
+      playerUid: 'player_uid',
+      normalizedGameName: 'normalized_game_name',
+      gameUsername: 'game_username',
+      deletedAt: 'deleted_at'
+    }
+  };
+}
+
+function emptyGameUsernameMap(uids) {
+  const map = new Map();
+  for (const uid of uids) {
+    map.set(uid, emptyGameUsernameFields());
+  }
+  return map;
+}
+
+function toPublicPlayer(row, gameUsernameFields = null) {
   return {
     id: row.uid,
     uid: row.uid ?? null,
@@ -291,7 +341,8 @@ function toPublicPlayer(row) {
     source: row.source ?? null,
     created_at: row.created_at ?? null,
     updated_at: row.updated_at ?? null,
-    mirrored_at: row.mirrored_at ?? null
+    mirrored_at: row.mirrored_at ?? null,
+    ...(gameUsernameFields || emptyGameUsernameFields())
   };
 }
 
@@ -691,14 +742,67 @@ export async function createAppBegStore(env = process.env) {
 
   let plan;
   let financialPlan;
+  let gameLoginsPlan;
   try {
     await pool.query('SELECT 1');
     const columns = await loadPlayersCacheColumns(pool);
     plan = buildQueryPlan(columns);
     financialPlan = await buildFinancialPlan(pool);
+    gameLoginsPlan = await buildGameLoginsPlan(pool);
+    if (!gameLoginsPlan.configured) {
+      console.warn('[appbeg-players] game usernames unavailable:', gameLoginsPlan.reason);
+    }
   } catch (error) {
     await pool.end().catch(() => {});
     throw error;
+  }
+
+  /**
+   * Batch-load game usernames for a page of players (one query, no N+1).
+   * Pivots by normalized_game_name into fixed platform column fields.
+   */
+  async function loadGameUsernamesByPlayerUids(playerUids = []) {
+    const uids = [...new Set(
+      (Array.isArray(playerUids) ? playerUids : [])
+        .map((uid) => String(uid || '').trim())
+        .filter(Boolean)
+    )];
+
+    const byUid = emptyGameUsernameMap(uids);
+    if (!uids.length || !gameLoginsPlan?.configured) {
+      return byUid;
+    }
+
+    const cols = gameLoginsPlan.columns;
+    const platformKeys = ROYALVIP_GAME_PLATFORMS.map((platform) => platform.key);
+    const result = await pool.query(
+      `
+      SELECT
+        g.${quoteIdent(cols.playerUid)}::text AS player_uid,
+        g.${quoteIdent(cols.normalizedGameName)}::text AS normalized_game_name,
+        NULLIF(TRIM(g.${quoteIdent(cols.gameUsername)}::text), '') AS game_username
+      FROM ${quoteIdent(gameLoginsPlan.table)} g
+      WHERE g.${quoteIdent(cols.playerUid)} = ANY($1::text[])
+        AND g.${quoteIdent(cols.deletedAt)} IS NULL
+        AND g.${quoteIdent(cols.normalizedGameName)} = ANY($2::text[])
+      `,
+      [uids, platformKeys]
+    );
+
+    const rowsByUid = new Map();
+    for (const row of result.rows) {
+      const uid = String(row.player_uid || '').trim();
+      if (!uid) continue;
+      const list = rowsByUid.get(uid) || [];
+      list.push(row);
+      rowsByUid.set(uid, list);
+    }
+
+    for (const uid of uids) {
+      byUid.set(uid, pivotGameUsernames(rowsByUid.get(uid) || []));
+    }
+
+    return byUid;
   }
 
   async function listPlayers({
@@ -744,9 +848,15 @@ export async function createAppBegStore(env = process.env) {
       OFFSET $${nextIndex + 1}
     `;
     const dataResult = await pool.query(dataSql, [...params, safeLimit, offset]);
+    const playerUids = dataResult.rows
+      .map((row) => String(row.uid || '').trim())
+      .filter(Boolean);
+    const gameUsernamesByUid = await loadGameUsernamesByPlayerUids(playerUids);
 
     return {
-      players: dataResult.rows.map(toPublicPlayer),
+      players: dataResult.rows.map((row) => (
+        toPublicPlayer(row, gameUsernamesByUid.get(String(row.uid || '').trim()) || emptyGameUsernameFields())
+      )),
       pagination: {
         page: safePage,
         limit: safeLimit,
@@ -755,8 +865,13 @@ export async function createAppBegStore(env = process.env) {
       },
       sort: { by: sortBy, dir: sortDir.toLowerCase() },
       showTestData: includeTestData,
+      platforms: ROYALVIP_GAME_PLATFORMS.map((platform) => ({
+        key: platform.key,
+        label: platform.label
+      })),
       columns: {
-        optional: plan.optionalPresent
+        optional: plan.optionalPresent,
+        gameUsernames: Boolean(gameLoginsPlan?.configured)
       }
     };
   }
