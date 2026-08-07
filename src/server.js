@@ -133,6 +133,9 @@ async function initAppBegStore() {
       async listPlayers() {
         throw new Error(error.message || 'RoyalVIP database connection failed.');
       },
+      async listGameAccountsForPlayer() {
+        return [];
+      },
       async getFilterOptions() {
         throw new Error(error.message || 'RoyalVIP database connection failed.');
       },

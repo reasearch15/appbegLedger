@@ -1,0 +1,69 @@
+{
+  "player": "Amyfi02",
+  "uid": "o6XdSdLND0g8odmeoYaMXyG5uRn2",
+  "accountCount": 11,
+  "platforms": [
+    {
+      "label": "Orion Stars",
+      "username": "amyniv_0OS",
+      "hasPassword": true
+    },
+    {
+      "label": "Fire Kirin",
+      "username": "amyqxb_0FK",
+      "hasPassword": true
+    },
+    {
+      "label": "Juwa",
+      "username": "amydon_0JW",
+      "hasPassword": true
+    },
+    {
+      "label": "Juwa2",
+      "username": "amyoiyju",
+      "hasPassword": true
+    },
+    {
+      "label": "Ultra Panda",
+      "username": "amy7vo0UP",
+      "hasPassword": true
+    },
+    {
+      "label": "VB Link",
+      "username": "amy8eqVB",
+      "hasPassword": true
+    },
+    {
+      "label": "Mafia",
+      "username": "amy1iy0MF",
+      "hasPassword": true
+    },
+    {
+      "label": "Cash Frenzy",
+      "username": "amy7220CF",
+      "hasPassword": true
+    },
+    {
+      "label": "Vegas Sweeps",
+      "username": "amyxlo_0VS",
+      "hasPassword": true
+    },
+    {
+      "label": "Milky Way",
+      "username": "amygmy_0MW",
+      "hasPassword": true
+    },
+    {
+      "label": "Game Vault",
+      "username": "amyjbv_0GV",
+      "hasPassword": true
+    }
+  ],
+  "initialButtons": [
+    "🔴 Open Royal VIP",
+    "Main Menu",
+    "🔐 Show Game Passwords",
+    "🙈 Hide Details",
+    "Support"
+  ]
+}

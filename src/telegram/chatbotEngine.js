@@ -90,6 +90,22 @@ import {
   resolveRoyalVipCredentials
 } from './accountView.js';
 
+async function loadLiveGameAccounts(playerUid) {
+  const uid = String(playerUid || '').trim();
+  if (!uid) return [];
+  const store = globalThis.appbegStore;
+  if (!store?.configured || typeof store.listGameAccountsForPlayer !== 'function') {
+    return [];
+  }
+  try {
+    const accounts = await store.listGameAccountsForPlayer(uid);
+    return Array.isArray(accounts) ? accounts : [];
+  } catch (error) {
+    console.log(`[chatbot] game_accounts_load_failed reason=${error.message}`);
+    return [];
+  }
+}
+
 export const BOT_REGISTRATION_STEPS = [
   'welcome',
   'payment_name',
@@ -894,20 +910,57 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
       };
     }
 
-    if (parsedAccountAction.type === 'hide') {
+    if (parsedAccountAction.type === 'hide' || parsedAccountAction.type === 'show_game_passwords') {
+      const credentials = resolveRoyalVipCredentials({ contact, info });
+      if (!credentials.ok) {
+        return {
+          kind: 'account_credentials_missing',
+          replies: [{
+            text: buildMyAccountText(credentials),
+            buttons: buildMissingAccountButtons(parsedAccountAction.token)
+          }],
+          statePatch: null,
+          accountView: {
+            action: 'show',
+            token: parsedAccountAction.token,
+            previousMessageId: Number(info.account_view_message_id || 0) || null,
+            text: buildMyAccountText(credentials),
+            buttons: buildMissingAccountButtons(parsedAccountAction.token),
+            missing: true
+          },
+          sensitive: false,
+          escalate: false,
+          logEvent: { event: 'account_credentials_missing', reason: credentials.reason }
+        };
+      }
+
+      const gameAccounts = await loadLiveGameAccounts(credentials.linkedUid);
+      const mode = parsedAccountAction.type === 'show_game_passwords' ? 'revealed' : 'hidden';
+      const text = buildMyAccountText(credentials, gameAccounts, mode);
+      const buttons = buildMyAccountButtons(parsedAccountAction.token, {
+        includeHide: mode === 'revealed',
+        includeShowGamePasswords: mode === 'hidden' && gameAccounts.length > 0
+      });
+
       return {
-        kind: 'account_hide_details',
+        kind: mode === 'revealed' ? 'account_show_game_passwords' : 'account_hide_details',
         replies: [],
         statePatch: null,
         accountView: {
-          action: 'hide',
+          action: 'edit',
           messageId: callbackMessageId,
           token: parsedAccountAction.token,
+          text,
+          buttons,
+          mode,
           fallbackText: ACCOUNT_DETAILS_HIDDEN_TEXT
         },
         sensitive: true,
         escalate: false,
-        logEvent: { event: 'account_view_hidden' }
+        logEvent: {
+          event: mode === 'revealed' ? 'account_game_passwords_revealed' : 'account_view_hidden',
+          game_account_count: gameAccounts.length
+        }
       };
     }
 
@@ -941,8 +994,14 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
   if (missing) {
     console.log(`[chatbot] account_credentials_missing contact=${contact.id} reason=${credentials.reason}`);
   }
-  const text = buildMyAccountText(credentials);
-  const buttons = missing ? buildMissingAccountButtons(token) : buildMyAccountButtons(token);
+  const gameAccounts = missing ? [] : await loadLiveGameAccounts(credentials.linkedUid);
+  const text = buildMyAccountText(credentials, gameAccounts, 'usernames');
+  const buttons = missing
+    ? buildMissingAccountButtons(token)
+    : buildMyAccountButtons(token, {
+      includeHide: true,
+      includeShowGamePasswords: gameAccounts.length > 0
+    });
 
   return {
     kind: missing ? 'account_credentials_missing' : 'account_credentials',
@@ -954,13 +1013,16 @@ async function accountViewDecision({ store, contact, info = {}, flow = null, ste
       previousMessageId: Number(info.account_view_message_id || 0) || null,
       text,
       buttons,
-      missing
+      mode: 'usernames',
+      missing,
+      gameAccountCount: gameAccounts.length
     },
     sensitive: !missing,
     escalate: false,
     logEvent: {
       event: missing ? 'account_credentials_missing' : 'account_view_opened',
-      reason: missing ? credentials.reason : undefined
+      reason: missing ? credentials.reason : undefined,
+      game_account_count: missing ? 0 : gameAccounts.length
     }
   };
 }

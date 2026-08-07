@@ -10,6 +10,7 @@ import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { handlePaymentRegistrationQr } from './registrationQrSend.js';
 import { isGreetingEntryText } from './botPrivateEntry.js';
 import { accountViewSnapshotPatch, ACCOUNT_DETAILS_HIDDEN_TEXT, ACCOUNT_SENSITIVE_LOG_TEXT } from './accountView.js';
+import { normalizeButtonRows, toTelegramInlineButton } from './messageDelivery.js';
 import { buildSupportRequestRecord, sendSupportBotNotification, SUPPORT_DELIVERY_FAILED_TEXT } from './supportNotificationBot.js';
 import {
   DEPOSIT_BOT_SESSION_FLOW,
@@ -485,7 +486,7 @@ async function processBotJobUnlocked(store, job, { io = null, bot = null, suppor
         decision,
         bot: bot || globalThis.telegramBot || null
       });
-      if (decision.accountView.action === 'show' && !accountDelivery?.delivered) {
+      if (['show', 'edit', 'hide'].includes(decision.accountView.action) && !accountDelivery?.delivered) {
         throw new Error('Account credentials response was not delivered.');
       }
       accountViewHandled = true;
@@ -868,53 +869,69 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
   const view = decision.accountView || {};
   const activeBot = bot || globalThis.telegramBot || null;
 
-  if (view.action === 'hide') {
+  if (view.action === 'edit' || view.action === 'hide') {
     if (!activeBot?.telegram) {
-      throw new Error('Telegram bot is required to hide account details.');
+      throw new Error('Telegram bot is required to update account details.');
     }
     const messageId = Number(view.messageId || 0) || null;
-    if (messageId && activeBot.telegram.deleteMessage) {
-      try {
-        await activeBot.telegram.deleteMessage(contact.telegram_id, messageId);
-        const state = await store.getAutomationState(contact.id).catch(() => null);
-        await store.updateAutomationState(contact.id, {
-          registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
-            token: view.token,
-            messageId,
-            hidden: true
-          })
-        }).catch(() => null);
-        return { delivered: true, messageId, action: 'hide' };
-      } catch (error) {
-        console.log(`[chatbot] account_view_delete_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
-      }
-    }
+    const editText = String(view.text || view.fallbackText || ACCOUNT_DETAILS_HIDDEN_TEXT).trim();
+    const buttons = view.buttons || [];
+    const normalizedButtons = normalizeButtonRows(buttons);
+    const replyMarkup = normalizedButtons.length
+      ? { inline_keyboard: normalizedButtons.map((row) => row.map(toTelegramInlineButton)) }
+      : { inline_keyboard: [] };
+
     if (messageId && activeBot.telegram.editMessageText) {
       try {
-        await activeBot.telegram.editMessageText(contact.telegram_id, messageId, undefined, view.fallbackText || 'Account details hidden.');
+        await activeBot.telegram.editMessageText(
+          contact.telegram_id,
+          messageId,
+          undefined,
+          editText,
+          { reply_markup: replyMarkup }
+        );
         const state = await store.getAutomationState(contact.id).catch(() => null);
         await store.updateAutomationState(contact.id, {
           registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
             token: view.token,
             messageId,
-            hidden: true
+            hidden: view.mode === 'hidden' || view.action === 'hide',
+            mode: view.mode || (view.action === 'hide' ? 'hidden' : null)
           })
         }).catch(() => null);
-        return { delivered: true, messageId, action: 'hide' };
+        return { delivered: true, messageId, action: 'edit', mode: view.mode || null };
       } catch (error) {
-        console.log(`[chatbot] account_view_hide_edit_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
+        console.log(`[chatbot] account_view_edit_failed contact=${contact.id} message_id=${messageId} reason=${error.message}`);
       }
     }
-    // Fall through to a visible confirmation when delete/edit is unavailable.
-    const hideText = view.fallbackText || ACCOUNT_DETAILS_HIDDEN_TEXT;
-    await queueBotReply({
+
+    // Fall through: send a fresh message if in-place edit is unavailable.
+    const sendResult = await queueBotReply({
       store,
       user: contact,
-      text: hideText,
-      buttons: [],
-      bot: activeBot
+      text: editText,
+      buttons: normalizedButtons,
+      bot: activeBot,
+      storeText: decision.sensitive ? ACCOUNT_SENSITIVE_LOG_TEXT : null
     });
-    return { delivered: true, messageId: null, action: 'hide' };
+    const sentMessageId = Number(sendResult?.messageId || 0) || null;
+    if (sentMessageId) {
+      const state = await store.getAutomationState(contact.id).catch(() => null);
+      await store.updateAutomationState(contact.id, {
+        registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
+          token: view.token,
+          messageId: sentMessageId,
+          hidden: view.mode === 'hidden' || view.action === 'hide',
+          mode: view.mode || null
+        })
+      }).catch(() => null);
+    }
+    return {
+      delivered: Boolean(sendResult?.queued) || Boolean(sentMessageId),
+      messageId: sentMessageId,
+      action: 'edit_fallback_send',
+      mode: view.mode || null
+    };
   }
 
   if (view.action !== 'show') {
@@ -930,7 +947,8 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
   const previousMessageId = Number(view.previousMessageId || 0) || null;
 
   // Always send a fresh private message through the standard outbound pipeline.
-  // Never edit an older account_view_message_id — that looked silent in production.
+  // Never edit an older account_view_message_id for the initial open — that looked silent in production.
+  // Show Game Passwords / Hide Details edit the active message in place (action=edit above).
   // Never persist/log credential plaintext — storeText redacts durable storage.
   let sendResult;
   try {
@@ -973,7 +991,8 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
       registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
         token: view.token,
         messageId,
-        hidden: false
+        hidden: false,
+        mode: view.mode || 'usernames'
       })
     });
   }

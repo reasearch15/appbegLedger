@@ -97,6 +97,14 @@ async function run() {
     configured: true,
     async getPlayerByUid(uid) {
       return { uid, status: 'active', username: 'AmyVip01' };
+    },
+    async listGameAccountsForPlayer(uid) {
+      if (String(uid) !== 'playeruid123456') return [];
+      return [
+        { key: 'orion_stars', label: 'Orion Stars', username: 'amyniv_0OS', password: 'os-secret' },
+        { key: 'fire_kirin', label: 'Fire Kirin', username: 'amyqxb_0FK', password: null },
+        { key: 'juwa', label: 'Juwa', username: 'amydon_0JW', password: 'jw-secret' }
+      ];
     }
   };
 
@@ -120,19 +128,23 @@ async function run() {
   assert.match(account.replies[0].text, /^Royal VIP Account/);
   assert.match(account.replies[0].text, /Username: AmyVip01/);
   assert.match(account.replies[0].text, /Password: Secret123/);
+  assert.match(account.replies[0].text, /🎮 Game Accounts/);
+  assert.match(account.replies[0].text, /Orion Stars\nUsername: amyniv_0OS/);
+  assert.match(account.replies[0].text, /Fire Kirin\nUsername: amyqxb_0FK/);
+  assert.match(account.replies[0].text, /Juwa\nUsername: amydon_0JW/);
+  assert.doesNotMatch(account.replies[0].text, /os-secret|jw-secret/);
+  assert.doesNotMatch(account.replies[0].text, /Password:\nos-secret|Password:\njw-secret|Password:\nNot available/);
   assert.match(account.replies[0].text, /Keep these details private/);
   assert.doesNotMatch(account.replies[0].text, /AppBeg/);
   assert.deepEqual(account.replies[0].buttons[0][0].web_app, { url: 'https://royal.youplatform.org' });
   assert.match(account.replies[0].buttons[0][0].text, /Open Royal VIP/);
-  const accountButtonActions = account.replies[0].buttons.flat().map((button) => button.action || button.data);
-  assert.ok(accountButtonActions.includes('bot:main_menu'));
-  assert.ok(accountButtonActions.some((action) => String(action).startsWith('account:support:')));
-  assert.deepEqual(
-    account.replies[0].buttons.flat().map((button) => button.text),
-    ['🔴 Open Royal VIP', 'Main Menu', 'Support']
-  );
+  const accountButtonTexts = account.replies[0].buttons.flat().map((button) => button.text);
+  assert.ok(accountButtonTexts.includes('Main Menu'));
+  assert.ok(accountButtonTexts.includes('🔐 Show Game Passwords'));
+  assert.ok(accountButtonTexts.includes('🙈 Hide Details'));
+  assert.ok(accountButtonTexts.includes('Support'));
   assert.equal(JSON.stringify(account.replies[0].buttons), JSON.stringify(account.replies[0].buttons).includes('Secret123') ? 'password leaked' : JSON.stringify(account.replies[0].buttons));
-  console.log('ok registered user sees own Royal VIP credentials with Web App button');
+  console.log('ok registered user sees Royal VIP + game usernames without game passwords');
 
   const otherInfo = {
     royal_vip_credentials: {
@@ -287,6 +299,7 @@ async function run() {
   assert.equal(editedState.registration_info.account_view_message_id, 502);
   console.log('ok double tapping My Account sends a fresh account message');
 
+  const beforeHideEdits = calls.filter((call) => call.method === 'editMessageText').length;
   await processBotJob(processStore, {
     id: 3,
     contact_id: 77,
@@ -298,8 +311,37 @@ async function run() {
     update_id: 10003,
     message_id: null
   }, { bot });
-  assert.equal(calls.some((call) => call.method === 'deleteMessage' && call.messageId === 502), true);
-  console.log('ok account hide action deletes the credential message');
+  const hideEdit = calls.filter((call) => call.method === 'editMessageText').slice(beforeHideEdits);
+  assert.equal(hideEdit.length, 1);
+  assert.equal(hideEdit[0].messageId, 502);
+  assert.match(hideEdit[0].text, /Password: \*{8}/);
+  assert.match(hideEdit[0].text, /Orion Stars\nUsername: amyniv_0OS/);
+  assert.doesNotMatch(hideEdit[0].text, /os-secret|jw-secret|Secret123/);
+  assert.doesNotMatch(JSON.stringify(processStore.logs), /os-secret|jw-secret|Secret123/);
+  console.log('ok account hide edits message to mask all passwords');
+
+  const beforeRevealEdits = calls.filter((call) => call.method === 'editMessageText').length;
+  await processBotJob(processStore, {
+    id: 4,
+    contact_id: 77,
+    telegram_user_id: 9077,
+    job_type: 'callback_action',
+    input_text: '',
+    action: `account:show_game_passwords:${token}`,
+    incoming_telegram_message_id: 502,
+    update_id: 10004,
+    message_id: null
+  }, { bot });
+  const revealEdit = calls.filter((call) => call.method === 'editMessageText').slice(beforeRevealEdits);
+  assert.equal(revealEdit.length, 1);
+  assert.equal(revealEdit[0].messageId, 502);
+  assert.match(revealEdit[0].text, /Password:\nos-secret/);
+  assert.match(revealEdit[0].text, /Password:\nNot available/);
+  assert.match(revealEdit[0].text, /Password:\njw-secret/);
+  assert.match(revealEdit[0].text, /Password: Secret123/);
+  assert.equal(calls.filter((call) => call.method === 'sendMessage').length, 2);
+  assert.doesNotMatch(JSON.stringify(processStore.outbound), /os-secret|jw-secret|Secret123/);
+  console.log('ok show game passwords edits the same message without a second send');
 
   const stale = await decideBotReply({
     store: processStore,

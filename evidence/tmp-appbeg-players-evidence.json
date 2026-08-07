@@ -1,0 +1,74 @@
+{
+  "configured": true,
+  "pagination": {
+    "page": 1,
+    "limit": 50,
+    "total": 4,
+    "totalPages": 1
+  },
+  "platforms": [
+    {
+      "key": "orion_stars",
+      "label": "Orion Stars"
+    },
+    {
+      "key": "fire_kirin",
+      "label": "Fire Kirin"
+    },
+    {
+      "key": "juwa",
+      "label": "Juwa"
+    },
+    {
+      "key": "juwa2",
+      "label": "Juwa2"
+    },
+    {
+      "key": "ultra_panda",
+      "label": "Ultra Panda"
+    },
+    {
+      "key": "vb_link",
+      "label": "VB Link"
+    },
+    {
+      "key": "mafia",
+      "label": "Mafia"
+    },
+    {
+      "key": "cash_frenzy",
+      "label": "Cash Frenzy"
+    },
+    {
+      "key": "vegas_sweeps",
+      "label": "Vegas Sweeps"
+    },
+    {
+      "key": "milky_way",
+      "label": "Milky Way"
+    },
+    {
+      "key": "game_vault",
+      "label": "Game Vault"
+    }
+  ],
+  "samplePlayer": {
+    "username": "Amyfi02",
+    "created_by": "pNaCcFpMHccu5l3TgLSKvldtrOB2",
+    "game_orion_stars": "amyniv_0OS",
+    "game_fire_kirin": "amyqxb_0FK",
+    "game_juwa": "amydon_0JW",
+    "game_juwa2": "amyoiyju",
+    "game_ultra_panda": "amy7vo0UP",
+    "game_vb_link": "amy8eqVB",
+    "game_mafia": "amy1iy0MF",
+    "game_cash_frenzy": "amy7220CF",
+    "game_vegas_sweeps": "amyxlo_0VS",
+    "game_milky_way": "amygmy_0MW",
+    "game_game_vault": "amyjbv_0GV",
+    "coin": "1",
+    "cash": "100",
+    "source": "appbeg_ledger"
+  },
+  "playersWithAnyGameUsername": 4
+}

@@ -8,6 +8,10 @@ export const ACCOUNT_DETAILS_UNAVAILABLE_TEXT = [
 ].join('\n');
 export const ACCOUNT_PRIVACY_WARNING = 'Keep these details private. Anyone with access to this Telegram chat may be able to see them.';
 export const ACCOUNT_SENSITIVE_LOG_TEXT = '[sensitive account details omitted]';
+export const ACCOUNT_PASSWORD_MASK = '********';
+export const GAME_PASSWORD_UNAVAILABLE = 'Not available';
+
+/** @typedef {'usernames' | 'revealed' | 'hidden'} AccountViewMode */
 
 export function createAccountViewToken() {
   return crypto.randomBytes(ACCOUNT_VIEW_TOKEN_BYTES).toString('hex');
@@ -68,18 +72,57 @@ export function resolveRoyalVipCredentials({ contact = {}, info = {} } = {}) {
   };
 }
 
-export function buildMyAccountText(credentials) {
+/**
+ * Build My Account message text.
+ * @param {object} credentials - resolveRoyalVipCredentials result
+ * @param {object[]} [gameAccounts] - live AppBeg rows { label, username, password|null }
+ * @param {AccountViewMode} [mode]
+ */
+export function buildMyAccountText(credentials, gameAccounts = [], mode = 'usernames') {
   if (!credentials?.ok) return ACCOUNT_DETAILS_UNAVAILABLE_TEXT;
-  return [
+
+  const showRoyalPassword = mode !== 'hidden';
+  const lines = [
     'Royal VIP Account',
     `Username: ${sanitizeCredentialText(credentials.username)}`,
-    `Password: ${sanitizeCredentialText(credentials.password)}`,
-    '',
-    ACCOUNT_PRIVACY_WARNING
-  ].join('\n');
+    `Password: ${showRoyalPassword ? sanitizeCredentialText(credentials.password) : ACCOUNT_PASSWORD_MASK}`
+  ];
+
+  const accounts = Array.isArray(gameAccounts) ? gameAccounts : [];
+  if (accounts.length) {
+    lines.push('', '🎮 Game Accounts');
+    for (const account of accounts) {
+      const label = sanitizeCredentialText(account.label);
+      const username = sanitizeCredentialText(account.username);
+      if (!label || !username) continue;
+
+      if (mode === 'revealed') {
+        const password = sanitizeCredentialText(account.password);
+        lines.push(
+          '',
+          label,
+          '',
+          'Username:',
+          username,
+          '',
+          'Password:',
+          password || GAME_PASSWORD_UNAVAILABLE
+        );
+      } else {
+        // usernames | hidden — never include game passwords
+        lines.push('', label, `Username: ${username}`);
+      }
+    }
+  }
+
+  lines.push('', ACCOUNT_PRIVACY_WARNING);
+  return lines.join('\n');
 }
 
-export function buildMyAccountButtons(token, { includeHide = false } = {}) {
+export function buildMyAccountButtons(token, {
+  includeHide = false,
+  includeShowGamePasswords = false
+} = {}) {
   const royalVipButton = {
     label: '🔴 Open Royal VIP',
     text: '🔴 Open Royal VIP',
@@ -88,14 +131,25 @@ export function buildMyAccountButtons(token, { includeHide = false } = {}) {
   };
   const rows = [
     [royalVipButton],
-    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }],
-    [
-      includeHide
-        ? { label: '🙈 Hide Details', text: '🙈 Hide Details', action: `account:hide:${token}`, data: `account:hide:${token}` }
-        : null,
-      { label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }
-    ].filter(Boolean)
+    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }]
   ];
+
+  if (includeShowGamePasswords) {
+    rows.push([{
+      label: '🔐 Show Game Passwords',
+      text: '🔐 Show Game Passwords',
+      action: `account:show_game_passwords:${token}`,
+      data: `account:show_game_passwords:${token}`
+    }]);
+  }
+
+  rows.push([
+    includeHide
+      ? { label: '🙈 Hide Details', text: '🙈 Hide Details', action: `account:hide:${token}`, data: `account:hide:${token}` }
+      : null,
+    { label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }
+  ].filter(Boolean));
+
   return rows;
 }
 
@@ -107,10 +161,12 @@ export function buildMissingAccountButtons(token) {
 }
 
 export function parseAccountAction(action = '') {
-  const match = String(action || '').trim().match(/^account:(hide|back|support):([a-f0-9]{12})$/i);
+  const match = String(action || '').trim().match(
+    /^account:(hide|show_game_passwords|back|support):([a-f0-9]{12})$/i
+  );
   if (!match) return null;
   return {
-    type: match[1],
+    type: match[1].toLowerCase(),
     token: match[2].toLowerCase()
   };
 }
@@ -127,12 +183,18 @@ export function isFreshAccountAction({ info = {}, action = null, messageId = nul
     && expectedMessageId === pressedMessageId;
 }
 
-export function accountViewSnapshotPatch(info = {}, { token, messageId, hidden = false } = {}) {
+export function accountViewSnapshotPatch(info = {}, {
+  token,
+  messageId,
+  hidden = false,
+  mode = null
+} = {}) {
   return {
     ...info,
     account_view_token: token,
     account_view_message_id: Number(messageId) || null,
     account_view_hidden: Boolean(hidden),
+    ...(mode ? { account_view_mode: mode } : {}),
     account_view_updated_at: new Date().toISOString()
   };
 }

@@ -42,6 +42,9 @@ const GAME_LOGINS_REQUIRED_COLUMNS = [
   'game_username',
   'deleted_at'
 ];
+const GAME_LOGINS_OPTIONAL_COLUMNS = {
+  gamePassword: 'game_password'
+};
 const FINANCIAL_COLUMN_CANDIDATES = {
   playerUid: ['player_uid', 'appbeg_player_uid', 'uid'],
   type: ['event_type', 'type'],
@@ -309,7 +312,10 @@ async function buildGameLoginsPlan(pool) {
       playerUid: 'player_uid',
       normalizedGameName: 'normalized_game_name',
       gameUsername: 'game_username',
-      deletedAt: 'deleted_at'
+      deletedAt: 'deleted_at',
+      gamePassword: columns.has(GAME_LOGINS_OPTIONAL_COLUMNS.gamePassword)
+        ? GAME_LOGINS_OPTIONAL_COLUMNS.gamePassword
+        : null
     }
   };
 }
@@ -758,6 +764,63 @@ export async function createAppBegStore(env = process.env) {
   }
 
   /**
+   * Live read of game accounts for one player (My Account).
+   * Returns only platforms with a non-empty username, in fixed platform order.
+   * Passwords are returned only when AppBeg stores them — never invented.
+   */
+  async function listGameAccountsForPlayer(playerUid) {
+    const uid = String(playerUid || '').trim();
+    if (!uid || !gameLoginsPlan?.configured) return [];
+
+    const cols = gameLoginsPlan.columns;
+    const platformKeys = ROYALVIP_GAME_PLATFORMS.map((platform) => platform.key);
+    const passwordSelect = cols.gamePassword
+      ? `NULLIF(TRIM(g.${quoteIdent(cols.gamePassword)}::text), '') AS game_password`
+      : 'NULL::text AS game_password';
+
+    const result = await pool.query(
+      `
+      SELECT
+        g.${quoteIdent(cols.normalizedGameName)}::text AS normalized_game_name,
+        NULLIF(TRIM(g.${quoteIdent(cols.gameUsername)}::text), '') AS game_username,
+        ${passwordSelect}
+      FROM ${quoteIdent(gameLoginsPlan.table)} g
+      WHERE g.${quoteIdent(cols.playerUid)} = $1::text
+        AND g.${quoteIdent(cols.deletedAt)} IS NULL
+        AND g.${quoteIdent(cols.normalizedGameName)} = ANY($2::text[])
+      `,
+      [uid, platformKeys]
+    );
+
+    const byKey = new Map();
+    for (const row of result.rows) {
+      const key = String(row.normalized_game_name || '').trim();
+      const username = String(row.game_username || '').trim();
+      if (!key || !username) continue;
+      // Prefer first non-empty password if duplicate rows exist for a platform.
+      const existing = byKey.get(key);
+      const password = String(row.game_password || '').trim() || null;
+      if (!existing) {
+        byKey.set(key, { username, password });
+      } else if (!existing.password && password) {
+        byKey.set(key, { username: existing.username, password });
+      }
+    }
+
+    return ROYALVIP_GAME_PLATFORMS
+      .filter((platform) => byKey.has(platform.key))
+      .map((platform) => {
+        const entry = byKey.get(platform.key);
+        return {
+          key: platform.key,
+          label: platform.label,
+          username: entry.username,
+          password: entry.password
+        };
+      });
+  }
+
+  /**
    * Batch-load game usernames for a page of players (one query, no N+1).
    * Pivots by normalized_game_name into fixed platform column fields.
    */
@@ -1094,6 +1157,7 @@ export async function createAppBegStore(env = process.env) {
     plan,
     pool,
     listPlayers,
+    listGameAccountsForPlayer,
     getFilterOptions,
     getPlayerByUid,
     getPlayerByUsername,
