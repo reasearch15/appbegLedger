@@ -895,8 +895,11 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
           registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
             token: view.token,
             messageId,
-            hidden: view.mode === 'hidden' || view.action === 'hide',
-            mode: view.mode || (view.action === 'hide' ? 'hidden' : null)
+            hidden: view.mode === 'main_hidden' || view.mode === 'game_hidden' || view.action === 'hide',
+            mode: view.mode || (view.action === 'hide' ? 'main_hidden' : null),
+            platformKey: Object.prototype.hasOwnProperty.call(view, 'platformKey')
+              ? view.platformKey
+              : undefined
           })
         }).catch(() => null);
         return { delivered: true, messageId, action: 'edit', mode: view.mode || null };
@@ -921,8 +924,11 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
         registrationInfo: accountViewSnapshotPatch(state?.registration_info || {}, {
           token: view.token,
           messageId: sentMessageId,
-          hidden: view.mode === 'hidden' || view.action === 'hide',
-          mode: view.mode || null
+          hidden: view.mode === 'main_hidden' || view.mode === 'game_hidden' || view.action === 'hide',
+          mode: view.mode || null,
+          platformKey: Object.prototype.hasOwnProperty.call(view, 'platformKey')
+            ? view.platformKey
+            : undefined
         })
       }).catch(() => null);
     }
@@ -992,7 +998,10 @@ async function handleAccountViewDecision({ store, contact, decision, bot = null 
         token: view.token,
         messageId,
         hidden: false,
-        mode: view.mode || 'usernames'
+        mode: view.mode || 'main',
+        platformKey: Object.prototype.hasOwnProperty.call(view, 'platformKey')
+          ? view.platformKey
+          : null
       })
     });
   }

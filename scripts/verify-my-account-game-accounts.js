@@ -2,8 +2,10 @@ import 'dotenv/config';
 import fs from 'node:fs';
 import { createAppBegStore } from '../src/db/appbegStore.js';
 import {
+  buildGameAccountDetailText,
+  buildGameDetailButtons,
   buildMyAccountButtons,
-  buildMyAccountText,
+  buildMyAccountMainText,
   createAccountViewToken
 } from '../src/telegram/accountView.js';
 
@@ -14,7 +16,7 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;');
 }
 
-function renderTelegramCard(title, text, buttons) {
+function renderCard(title, text, buttons) {
   const buttonHtml = buttons.flat().map((button) => (
     `<div class="btn">${escapeHtml(button.text)}</div>`
   )).join('');
@@ -48,87 +50,73 @@ const credentials = {
   linkedUid: player.uid
 };
 const token = createAccountViewToken();
-const usernames = buildMyAccountText(credentials, accounts, 'usernames');
-const revealed = buildMyAccountText(credentials, accounts, 'revealed');
-const hidden = buildMyAccountText(credentials, accounts, 'hidden');
-const initialButtons = buildMyAccountButtons(token, {
-  includeHide: true,
-  includeShowGamePasswords: accounts.length > 0
+const mainText = buildMyAccountMainText(credentials);
+const mainButtons = buildMyAccountButtons(token, { gameAccounts: accounts, includeHide: true, mode: 'main' });
+const sampleAccount = accounts[0];
+const detailText = buildGameAccountDetailText({
+  ...sampleAccount,
+  password: sampleAccount?.password ? '[stored-password]' : null
 });
-const revealedButtons = buildMyAccountButtons(token, {
-  includeHide: true,
-  includeShowGamePasswords: false
-});
-const hiddenButtons = buildMyAccountButtons(token, {
-  includeHide: false,
-  includeShowGamePasswords: accounts.length > 0
-});
-
-for (const account of accounts) {
-  if (account.password && usernames.includes(account.password)) {
-    console.error('LEAK in usernames mode', account.label);
-    process.exit(2);
-  }
-  if (account.password && hidden.includes(account.password)) {
-    console.error('LEAK in hidden mode', account.label);
-    process.exit(2);
-  }
-  if (account.password && !revealed.includes(account.password)) {
-    console.error('MISSING password in revealed mode', account.label);
-    process.exit(3);
-  }
-}
+const detailButtons = buildGameDetailButtons(token, { includeHide: true, mode: 'game' });
+const hiddenDetail = buildGameAccountDetailText(sampleAccount, { hidePassword: true });
 
 fs.mkdirSync('evidence', { recursive: true });
-fs.writeFileSync('evidence/my-account-usernames.txt', usernames);
-fs.writeFileSync('evidence/my-account-revealed.txt', revealed);
-fs.writeFileSync('evidence/my-account-hidden.txt', hidden);
+fs.writeFileSync('evidence/my-account-main.txt', mainText);
+fs.writeFileSync('evidence/my-account-game-detail.txt', detailText);
+fs.writeFileSync('evidence/my-account-game-hidden.txt', hiddenDetail);
 fs.writeFileSync('evidence/my-account-live.json', JSON.stringify({
   player: player.username,
   uid: player.uid,
   accountCount: accounts.length,
   platforms: accounts.map((account) => ({
+    key: account.key,
     label: account.label,
     username: account.username,
     hasPassword: Boolean(account.password)
   })),
-  initialButtons: initialButtons.flat().map((button) => button.text)
+  mainButtons: mainButtons.flat().map((button) => button.text),
+  detailButtons: detailButtons.flat().map((button) => button.text),
+  sendMessageCountExpected: 1,
+  editsExpected: ['game open', 'hide', 'back to games']
 }, null, 2));
 
 const html = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>My Account Telegram Samples</title>
+  <title>My Account Redesign Samples</title>
   <style>
     body { font-family: Segoe UI, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
-    h1 { margin: 0 0 16px; }
-    .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    h1 { margin: 0 0 16px; font-size: 22px; }
+    .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 16px; }
-    .card h2 { margin: 0 0 12px; font-size: 16px; color: #93c5fd; }
-    pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; border-radius: 12px; padding: 14px; margin: 0 0 12px; line-height: 1.45; }
-    .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
-    .btn { background: #334155; border-radius: 999px; padding: 8px 12px; font-size: 13px; }
+    .card h2 { margin: 0 0 12px; font-size: 15px; color: #93c5fd; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0b1220; border-radius: 12px; padding: 14px; margin: 0 0 12px; line-height: 1.45; min-height: 180px; }
+    .buttons { display: flex; flex-direction: column; gap: 8px; }
+    .btn { background: #334155; border-radius: 12px; padding: 10px 12px; font-size: 13px; text-align: center; }
   </style>
 </head>
 <body>
-  <h1>Telegram My Account — live player ${escapeHtml(player.username)}</h1>
+  <h1>Telegram My Account redesign — ${escapeHtml(player.username)}</h1>
   <div class="grid">
-    ${renderTelegramCard('1. Initial (usernames only)', usernames, initialButtons)}
-    ${renderTelegramCard('2. After Show Game Passwords', revealed, revealedButtons)}
-    ${renderTelegramCard('3. After Hide Details', hidden, hiddenButtons)}
+    ${renderCard('1. Main My Account (game buttons)', mainText, mainButtons)}
+    ${renderCard(`2. After tapping ${sampleAccount?.label || 'game'}`, detailText, detailButtons)}
+    ${renderCard('3. After Hide Details on game', hiddenDetail, buildGameDetailButtons(token, { includeHide: false, mode: 'game_hidden' }))}
   </div>
 </body>
 </html>`;
-fs.writeFileSync('evidence/my-account-telegram-samples.html', html);
+fs.writeFileSync('evidence/my-account-redesign-samples.html', html);
 
 console.log(JSON.stringify({
   ok: true,
   player: player.username,
   accountCount: accounts.length,
-  platformsWithPassword: accounts.filter((account) => account.password).length
+  sampleGame: sampleAccount?.label || null,
+  mainButtonCount: mainButtons.flat().length
 }, null, 2));
-console.log('--- USERNAMES ---');
-console.log(usernames);
+console.log('--- MAIN ---');
+console.log(mainText);
+console.log('--- BUTTONS ---');
+console.log(mainButtons.flat().map((button) => button.text).join('\n'));
 
 await store.close();

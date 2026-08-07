@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { ROYALVIP_GAME_PLATFORMS } from '../db/appbegGamePlatforms.js';
 
 export const ACCOUNT_VIEW_TOKEN_BYTES = 6;
 export const ACCOUNT_DETAILS_HIDDEN_TEXT = 'Account details hidden.';
@@ -8,13 +9,38 @@ export const ACCOUNT_DETAILS_UNAVAILABLE_TEXT = [
 ].join('\n');
 export const ACCOUNT_PRIVACY_WARNING = 'Keep these details private. Anyone with access to this Telegram chat may be able to see them.';
 export const ACCOUNT_SENSITIVE_LOG_TEXT = '[sensitive account details omitted]';
-export const ACCOUNT_PASSWORD_MASK = '********';
+export const ACCOUNT_PASSWORD_MASK = '••••••••';
 export const GAME_PASSWORD_UNAVAILABLE = 'Not available';
 
-/** @typedef {'usernames' | 'revealed' | 'hidden'} AccountViewMode */
+/** @typedef {'main' | 'main_hidden' | 'game' | 'game_hidden'} AccountViewMode */
+
+const PLATFORM_EMOJI = Object.freeze({
+  orion_stars: '🟣',
+  fire_kirin: '🟠',
+  juwa: '🟢',
+  juwa2: '🔵',
+  ultra_panda: '🟡',
+  vb_link: '🔴',
+  mafia: '🟤',
+  cash_frenzy: '🟦',
+  vegas_sweeps: '🟪',
+  milky_way: '🟩',
+  game_vault: '⚫'
+});
+
+const PLATFORM_KEY_SET = new Set(ROYALVIP_GAME_PLATFORMS.map((platform) => platform.key));
 
 export function createAccountViewToken() {
   return crypto.randomBytes(ACCOUNT_VIEW_TOKEN_BYTES).toString('hex');
+}
+
+export function platformEmoji(platformKey) {
+  return PLATFORM_EMOJI[String(platformKey || '').trim()] || '🎮';
+}
+
+export function platformLabel(platformKey) {
+  const key = String(platformKey || '').trim();
+  return ROYALVIP_GAME_PLATFORMS.find((platform) => platform.key === key)?.label || key;
 }
 
 export function resolveRoyalVipCredentials({ contact = {}, info = {} } = {}) {
@@ -72,97 +98,180 @@ export function resolveRoyalVipCredentials({ contact = {}, info = {} } = {}) {
   };
 }
 
-/**
- * Build My Account message text.
- * @param {object} credentials - resolveRoyalVipCredentials result
- * @param {object[]} [gameAccounts] - live AppBeg rows { label, username, password|null }
- * @param {AccountViewMode} [mode]
- */
-export function buildMyAccountText(credentials, gameAccounts = [], mode = 'usernames') {
-  if (!credentials?.ok) return ACCOUNT_DETAILS_UNAVAILABLE_TEXT;
-
-  const showRoyalPassword = mode !== 'hidden';
+function buildCredentialBlock(titleLines, username, password, { hidePassword = false } = {}) {
   const lines = [
-    'Royal VIP Account',
-    `Username: ${sanitizeCredentialText(credentials.username)}`,
-    `Password: ${showRoyalPassword ? sanitizeCredentialText(credentials.password) : ACCOUNT_PASSWORD_MASK}`
+    ...titleLines,
+    '',
+    'Username:',
+    sanitizeCredentialText(username),
+    '',
+    'Password:',
+    hidePassword
+      ? ACCOUNT_PASSWORD_MASK
+      : (sanitizeCredentialText(password) || GAME_PASSWORD_UNAVAILABLE)
   ];
+  return lines;
+}
 
-  const accounts = Array.isArray(gameAccounts) ? gameAccounts : [];
-  if (accounts.length) {
-    lines.push('', '🎮 Game Accounts');
-    for (const account of accounts) {
-      const label = sanitizeCredentialText(account.label);
-      const username = sanitizeCredentialText(account.username);
-      if (!label || !username) continue;
+/**
+ * Main My Account text: Royal VIP credentials + Game Accounts header.
+ * Game usernames/passwords are not dumped here — they open via buttons.
+ */
+export function buildMyAccountMainText(credentials, { hidePassword = false } = {}) {
+  if (!credentials?.ok) return ACCOUNT_DETAILS_UNAVAILABLE_TEXT;
+  return [
+    ...buildCredentialBlock(
+      ['Royal VIP Account'],
+      credentials.username,
+      credentials.password,
+      { hidePassword }
+    ),
+    '',
+    '🎮 Game Accounts',
+    '',
+    ACCOUNT_PRIVACY_WARNING
+  ].join('\n');
+}
 
-      if (mode === 'revealed') {
-        const password = sanitizeCredentialText(account.password);
-        lines.push(
-          '',
-          label,
-          '',
-          'Username:',
-          username,
-          '',
-          'Password:',
-          password || GAME_PASSWORD_UNAVAILABLE
-        );
-      } else {
-        // usernames | hidden — never include game passwords
-        lines.push('', label, `Username: ${username}`);
-      }
-    }
+/**
+ * Single-game detail text.
+ */
+export function buildGameAccountDetailText(account, { hidePassword = false } = {}) {
+  const label = sanitizeCredentialText(account?.label || platformLabel(account?.key));
+  return [
+    ...buildCredentialBlock(
+      [`🎮 ${label}`.trim()],
+      account?.username,
+      account?.password,
+      { hidePassword }
+    ),
+    '',
+    ACCOUNT_PRIVACY_WARNING
+  ].join('\n');
+}
+
+/** @deprecated Use buildMyAccountMainText / buildGameAccountDetailText */
+export function buildMyAccountText(credentials, gameAccounts = [], mode = 'main') {
+  if (mode === 'game' || mode === 'game_hidden') {
+    const account = Array.isArray(gameAccounts) ? gameAccounts[0] : null;
+    return buildGameAccountDetailText(account || {}, { hidePassword: mode === 'game_hidden' });
   }
+  return buildMyAccountMainText(credentials, {
+    hidePassword: mode === 'main_hidden' || mode === 'hidden'
+  });
+}
 
-  lines.push('', ACCOUNT_PRIVACY_WARNING);
-  return lines.join('\n');
+export function buildGameAccountButtons(token, gameAccounts = []) {
+  const accounts = Array.isArray(gameAccounts) ? gameAccounts : [];
+  const rows = [];
+  for (const account of accounts) {
+    const key = String(account.key || '').trim();
+    if (!PLATFORM_KEY_SET.has(key)) continue;
+    const label = sanitizeCredentialText(account.label || platformLabel(key));
+    const emoji = platformEmoji(key);
+    const text = `${emoji} ${label}`.trim();
+    rows.push([{
+      label: text,
+      text,
+      action: `account:game:${key}:${token}`,
+      data: `account:game:${key}:${token}`
+    }]);
+  }
+  return rows;
 }
 
 export function buildMyAccountButtons(token, {
-  includeHide = false,
-  includeShowGamePasswords = false
+  gameAccounts = [],
+  includeHide = true,
+  mode = 'main'
 } = {}) {
-  const royalVipButton = {
-    label: '🔴 Open Royal VIP',
-    text: '🔴 Open Royal VIP',
-    web_app: { url: 'https://royal.youplatform.org' },
-    style: 'danger'
-  };
   const rows = [
-    [royalVipButton],
-    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }]
+    [{
+      label: '🔴 Open Royal VIP',
+      text: '🔴 Open Royal VIP',
+      web_app: { url: 'https://royal.youplatform.org' },
+      style: 'danger'
+    }],
+    ...buildGameAccountButtons(token, gameAccounts)
   ];
 
-  if (includeShowGamePasswords) {
-    rows.push([{
-      label: '🔐 Show Game Passwords',
-      text: '🔐 Show Game Passwords',
-      action: `account:show_game_passwords:${token}`,
-      data: `account:show_game_passwords:${token}`
-    }]);
+  const footer = [];
+  if (includeHide && mode !== 'main_hidden' && mode !== 'game_hidden') {
+    footer.push({
+      label: '🙈 Hide Details',
+      text: '🙈 Hide Details',
+      action: `account:hide:${token}`,
+      data: `account:hide:${token}`
+    });
   }
+  footer.push({
+    label: '🏠 Home',
+    text: '🏠 Home',
+    action: 'bot:main_menu',
+    data: 'bot:main_menu'
+  });
+  rows.push(footer);
 
-  rows.push([
-    includeHide
-      ? { label: '🙈 Hide Details', text: '🙈 Hide Details', action: `account:hide:${token}`, data: `account:hide:${token}` }
-      : null,
-    { label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }
-  ].filter(Boolean));
+  rows.push([{
+    label: '💬 Support',
+    text: 'Support',
+    action: `account:support:${token}`,
+    data: `account:support:${token}`
+  }]);
 
+  return rows;
+}
+
+export function buildGameDetailButtons(token, { includeHide = true, mode = 'game' } = {}) {
+  const rows = [
+    [{
+      label: '⬅️ Back to Games',
+      text: '⬅️ Back to Games',
+      action: `account:game_list:${token}`,
+      data: `account:game_list:${token}`
+    }]
+  ];
+  const footer = [];
+  if (includeHide && mode !== 'game_hidden') {
+    footer.push({
+      label: '🙈 Hide Details',
+      text: '🙈 Hide Details',
+      action: `account:hide:${token}`,
+      data: `account:hide:${token}`
+    });
+  }
+  footer.push({
+    label: '🏠 Home',
+    text: '🏠 Home',
+    action: 'bot:main_menu',
+    data: 'bot:main_menu'
+  });
+  rows.push(footer);
   return rows;
 }
 
 export function buildMissingAccountButtons(token) {
   return [
     [{ label: '💬 Support', text: 'Support', action: `account:support:${token}`, data: `account:support:${token}` }],
-    [{ label: '🏠 Main Menu', text: 'Main Menu', action: 'bot:main_menu', data: 'bot:main_menu' }]
+    [{ label: '🏠 Home', text: '🏠 Home', action: 'bot:main_menu', data: 'bot:main_menu' }]
   ];
 }
 
 export function parseAccountAction(action = '') {
-  const match = String(action || '').trim().match(
-    /^account:(hide|show_game_passwords|back|support):([a-f0-9]{12})$/i
+  const raw = String(action || '').trim();
+  const gameMatch = raw.match(/^account:game:([a-z0-9_]+):([a-f0-9]{12})$/i);
+  if (gameMatch) {
+    const platformKey = gameMatch[1].toLowerCase();
+    if (!PLATFORM_KEY_SET.has(platformKey)) return null;
+    return {
+      type: 'game',
+      platformKey,
+      token: gameMatch[2].toLowerCase()
+    };
+  }
+
+  const match = raw.match(
+    /^account:(hide|game_list|back|support):([a-f0-9]{12})$/i
   );
   if (!match) return null;
   return {
@@ -187,16 +296,23 @@ export function accountViewSnapshotPatch(info = {}, {
   token,
   messageId,
   hidden = false,
-  mode = null
+  mode = null,
+  platformKey = null
 } = {}) {
-  return {
+  const next = {
     ...info,
     account_view_token: token,
     account_view_message_id: Number(messageId) || null,
     account_view_hidden: Boolean(hidden),
-    ...(mode ? { account_view_mode: mode } : {}),
     account_view_updated_at: new Date().toISOString()
   };
+  if (mode) next.account_view_mode = mode;
+  if (platformKey === null) {
+    delete next.account_view_platform_key;
+  } else if (platformKey !== undefined) {
+    next.account_view_platform_key = platformKey;
+  }
+  return next;
 }
 
 export function royalVipCredentialSnapshot({ info = {}, username, password, playerUid = null, telegramUserId = null } = {}) {
@@ -217,6 +333,12 @@ export function sanitizeCredentialText(value = '') {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .trim()
     .slice(0, 256);
+}
+
+export function findGameAccount(gameAccounts = [], platformKey) {
+  const key = String(platformKey || '').trim();
+  if (!key) return null;
+  return (Array.isArray(gameAccounts) ? gameAccounts : []).find((account) => account.key === key) || null;
 }
 
 function firstNonBlank(...values) {
