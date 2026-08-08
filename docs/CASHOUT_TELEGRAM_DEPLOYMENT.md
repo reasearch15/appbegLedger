@@ -11,13 +11,25 @@ Phase 7 adds Coadmin/Staff attribution UI and production hardening. **Do not ena
 | `CASHOUT_TELEGRAM_CLAIM_ENABLED` | false | CLAIM button + callback |
 | `CASHOUT_TELEGRAM_DONE_ENABLED` | false | DONE button + callback |
 
+All three flags are **optional**. Missing → `false`. Invalid values (e.g. `banana`) → `false` + warning. They must never stop AppbegLedger startup.
+
 **Dependency / fail-safe matrix**
 
 - `NOTIFICATIONS=false` → no cards; CLAIM/DONE effective off
 - `NOTIFICATIONS=true`, `CLAIM=false` → read-only sync
 - `CLAIM=true`, `DONE=false` → claim only
-- `DONE=true` with `CLAIM=false` → **DONE forced off** (logged as `DONE_WITHOUT_CLAIM`)
-- Missing `APPBEG_API_URL` / `APPBEG_LEDGER_INTERNAL_TOKEN` / `SUPPORT_NOTIFICATION_BOT_TOKEN` → mutation gates stay off
+- `DONE=true` with `CLAIM=false` → **DONE forced off** (warning; no crash)
+- `CLAIM=true` with `NOTIFICATIONS=false` → CLAIM/DONE forced off (warning; no crash)
+- Missing `APPBEG_API_URL` / `APPBEG_LEDGER_INTERNAL_TOKEN` / `SUPPORT_NOTIFICATION_BOT_TOKEN` → cash-out Telegram gates stay off; app continues
+- Health: application `ok` stays true; `cashoutTelegram.status` is `disabled` / `misconfigured` / `enabled`
+
+### Core vs optional config
+
+| Kind | Examples | Startup if missing/bad |
+|------|----------|------------------------|
+| **Required core** | Database connectivity, session secrets as already enforced | May fail startup |
+| **Optional cash-out Telegram** | `CASHOUT_TELEGRAM_*`, AppBeg M2M used only by this feature | Warn + disable feature |
+| **Optional support bot** | `SUPPORT_NOTIFICATION_BOT_TOKEN` | Bot disabled; app continues |
 
 ## M2M auth map (do not casually migrate)
 

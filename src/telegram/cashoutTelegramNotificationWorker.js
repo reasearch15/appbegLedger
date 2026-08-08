@@ -732,56 +732,77 @@ export async function processCashoutTelegramNotificationTick({
 export function startCashoutTelegramNotificationWorker({
   store,
   env = process.env,
-  pollMs = Number(process.env.CASHOUT_TELEGRAM_NOTIFICATION_POLL_MS || 5000),
+  pollMs = null,
   fetchImpl = fetch
 } = {}) {
-  const gates = resolveCashoutTelegramFeatureGates(env);
-  if (!gates.notificationsEnabled) {
-    console.log('[cashout-telegram] worker disabled (notifications effective=false)');
-    return { stop: async () => {} };
-  }
-
-  let stopped = false;
-  let tickPromise = null;
-
-  console.log(`[cashout-telegram] worker_started poll_ms=${pollMs}`);
-
-  void store.getCashoutOutboxConsumerState(CASHOUT_TELEGRAM_CONSUMER_NAME)
-    .then((state) => {
-      console.log('[cashout-telegram] consumer checkpoint =', Number(state?.last_processed_outbox_id || 0));
-    })
-    .catch(() => {
-      console.log('[cashout-telegram] consumer checkpoint = unknown');
-    });
-
-  async function tick() {
-    if (stopped) return;
-    try {
-      await processCashoutTelegramNotificationTick({ store, env, fetchImpl });
-    } catch (error) {
-      console.error('[cashout-telegram] worker_tick_failed', {
-        error: error instanceof Error ? error.message : String(error)
-      });
+  try {
+    const gates = resolveCashoutTelegramFeatureGates(env);
+    if (!gates.notificationsEnabled) {
+      console.log('[cashout-telegram] worker disabled (notifications effective=false)');
+      return { stop: async () => {} };
     }
-  }
 
-  const timer = setInterval(() => {
-    if (tickPromise) return;
+    const configuredPoll = pollMs == null
+      ? Number(env.CASHOUT_TELEGRAM_NOTIFICATION_POLL_MS || 5000)
+      : Number(pollMs);
+    const safePollMs = Number.isFinite(configuredPoll) && configuredPoll >= 1000
+      ? configuredPoll
+      : 5000;
+
+    let stopped = false;
+    let tickPromise = null;
+
+    console.log(`[cashout-telegram] worker_started poll_ms=${safePollMs}`);
+
+    if (store && typeof store.getCashoutOutboxConsumerState === 'function') {
+      void store.getCashoutOutboxConsumerState(CASHOUT_TELEGRAM_CONSUMER_NAME)
+        .then((state) => {
+          console.log('[cashout-telegram] consumer checkpoint =', Number(state?.last_processed_outbox_id || 0));
+        })
+        .catch(() => {
+          console.log('[cashout-telegram] consumer checkpoint = unknown');
+        });
+    }
+
+    async function tick() {
+      if (stopped) return;
+      try {
+        // Re-check gates each tick so misconfiguration never keeps polling AppBeg loudly.
+        const live = resolveCashoutTelegramFeatureGates(env);
+        if (!live.notificationsEnabled) {
+          return;
+        }
+        await processCashoutTelegramNotificationTick({ store, env, fetchImpl });
+      } catch (error) {
+        console.error('[cashout-telegram] worker_tick_failed', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const timer = setInterval(() => {
+      if (tickPromise) return;
+      tickPromise = tick().finally(() => {
+        tickPromise = null;
+      });
+    }, safePollMs);
+
     tickPromise = tick().finally(() => {
       tickPromise = null;
     });
-  }, pollMs);
 
-  tickPromise = tick().finally(() => {
-    tickPromise = null;
-  });
-
-  return {
-    stop: async () => {
-      stopped = true;
-      clearInterval(timer);
-      if (tickPromise) await tickPromise;
-      console.log('[cashout-telegram] worker_stopped');
-    }
-  };
+    return {
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        if (tickPromise) await tickPromise;
+        console.log('[cashout-telegram] worker_stopped');
+      }
+    };
+  } catch (error) {
+    console.warn('[cashout-telegram] worker_start_failed_optional', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return { stop: async () => {} };
+  }
 }

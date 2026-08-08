@@ -1410,8 +1410,16 @@ globalThis.paymentTelegramSync = await startPaymentTelegramSync({
 globalThis.chatbotWorker = startChatbotWorker({ store, io });
 globalThis.paymentWindowExpiryWorker = startPaymentWindowExpiryWorker({ store, io });
 globalThis.paymentFreezeWorker = startPaymentFreezeWorker({ store, io });
-validateCashoutTelegramStartupConfig(process.env);
-globalThis.cashoutTelegramNotificationWorker = startCashoutTelegramNotificationWorker({ store });
+try {
+  validateCashoutTelegramStartupConfig(process.env);
+  globalThis.cashoutTelegramNotificationWorker = startCashoutTelegramNotificationWorker({ store });
+} catch (error) {
+  // Optional integration must never prevent AppbegLedger from serving traffic.
+  console.warn('[cashout-telegram] optional_integration_init_failed', {
+    error: error instanceof Error ? error.message : String(error)
+  });
+  globalThis.cashoutTelegramNotificationWorker = { stop: async () => {} };
+}
 
 async function shutdownWorkers(signal = 'shutdown') {
   console.log(`Stopping background workers (${signal})...`);

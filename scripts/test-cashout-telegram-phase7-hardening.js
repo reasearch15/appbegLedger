@@ -111,7 +111,7 @@ async function run() {
       log: (line) => logs.push(String(line))
     }
   );
-  assert.ok(logs.some((l) => /DONE_WITHOUT_CLAIM/.test(l)));
+  assert.ok(logs.some((l) => /DONE disabled|DONE_WITHOUT_CLAIM|CLAIM is false/i.test(l)));
   assert.ok(!logs.some((l) => /secret-token-should-not-appear/.test(l)));
   assert.ok(!logs.some((l) => /bot-secret/.test(l)));
 

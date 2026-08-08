@@ -4,7 +4,7 @@ import { listenerRoles } from '../config/listeners.js';
 import {
   CASHOUT_TELEGRAM_CONSUMER_NAME
 } from '../telegram/cashoutTelegramNotificationWorker.js';
-import { resolveCashoutTelegramFeatureGates } from '../telegram/cashoutTelegramFeatureFlags.js';
+import { getCashoutTelegramFeatureState } from '../telegram/cashoutTelegramFeatureFlags.js';
 
 async function runCheck(name, fn) {
   try {
@@ -19,6 +19,24 @@ async function runCheck(name, fn) {
   }
 }
 
+function buildCashoutTelegramHealth(store) {
+  const state = getCashoutTelegramFeatureState(process.env);
+  return {
+    notificationsEnabled: state.notificationsEnabled,
+    claimEnabled: state.claimEnabled,
+    doneEnabled: state.doneEnabled,
+    configured: state.configured,
+    status: state.status,
+    flags: {
+      notifications: state.notificationsFlag,
+      claim: state.claimFlag,
+      done: state.doneFlag
+    },
+    warnings: state.warnings,
+    contradictions: state.contradictions
+  };
+}
+
 export function registerHealthRoutes(app, { store }) {
   app.get('/api/health', async (req, res) => {
     const dbConfig = resolveDatabaseConfig();
@@ -31,7 +49,7 @@ export function registerHealthRoutes(app, { store }) {
       store.db.prepare("SELECT COUNT(*) AS count FROM sync_state WHERE key LIKE 'business_account:checkpoint:%'").get().then((row) => row?.count ?? 0)
     ]);
 
-    const gates = resolveCashoutTelegramFeatureGates(process.env);
+    const cashoutTelegram = buildCashoutTelegramHealth(store);
     let cashoutCheckpoint = null;
     let cashoutDeliveryCounts = null;
     try {
@@ -56,6 +74,9 @@ export function registerHealthRoutes(app, { store }) {
       cashoutDeliveryCounts = null;
     }
 
+    cashoutTelegram.consumerCheckpoint = cashoutCheckpoint;
+    cashoutTelegram.deliveries = cashoutDeliveryCounts;
+
     res.json({
       ok: true,
       database: {
@@ -73,21 +94,7 @@ export function registerHealthRoutes(app, { store }) {
         syncCheckpoints: Number(checkpoints),
         syncStateCheckpoints: Number(syncStateCheckpoints)
       },
-      cashoutTelegram: {
-        flags: {
-          notifications: gates.notificationsFlag,
-          claim: gates.claimFlag,
-          done: gates.doneFlag
-        },
-        effective: {
-          notifications: gates.notificationsEnabled,
-          claim: gates.claimEnabled,
-          done: gates.doneEnabled
-        },
-        contradictions: gates.contradictions,
-        consumerCheckpoint: cashoutCheckpoint,
-        deliveries: cashoutDeliveryCounts
-      },
+      cashoutTelegram,
       telegramListenerEnabled: Boolean(process.env.TELEGRAM_BOT_TOKEN),
       conversationStatuses: CONVERSATION_STATUSES,
       registrationStatuses: REGISTRATION_STATUSES,

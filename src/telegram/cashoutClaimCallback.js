@@ -15,6 +15,7 @@ export const CASHOUT_CLAIM_DISABLED_TEXT = 'Your Telegram staff access is disabl
 export const CASHOUT_CLAIM_TEMP_FAIL_TEXT = 'Unable to claim right now. Try again.';
 export const CASHOUT_CLAIM_UNAUTHORIZED_TEXT = 'Not authorized.';
 export const CASHOUT_CLAIM_RATE_LIMIT_TEXT = 'Too many attempts. Try again shortly.';
+export const CASHOUT_CLAIM_FEATURE_OFF_TEXT = 'Cash-out claiming is currently unavailable.';
 
 function safeTelegramDisplayName(from = {}) {
   const name = [from.first_name, from.last_name].filter(Boolean).join(' ').trim()
@@ -26,6 +27,7 @@ function safeTelegramDisplayName(from = {}) {
 /**
  * Handle cashout:claim:<taskId> callback.
  * AppBeg is concurrency authority; Ledger only authorizes subscriber + forwards claim.
+ * Never throws — optional feature must not crash the bot process.
  */
 export async function handleCashoutClaimCallback(ctx, store, {
   env = process.env,
@@ -34,6 +36,30 @@ export async function handleCashoutClaimCallback(ctx, store, {
   refreshCards = refreshCashoutTelegramCardsForTask,
   answerCallback = defaultAnswerCallback
 } = {}) {
+  try {
+    return await handleCashoutClaimCallbackInner(ctx, store, {
+      env,
+      claimTask,
+      fetchTask,
+      refreshCards,
+      answerCallback
+    });
+  } catch (error) {
+    console.error('[cashout-telegram] claim_callback_unhandled', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    await answerCallback(ctx, CASHOUT_CLAIM_TEMP_FAIL_TEXT);
+    return { ok: false, reason: 'unhandled' };
+  }
+}
+
+async function handleCashoutClaimCallbackInner(ctx, store, {
+  env,
+  claimTask,
+  fetchTask,
+  refreshCards,
+  answerCallback
+}) {
   const action = String(ctx.callbackQuery?.data || '').trim();
   const taskId = parseCashoutClaimCallback(action);
   const fromId = ctx.from?.id == null ? null : String(ctx.from.id);
@@ -44,7 +70,7 @@ export async function handleCashoutClaimCallback(ctx, store, {
   }
 
   if (!isCashoutTelegramClaimEnabled(env)) {
-    await answerCallback(ctx, CASHOUT_CLAIM_UNAVAILABLE_TEXT);
+    await answerCallback(ctx, CASHOUT_CLAIM_FEATURE_OFF_TEXT);
     return { ok: false, reason: 'claim_disabled' };
   }
 

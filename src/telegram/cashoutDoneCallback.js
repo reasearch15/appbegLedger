@@ -16,7 +16,7 @@ export const CASHOUT_DONE_ALREADY_COMPLETED_TEXT = 'This cash-out is already com
 export const CASHOUT_DONE_DISABLED_TEXT = 'Your Telegram staff access is disabled.';
 export const CASHOUT_DONE_TEMP_FAIL_TEXT = 'Unable to complete right now. Try again.';
 export const CASHOUT_DONE_UNAUTHORIZED_TEXT = 'Not authorized.';
-export const CASHOUT_DONE_FEATURE_OFF_TEXT = 'This cash-out is no longer available.';
+export const CASHOUT_DONE_FEATURE_OFF_TEXT = 'Cash-out completion is currently unavailable.';
 export const CASHOUT_DONE_RATE_LIMIT_TEXT = 'Too many attempts. Try again shortly.';
 
 function safeTelegramDisplayName(from = {}) {
@@ -49,6 +49,7 @@ async function refreshAuthoritativeCards({
 /**
  * Handle cashout:done:<taskId> callback.
  * AppBeg is concurrency + financial authority; Ledger only authorizes subscriber + forwards.
+ * Never throws — optional feature must not crash the bot process.
  */
 export async function handleCashoutDoneCallback(ctx, store, {
   env = process.env,
@@ -57,6 +58,30 @@ export async function handleCashoutDoneCallback(ctx, store, {
   refreshCards = refreshCashoutTelegramCardsForTask,
   answerCallback = defaultAnswerCallback
 } = {}) {
+  try {
+    return await handleCashoutDoneCallbackInner(ctx, store, {
+      env,
+      completeTask,
+      fetchTask,
+      refreshCards,
+      answerCallback
+    });
+  } catch (error) {
+    console.error('[cashout-telegram] done_callback_unhandled', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    await answerCallback(ctx, CASHOUT_DONE_TEMP_FAIL_TEXT);
+    return { ok: false, reason: 'unhandled' };
+  }
+}
+
+async function handleCashoutDoneCallbackInner(ctx, store, {
+  env,
+  completeTask,
+  fetchTask,
+  refreshCards,
+  answerCallback
+}) {
   const action = String(ctx.callbackQuery?.data || '').trim();
   const taskId = parseCashoutDoneCallback(action);
   const fromId = ctx.from?.id == null ? null : String(ctx.from.id);
