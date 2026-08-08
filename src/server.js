@@ -18,6 +18,8 @@ import { isChatbotButtonAction } from './telegram/chatbotEngine.js';
 import { tryEnqueueRegistrationBotJob } from './telegram/autoRegistrationBot.js';
 import { startChatbotWorker } from './telegram/chatbotWorker.js';
 import { startPaymentWindowExpiryWorker } from './telegram/paymentWindowExpiryWorker.js';
+import { startCashoutTelegramNotificationWorker } from './telegram/cashoutTelegramNotificationWorker.js';
+import { validateCashoutTelegramStartupConfig } from './telegram/cashoutTelegramFeatureFlags.js';
 import { startPaymentFreezeWorker } from './payments/paymentFreezeWorker.js';
 import { startTelegramAccountSync, stopTelegramAccountSync } from './telegram/accountSyncProcess.js';
 import { startPaymentTelegramSync, stopPaymentTelegramSync } from './telegram/paymentSyncProcess.js';
@@ -41,6 +43,7 @@ import { registerOngoingRoutes } from './routes/ongoing.js';
 import { registerVendorRoutes } from './routes/vendors.js';
 import { registerInternalVendorOwnershipRoutes } from './routes/internalVendorOwnership.js';
 import { registerInternalVendorCashoutRoutes } from './routes/internalVendorCashoutCompleted.js';
+import { registerInternalSupportNotificationSubscriberRoutes } from './routes/internalSupportNotificationSubscribers.js';
 import { createAppBegPlayerForContact } from './appbeg/createPlayerService.js';
 import { createAppBegStore } from './db/appbegStore.js';
 import { isDebugEnabled } from './config/debug.js';
@@ -221,6 +224,7 @@ registerOngoingRoutes(app, { store });
 registerVendorRoutes(app, { store, requireAdmin, requireVendor, appbegStore });
 registerInternalVendorOwnershipRoutes(app, { store });
 registerInternalVendorCashoutRoutes(app, { store, appbegStore, io });
+registerInternalSupportNotificationSubscriberRoutes(app, { store });
 
 app.get('/api/stats', async (req, res) => {
   res.json({ stats: await store.getStats() });
@@ -1406,6 +1410,8 @@ globalThis.paymentTelegramSync = await startPaymentTelegramSync({
 globalThis.chatbotWorker = startChatbotWorker({ store, io });
 globalThis.paymentWindowExpiryWorker = startPaymentWindowExpiryWorker({ store, io });
 globalThis.paymentFreezeWorker = startPaymentFreezeWorker({ store, io });
+validateCashoutTelegramStartupConfig(process.env);
+globalThis.cashoutTelegramNotificationWorker = startCashoutTelegramNotificationWorker({ store });
 
 async function shutdownWorkers(signal = 'shutdown') {
   console.log(`Stopping background workers (${signal})...`);
@@ -1415,6 +1421,7 @@ async function shutdownWorkers(signal = 'shutdown') {
     globalThis.chatbotWorker?.stop?.(),
     globalThis.paymentWindowExpiryWorker?.stop?.(),
     globalThis.paymentFreezeWorker?.stop?.(),
+    globalThis.cashoutTelegramNotificationWorker?.stop?.(),
     Promise.resolve(globalThis.telegramBot?.stop?.(signal)),
     Promise.resolve(globalThis.supportNotificationBot?.stop?.(signal)),
     appbegStore?.close?.()

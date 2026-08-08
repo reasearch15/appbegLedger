@@ -35,6 +35,8 @@ function createStore({ registrationInfo = {} } = {}) {
     id: 1,
     telegram_chat_id: '99',
     telegram_user_id: '99',
+    coadmin_uid: 'coadmin-test',
+    disabled_by_coadmin: false,
     is_active: true,
     subscribed_at: new Date().toISOString(),
     last_delivery_at: null,
@@ -95,7 +97,9 @@ function createStore({ registrationInfo = {} } = {}) {
     async commitSupportNotifyLock() { return { ok: true }; },
     async releaseSupportNotifyLock() { return { ok: true }; },
     async listActiveSupportNotificationSubscribers() {
-      return subscribers.filter((row) => row.is_active).map((row) => ({ ...row }));
+      return subscribers
+        .filter((row) => row.is_active && row.coadmin_uid && !row.disabled_by_coadmin)
+        .map((row) => ({ ...row }));
     },
     async markSupportNotificationDelivery(telegramChatId, { status = 'sent', error = null, deactivate = false } = {}) {
       const row = subscribers.find((item) => item.telegram_chat_id === String(telegramChatId));

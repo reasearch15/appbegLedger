@@ -1049,6 +1049,65 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return value === true || value === 1 || value === '1';
   }
 
+  function isDisabledByCoadmin(value) {
+    return value === true || value === 1 || value === '1';
+  }
+
+  function mapSupportNotificationSubscriber(row) {
+    if (!row) return null;
+    return {
+      ...row,
+      is_active: isSupportSubscriberActive(row.is_active),
+      disabled_by_coadmin: isDisabledByCoadmin(row.disabled_by_coadmin),
+      coadmin_uid: row.coadmin_uid == null || row.coadmin_uid === ''
+        ? null
+        : String(row.coadmin_uid).trim()
+    };
+  }
+
+  function isFullyEnrolledSupportSubscriber(row) {
+    const mapped = mapSupportNotificationSubscriber(row);
+    return Boolean(
+      mapped
+      && mapped.is_active
+      && mapped.coadmin_uid
+      && !mapped.disabled_by_coadmin
+    );
+  }
+
+  async function getSupportNotificationSubscriberByTelegramUserId(telegramUserId) {
+    const userId = String(telegramUserId ?? '').trim();
+    if (!userId) return null;
+    const row = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE telegram_user_id = ?
+      ORDER BY id ASC
+      LIMIT 1
+    `).get(userId);
+    return mapSupportNotificationSubscriber(row);
+  }
+
+  async function getSupportNotificationSubscriberByChatId(telegramChatId) {
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!chatId) return null;
+    const row = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE telegram_chat_id = ?
+      LIMIT 1
+    `).get(chatId);
+    return mapSupportNotificationSubscriber(row);
+  }
+
+  /**
+   * Legacy open-/start upsert kept for compatibility.
+   * Phase 1 enrollment must use enrollSupportNotificationSubscriber / reactivateEnrolledSupportNotificationSubscriber.
+   */
   async function upsertSupportNotificationSubscriber({ telegramChatId, telegramUserId = null } = {}) {
     const chatId = String(telegramChatId ?? '').trim();
     if (!chatId) return { ok: false, reason: 'missing_chat_id' };
@@ -1057,7 +1116,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       : String(telegramUserId).trim();
     const nowText = nowIso();
     const existing = await db.prepare(`
-      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at, coadmin_uid, disabled_by_coadmin
       FROM support_notification_subscribers
       WHERE telegram_chat_id = ?
     `).get(chatId);
@@ -1101,6 +1160,195 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     };
   }
 
+  async function enrollSupportNotificationSubscriber({
+    telegramChatId,
+    telegramUserId,
+    coadminUid,
+    telegramUsername = null,
+    telegramDisplayName = null
+  } = {}) {
+    const chatId = String(telegramChatId ?? '').trim();
+    const userId = String(telegramUserId ?? '').trim();
+    const ownerUid = String(coadminUid ?? '').trim();
+    if (!chatId) return { ok: false, reason: 'missing_chat_id' };
+    if (!userId) return { ok: false, reason: 'missing_telegram_user_id' };
+    if (!ownerUid) return { ok: false, reason: 'missing_coadmin_uid' };
+
+    const nowText = nowIso();
+    const username = telegramUsername == null || telegramUsername === ''
+      ? null
+      : String(telegramUsername).replace(/^@/, '').trim().slice(0, 80) || null;
+    const displayName = String(telegramDisplayName ?? '')
+      .replace(/[\u0000-\u001F\u007F<>]/g, '')
+      .trim()
+      .slice(0, 80) || null;
+
+    const byUser = await getSupportNotificationSubscriberByTelegramUserId(userId);
+    if (byUser?.coadmin_uid && byUser.coadmin_uid !== ownerUid) {
+      return { ok: false, reason: 'already_linked_other_coadmin', subscriber: byUser };
+    }
+    if (byUser && isDisabledByCoadmin(byUser.disabled_by_coadmin)) {
+      return { ok: false, reason: 'disabled_by_coadmin', subscriber: byUser };
+    }
+
+    const byChat = await getSupportNotificationSubscriberByChatId(chatId);
+    if (byChat?.coadmin_uid && byChat.coadmin_uid !== ownerUid) {
+      return { ok: false, reason: 'already_linked_other_coadmin', subscriber: byChat };
+    }
+    if (byChat && isDisabledByCoadmin(byChat.disabled_by_coadmin)) {
+      return { ok: false, reason: 'disabled_by_coadmin', subscriber: byChat };
+    }
+
+    if (byUser) {
+      await db.prepare(`
+        UPDATE support_notification_subscribers
+        SET telegram_chat_id = ?,
+            coadmin_uid = ?,
+            telegram_username = ?,
+            telegram_display_name = ?,
+            linked_at = COALESCE(linked_at, ?),
+            disabled_by_coadmin = ?,
+            is_active = ?,
+            subscribed_at = CASE WHEN is_active = ? THEN subscribed_at ELSE ? END,
+            last_error = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        chatId,
+        ownerUid,
+        username,
+        displayName,
+        nowText,
+        sql.boolParam(false),
+        sql.boolParam(true),
+        sql.boolParam(true),
+        nowText,
+        nowText,
+        byUser.id
+      );
+      return {
+        ok: true,
+        created: false,
+        linked: true,
+        subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+      };
+    }
+
+    if (byChat) {
+      await db.prepare(`
+        UPDATE support_notification_subscribers
+        SET telegram_user_id = ?,
+            coadmin_uid = ?,
+            telegram_username = ?,
+            telegram_display_name = ?,
+            linked_at = COALESCE(linked_at, ?),
+            disabled_by_coadmin = ?,
+            is_active = ?,
+            subscribed_at = CASE WHEN is_active = ? THEN subscribed_at ELSE ? END,
+            last_error = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        userId,
+        ownerUid,
+        username,
+        displayName,
+        nowText,
+        sql.boolParam(false),
+        sql.boolParam(true),
+        sql.boolParam(true),
+        nowText,
+        nowText,
+        byChat.id
+      );
+      return {
+        ok: true,
+        created: false,
+        linked: true,
+        subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+      };
+    }
+
+    await db.prepare(`
+      INSERT INTO support_notification_subscribers (
+        telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+        telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+        subscribed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      chatId,
+      userId,
+      sql.boolParam(true),
+      ownerUid,
+      username,
+      displayName,
+      nowText,
+      sql.boolParam(false),
+      nowText,
+      nowText,
+      nowText
+    );
+
+    return {
+      ok: true,
+      created: true,
+      linked: true,
+      subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+    };
+  }
+
+  async function reactivateEnrolledSupportNotificationSubscriber({
+    telegramChatId,
+    telegramUserId,
+    telegramUsername = null,
+    telegramDisplayName = null
+  } = {}) {
+    const userId = String(telegramUserId ?? '').trim();
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!userId) return { ok: false, reason: 'missing_telegram_user_id' };
+
+    const existing = await getSupportNotificationSubscriberByTelegramUserId(userId);
+    if (!existing) return { ok: false, reason: 'not_found' };
+    if (!existing.coadmin_uid) return { ok: false, reason: 'not_enrolled' };
+    if (existing.disabled_by_coadmin) return { ok: false, reason: 'disabled_by_coadmin', subscriber: existing };
+
+    const nowText = nowIso();
+    const wasActive = existing.is_active;
+    const username = telegramUsername == null || telegramUsername === ''
+      ? existing.telegram_username || null
+      : String(telegramUsername).replace(/^@/, '').trim().slice(0, 80) || null;
+    const displayName = telegramDisplayName == null || telegramDisplayName === ''
+      ? existing.telegram_display_name || null
+      : String(telegramDisplayName).replace(/[\u0000-\u001F\u007F<>]/g, '').trim().slice(0, 80) || null;
+
+    await db.prepare(`
+      UPDATE support_notification_subscribers
+      SET telegram_chat_id = COALESCE(NULLIF(?, ''), telegram_chat_id),
+          telegram_username = ?,
+          telegram_display_name = ?,
+          is_active = ?,
+          subscribed_at = CASE WHEN is_active = ? THEN subscribed_at ELSE ? END,
+          last_error = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      chatId,
+      username,
+      displayName,
+      sql.boolParam(true),
+      sql.boolParam(true),
+      nowText,
+      nowText,
+      existing.id
+    );
+
+    return {
+      ok: true,
+      reactivated: !wasActive,
+      subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+    };
+  }
+
   async function deactivateSupportNotificationSubscriber(telegramChatId, { reason = null } = {}) {
     const chatId = String(telegramChatId ?? '').trim();
     if (!chatId) return { ok: false, reason: 'missing_chat_id' };
@@ -1118,16 +1366,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
   async function listActiveSupportNotificationSubscribers() {
     const rows = await db.prepare(`
-      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at,
-             last_delivery_at, last_delivery_status, last_error
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
       FROM support_notification_subscribers
       WHERE is_active = ?
+        AND coadmin_uid IS NOT NULL
+        AND TRIM(coadmin_uid) != ''
+        AND disabled_by_coadmin = ?
       ORDER BY id ASC
-    `).all(sql.boolParam(true));
-    return rows.map((row) => ({
-      ...row,
-      is_active: isSupportSubscriberActive(row.is_active)
-    }));
+    `).all(sql.boolParam(true), sql.boolParam(false));
+    return rows.map((row) => mapSupportNotificationSubscriber(row));
   }
 
   async function markSupportNotificationDelivery(telegramChatId, {
@@ -1162,16 +1411,399 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const userId = String(telegramUserId ?? '').trim();
     if (!userId) return null;
     const row = await db.prepare(`
-      SELECT id, telegram_chat_id, telegram_user_id, is_active, subscribed_at,
-             last_delivery_at, last_delivery_status, last_error
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
       FROM support_notification_subscribers
       WHERE telegram_user_id = ?
         AND is_active = ?
+        AND coadmin_uid IS NOT NULL
+        AND TRIM(coadmin_uid) != ''
+        AND disabled_by_coadmin = ?
       ORDER BY id ASC
       LIMIT 1
-    `).get(userId, sql.boolParam(true));
-    return row ? { ...row, is_active: isSupportSubscriberActive(row.is_active) } : null;
+    `).get(userId, sql.boolParam(true), sql.boolParam(false));
+    return mapSupportNotificationSubscriber(row);
   }
+
+  async function listSupportNotificationSubscribersByCoadmin(coadminUid) {
+    const ownerUid = String(coadminUid ?? '').trim();
+    if (!ownerUid) return [];
+    const rows = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE coadmin_uid = ?
+      ORDER BY COALESCE(linked_at, subscribed_at, created_at) DESC, id DESC
+    `).all(ownerUid);
+    return rows.map((row) => mapSupportNotificationSubscriber(row));
+  }
+
+  async function disableSupportNotificationSubscriber({ coadminUid, telegramUserId } = {}) {
+    const ownerUid = String(coadminUid ?? '').trim();
+    const userId = String(telegramUserId ?? '').trim();
+    if (!ownerUid) return { ok: false, reason: 'missing_coadmin_uid' };
+    if (!userId) return { ok: false, reason: 'missing_telegram_user_id' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_notification_subscribers
+      SET disabled_by_coadmin = ?,
+          is_active = ?,
+          updated_at = ?
+      WHERE telegram_user_id = ?
+        AND coadmin_uid = ?
+    `).run(sql.boolParam(true), sql.boolParam(false), nowText, userId, ownerUid);
+    if (!result.changes) {
+      return { ok: false, reason: 'not_found' };
+    }
+    return {
+      ok: true,
+      subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+    };
+  }
+
+  /**
+   * Option A: Coadmin Enable restores permission and turns notifications back on
+   * (disabled_by_coadmin=false, is_active=true).
+   */
+  async function enableSupportNotificationSubscriber({ coadminUid, telegramUserId } = {}) {
+    const ownerUid = String(coadminUid ?? '').trim();
+    const userId = String(telegramUserId ?? '').trim();
+    if (!ownerUid) return { ok: false, reason: 'missing_coadmin_uid' };
+    if (!userId) return { ok: false, reason: 'missing_telegram_user_id' };
+    const nowText = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_notification_subscribers
+      SET disabled_by_coadmin = ?,
+          is_active = ?,
+          last_error = NULL,
+          updated_at = ?
+      WHERE telegram_user_id = ?
+        AND coadmin_uid = ?
+    `).run(sql.boolParam(false), sql.boolParam(true), nowText, userId, ownerUid);
+    if (!result.changes) {
+      return { ok: false, reason: 'not_found' };
+    }
+    return {
+      ok: true,
+      subscriber: await getSupportNotificationSubscriberByTelegramUserId(userId)
+    };
+  }
+
+  /**
+   * Phase 3: eligible cash-out Telegram recipients for one Coadmin tenant.
+   */
+  async function listActiveSupportNotificationSubscribersByCoadmin(coadminUid) {
+    const ownerUid = String(coadminUid ?? '').trim();
+    if (!ownerUid) return [];
+    const rows = await db.prepare(`
+      SELECT id, telegram_chat_id, telegram_user_id, is_active, coadmin_uid,
+             telegram_username, telegram_display_name, linked_at, disabled_by_coadmin,
+             subscribed_at, last_delivery_at, last_delivery_status, last_error
+      FROM support_notification_subscribers
+      WHERE coadmin_uid = ?
+        AND is_active = ?
+        AND disabled_by_coadmin = ?
+        AND telegram_chat_id IS NOT NULL
+        AND TRIM(telegram_chat_id) != ''
+      ORDER BY id ASC
+    `).all(ownerUid, sql.boolParam(true), sql.boolParam(false));
+    return rows.map((row) => mapSupportNotificationSubscriber(row));
+  }
+
+  async function getCashoutOutboxConsumerState(consumerName) {
+    const name = String(consumerName ?? '').trim();
+    if (!name) return null;
+    return db.prepare(`
+      SELECT consumer_name, last_processed_outbox_id, updated_at, created_at
+      FROM cashout_outbox_consumer_state
+      WHERE consumer_name = ?
+      LIMIT 1
+    `).get(name);
+  }
+
+  async function upsertCashoutOutboxConsumerState({
+    consumerName,
+    lastProcessedOutboxId
+  } = {}) {
+    const name = String(consumerName ?? '').trim();
+    if (!name) return { ok: false, reason: 'missing_consumer_name' };
+    const outboxId = Math.max(0, Math.floor(Number(lastProcessedOutboxId) || 0));
+    const nowText = nowIso();
+    const existing = await getCashoutOutboxConsumerState(name);
+    if (existing) {
+      await db.prepare(`
+        UPDATE cashout_outbox_consumer_state
+        SET last_processed_outbox_id = ?,
+            updated_at = ?
+        WHERE consumer_name = ?
+      `).run(outboxId, nowText, name);
+    } else {
+      await db.prepare(`
+        INSERT INTO cashout_outbox_consumer_state (
+          consumer_name, last_processed_outbox_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?)
+      `).run(name, outboxId, nowText, nowText);
+    }
+    return { ok: true, state: await getCashoutOutboxConsumerState(name) };
+  }
+
+  async function getCashoutNotificationDeliveryByTaskAndChat(taskId, telegramChatId) {
+    const appbegTaskId = String(taskId ?? '').trim();
+    const chatId = String(telegramChatId ?? '').trim();
+    if (!appbegTaskId || !chatId) return null;
+    return db.prepare(`
+      SELECT id, appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
+             telegram_message_id, delivery_status, last_error, attempt_count,
+             source_outbox_id, source_event_type, last_synced_outbox_id,
+             created_at, updated_at, sent_at, last_edit_at
+      FROM cashout_notification_deliveries
+      WHERE appbeg_cashout_task_id = ?
+        AND telegram_chat_id = ?
+      LIMIT 1
+    `).get(appbegTaskId, chatId);
+  }
+
+  async function ensureCashoutNotificationDelivery({
+    appbegCashoutTaskId,
+    coadminUid,
+    subscriberId = null,
+    telegramChatId,
+    outboxId = null,
+    eventType = null
+  } = {}) {
+    const taskId = String(appbegCashoutTaskId ?? '').trim();
+    const chatId = String(telegramChatId ?? '').trim();
+    const ownerUid = String(coadminUid ?? '').trim();
+    if (!taskId || !chatId || !ownerUid) {
+      return { ok: false, reason: 'missing_fields', delivery: null };
+    }
+    const existing = await getCashoutNotificationDeliveryByTaskAndChat(taskId, chatId);
+    if (existing) {
+      return { ok: true, created: false, delivery: existing };
+    }
+    const nowText = nowIso();
+    try {
+      const result = await db.prepare(`
+        INSERT INTO cashout_notification_deliveries (
+          appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
+          telegram_message_id, delivery_status, last_error, attempt_count,
+          source_outbox_id, source_event_type, last_synced_outbox_id,
+          created_at, updated_at, sent_at, last_edit_at
+        ) VALUES (?, ?, ?, ?, NULL, 'pending', NULL, 0, ?, ?, NULL, ?, ?, NULL, NULL)
+      `).run(
+        taskId,
+        ownerUid,
+        subscriberId == null ? null : Number(subscriberId),
+        chatId,
+        outboxId == null ? null : Number(outboxId),
+        eventType == null ? null : String(eventType).slice(0, 64),
+        nowText,
+        nowText
+      );
+      const delivery = await getCashoutNotificationDeliveryByTaskAndChat(taskId, chatId);
+      return { ok: true, created: true, delivery, insertId: result.lastInsertRowid ?? null };
+    } catch (error) {
+      const raced = await getCashoutNotificationDeliveryByTaskAndChat(taskId, chatId);
+      if (raced) {
+        return { ok: true, created: false, delivery: raced };
+      }
+      throw error;
+    }
+  }
+
+  async function markCashoutNotificationDeliverySent({
+    deliveryId,
+    telegramMessageId,
+    outboxId = null
+  } = {}) {
+    const id = Number(deliveryId);
+    const messageId = Number(telegramMessageId);
+    if (!Number.isFinite(id) || !Number.isFinite(messageId)) {
+      return { ok: false, reason: 'invalid_ids' };
+    }
+    const nowText = nowIso();
+    await db.prepare(`
+      UPDATE cashout_notification_deliveries
+      SET delivery_status = 'sent',
+          telegram_message_id = ?,
+          last_error = NULL,
+          attempt_count = 0,
+          sent_at = COALESCE(sent_at, ?),
+          last_synced_outbox_id = COALESCE(?, last_synced_outbox_id),
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      messageId,
+      nowText,
+      outboxId == null ? null : Number(outboxId),
+      nowText,
+      id
+    );
+    return { ok: true };
+  }
+
+  async function markCashoutNotificationDeliveryEdited({
+    deliveryId,
+    outboxId = null
+  } = {}) {
+    const id = Number(deliveryId);
+    if (!Number.isFinite(id)) return { ok: false, reason: 'invalid_id' };
+    const nowText = nowIso();
+    await db.prepare(`
+      UPDATE cashout_notification_deliveries
+      SET delivery_status = 'sent',
+          last_error = NULL,
+          attempt_count = 0,
+          last_edit_at = ?,
+          last_synced_outbox_id = COALESCE(?, last_synced_outbox_id),
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      nowText,
+      outboxId == null ? null : Number(outboxId),
+      nowText,
+      id
+    );
+    return { ok: true };
+  }
+
+  async function markCashoutNotificationDeliveryFailed({
+    deliveryId,
+    error = null,
+    permanent = false,
+    maxAttempts = 5
+  } = {}) {
+    const id = Number(deliveryId);
+    if (!Number.isFinite(id)) return { ok: false, reason: 'invalid_id' };
+    const nowText = nowIso();
+    const max = Math.max(1, Math.floor(Number(maxAttempts) || 5));
+    const row = await db.prepare(`
+      SELECT attempt_count FROM cashout_notification_deliveries WHERE id = ? LIMIT 1
+    `).get(id);
+    if (!row) return { ok: false, reason: 'not_found' };
+    const nextAttempts = permanent
+      ? Math.max(Number(row.attempt_count || 0) + 1, max)
+      : Number(row.attempt_count || 0) + 1;
+    await db.prepare(`
+      UPDATE cashout_notification_deliveries
+      SET delivery_status = 'failed',
+          last_error = ?,
+          attempt_count = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      error ? String(error).slice(0, 300) : null,
+      nextAttempts,
+      nowText,
+      id
+    );
+    return { ok: true };
+  }
+
+  async function markCashoutNotificationDeliveryEditFailed({
+    deliveryId,
+    error = null,
+    permanent = false,
+    maxAttempts = 5
+  } = {}) {
+    const id = Number(deliveryId);
+    if (!Number.isFinite(id)) return { ok: false, reason: 'invalid_id' };
+    const nowText = nowIso();
+    const max = Math.max(1, Math.floor(Number(maxAttempts) || 5));
+    const row = await db.prepare(`
+      SELECT attempt_count FROM cashout_notification_deliveries WHERE id = ? LIMIT 1
+    `).get(id);
+    if (!row) return { ok: false, reason: 'not_found' };
+    const nextAttempts = permanent
+      ? Math.max(Number(row.attempt_count || 0) + 1, max)
+      : Number(row.attempt_count || 0) + 1;
+    await db.prepare(`
+      UPDATE cashout_notification_deliveries
+      SET delivery_status = 'edit_failed',
+          last_error = ?,
+          attempt_count = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      error ? String(error).slice(0, 300) : null,
+      nextAttempts,
+      nowText,
+      id
+    );
+    return { ok: true };
+  }
+
+  async function listRetryableCashoutNotificationDeliveries({
+    maxAttempts = 5,
+    olderThanIso = null,
+    limit = 25
+  } = {}) {
+    const max = Math.max(1, Math.floor(Number(maxAttempts) || 5));
+    const safeLimit = Math.min(Math.max(Math.floor(Number(limit) || 25), 1), 200);
+    const olderThan = olderThanIso ? String(olderThanIso) : nowIso();
+    const rows = await db.prepare(`
+      SELECT d.id, d.appbeg_cashout_task_id, d.coadmin_uid, d.subscriber_id, d.telegram_chat_id,
+             d.telegram_message_id, d.delivery_status, d.last_error, d.attempt_count,
+             d.source_outbox_id, d.source_event_type, d.last_synced_outbox_id,
+             d.created_at, d.updated_at, d.sent_at, d.last_edit_at,
+             s.telegram_user_id AS telegram_user_id
+      FROM cashout_notification_deliveries d
+      LEFT JOIN support_notification_subscribers s ON s.id = d.subscriber_id
+      WHERE d.attempt_count < ?
+        AND d.updated_at <= ?
+        AND (
+          (
+            d.delivery_status IN ('pending', 'failed')
+            AND d.telegram_message_id IS NULL
+          )
+          OR (
+            d.delivery_status = 'edit_failed'
+            AND d.telegram_message_id IS NOT NULL
+          )
+        )
+      ORDER BY d.updated_at ASC, d.id ASC
+      LIMIT ?
+    `).all(max, olderThan, safeLimit);
+    return rows;
+  }
+
+  async function listCashoutNotificationDeliveriesByTask(taskId) {
+    const appbegTaskId = String(taskId ?? '').trim();
+    if (!appbegTaskId) return [];
+    return db.prepare(`
+      SELECT id, appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
+             telegram_message_id, delivery_status, last_error, attempt_count,
+             source_outbox_id, source_event_type, last_synced_outbox_id,
+             created_at, updated_at, sent_at, last_edit_at
+      FROM cashout_notification_deliveries
+      WHERE appbeg_cashout_task_id = ?
+      ORDER BY id ASC
+    `).all(appbegTaskId);
+  }
+
+  /**
+   * Already-sent Telegram copies eligible for Phase 4 state edits.
+   * Includes inactive/disabled subscribers — editing existing messages only.
+   */
+  async function listEditableCashoutNotificationDeliveriesByTask(taskId) {
+    const appbegTaskId = String(taskId ?? '').trim();
+    if (!appbegTaskId) return [];
+    return db.prepare(`
+      SELECT d.id, d.appbeg_cashout_task_id, d.coadmin_uid, d.subscriber_id, d.telegram_chat_id,
+             d.telegram_message_id, d.delivery_status, d.last_error, d.attempt_count,
+             d.source_outbox_id, d.source_event_type, d.last_synced_outbox_id,
+             d.created_at, d.updated_at, d.sent_at, d.last_edit_at,
+             s.telegram_user_id AS telegram_user_id
+      FROM cashout_notification_deliveries d
+      LEFT JOIN support_notification_subscribers s ON s.id = d.subscriber_id
+      WHERE d.appbeg_cashout_task_id = ?
+        AND d.telegram_message_id IS NOT NULL
+      ORDER BY d.id ASC
+    `).all(appbegTaskId);
+  }
+
 
   async function createSupportRequest({
     kind = 'support',
@@ -7323,10 +7955,29 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     commitSupportNotifyLock,
     releaseSupportNotifyLock,
     upsertSupportNotificationSubscriber,
+    enrollSupportNotificationSubscriber,
+    reactivateEnrolledSupportNotificationSubscriber,
+    getSupportNotificationSubscriberByTelegramUserId,
+    getSupportNotificationSubscriberByChatId,
     deactivateSupportNotificationSubscriber,
     listActiveSupportNotificationSubscribers,
     markSupportNotificationDelivery,
     getActiveSupportNotificationSubscriberByTelegramUserId,
+    listSupportNotificationSubscribersByCoadmin,
+    listActiveSupportNotificationSubscribersByCoadmin,
+    disableSupportNotificationSubscriber,
+    enableSupportNotificationSubscriber,
+    getCashoutOutboxConsumerState,
+    upsertCashoutOutboxConsumerState,
+    getCashoutNotificationDeliveryByTaskAndChat,
+    ensureCashoutNotificationDelivery,
+    markCashoutNotificationDeliverySent,
+    markCashoutNotificationDeliveryEdited,
+    markCashoutNotificationDeliveryFailed,
+    markCashoutNotificationDeliveryEditFailed,
+    listRetryableCashoutNotificationDeliveries,
+    listCashoutNotificationDeliveriesByTask,
+    listEditableCashoutNotificationDeliveriesByTask,
     createSupportRequest,
     getSupportRequest,
     recordSupportRequestDelivery,
@@ -8061,6 +8712,11 @@ async function migrate(db) {
       telegram_chat_id TEXT NOT NULL UNIQUE,
       telegram_user_id TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
+      coadmin_uid TEXT,
+      telegram_username TEXT,
+      telegram_display_name TEXT,
+      linked_at TEXT,
+      disabled_by_coadmin INTEGER NOT NULL DEFAULT 0,
       subscribed_at TEXT NOT NULL,
       last_delivery_at TEXT,
       last_delivery_status TEXT,
@@ -8069,9 +8725,65 @@ async function migrate(db) {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await addColumnIfMissing(db, 'support_notification_subscribers', 'coadmin_uid', 'TEXT');
+  await addColumnIfMissing(db, 'support_notification_subscribers', 'telegram_username', 'TEXT');
+  await addColumnIfMissing(db, 'support_notification_subscribers', 'telegram_display_name', 'TEXT');
+  await addColumnIfMissing(db, 'support_notification_subscribers', 'linked_at', 'TEXT');
+  await addColumnIfMissing(db, 'support_notification_subscribers', 'disabled_by_coadmin', 'INTEGER NOT NULL DEFAULT 0');
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
       ON support_notification_subscribers(is_active, telegram_chat_id)
+  `);
+  await db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_support_notification_subscribers_telegram_user_id
+      ON support_notification_subscribers(telegram_user_id)
+      WHERE telegram_user_id IS NOT NULL AND TRIM(telegram_user_id) != ''
+  `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_coadmin_active
+      ON support_notification_subscribers(coadmin_uid, is_active)
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS cashout_outbox_consumer_state (
+      consumer_name TEXT PRIMARY KEY,
+      last_processed_outbox_id INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS cashout_notification_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      appbeg_cashout_task_id TEXT NOT NULL,
+      coadmin_uid TEXT NOT NULL,
+      subscriber_id INTEGER,
+      telegram_chat_id TEXT NOT NULL,
+      telegram_message_id INTEGER,
+      delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_status IN ('pending', 'sent', 'failed', 'edit_failed')),
+      last_error TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      source_outbox_id INTEGER,
+      source_event_type TEXT,
+      last_synced_outbox_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sent_at TEXT,
+      last_edit_at TEXT,
+      UNIQUE (appbeg_cashout_task_id, telegram_chat_id),
+      FOREIGN KEY (subscriber_id) REFERENCES support_notification_subscribers(id) ON DELETE SET NULL
+    )
+  `);
+  await addColumnIfMissing(db, 'cashout_notification_deliveries', 'last_synced_outbox_id', 'INTEGER');
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_status_updated
+      ON cashout_notification_deliveries(delivery_status, updated_at ASC, id ASC)
+  `);
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_task
+      ON cashout_notification_deliveries(appbeg_cashout_task_id)
   `);
 
   await db.exec(`

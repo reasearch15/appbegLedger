@@ -1,17 +1,37 @@
 import { Telegraf } from 'telegraf';
 import {
   SUPPORT_SUBSCRIBED_TEXT,
+  SUPPORT_CONNECTED_TEXT,
   SUPPORT_UNSUBSCRIBED_TEXT,
+  SUPPORT_ENTER_INTEGRATION_CODE_TEXT,
+  SUPPORT_INVALID_INTEGRATION_CODE_TEXT,
+  SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT,
+  SUPPORT_DISABLED_BY_COADMIN_TEXT,
+  SUPPORT_ALREADY_LINKED_OTHER_COADMIN_TEXT,
+  SUPPORT_ENROLLMENT_REQUIRED_TEXT,
   SUPPORT_CLAIM_PREFIX,
   SUPPORT_DONE_PREFIX,
   buildSupportRequestMessage,
   buildSupportRequestReplyMarkup,
   getSupportNotificationConfig
 } from './supportNotificationBot.js';
+import { validateStaffTelegramIntegrationCode } from '../appbeg/staffTelegramClient.js';
+import {
+  handleCashoutClaimCallback,
+  isCashoutClaimCallback
+} from './cashoutClaimCallback.js';
+import {
+  handleCashoutDoneCallback,
+  isCashoutDoneCallback
+} from './cashoutDoneCallback.js';
+
+/** In-memory enrollment wait flags keyed by telegram_user_id. Survives for process lifetime only. */
+const waitingForIntegrationCode = new Map();
 
 /**
  * Support Notification Bot listener.
- * Anyone who /start this bot becomes an active notification subscriber.
+ * Enrollment requires a Coadmin Staff Telegram Integration Code (STG-...).
+ * Open /start subscription is disabled.
  */
 export function startSupportNotificationListener({ token, store, env = process.env } = {}) {
   const config = token
@@ -23,7 +43,11 @@ export function startSupportNotificationListener({ token, store, env = process.e
     return null;
   }
 
-  if (!store || typeof store.upsertSupportNotificationSubscriber !== 'function') {
+  if (
+    !store
+    || typeof store.getSupportNotificationSubscriberByTelegramUserId !== 'function'
+    || typeof store.enrollSupportNotificationSubscriber !== 'function'
+  ) {
     console.warn('Support notification subscriber store is unavailable. Support notification bot is disabled.');
     return null;
   }
@@ -31,11 +55,15 @@ export function startSupportNotificationListener({ token, store, env = process.e
   const bot = new Telegraf(config.token);
 
   bot.start(async (ctx) => {
-    await handleSubscribe(ctx, store);
+    await handleStart(ctx, store, env);
   });
 
   bot.command('stop', async (ctx) => {
     await handleUnsubscribe(ctx, store);
+  });
+
+  bot.on('text', async (ctx) => {
+    await handleTextEnrollment(ctx, store, env);
   });
 
   bot.on('callback_query', async (ctx) => {
@@ -55,40 +83,182 @@ export function startSupportNotificationListener({ token, store, env = process.e
   return bot;
 }
 
-async function handleSubscribe(ctx, store) {
+function readTelegramIdentity(ctx) {
+  const chatId = ctx.chat?.id == null ? null : String(ctx.chat.id);
+  const userId = ctx.from?.id == null ? null : String(ctx.from.id);
+  const username = ctx.from?.username ? String(ctx.from.username).trim() : null;
+  const displayName = safeTelegramDisplayName(ctx.from);
+  return { chatId, userId, username, displayName };
+}
+
+function markWaitingForCode(userId) {
+  if (userId) waitingForIntegrationCode.set(String(userId), true);
+}
+
+function clearWaitingForCode(userId) {
+  if (userId) waitingForIntegrationCode.delete(String(userId));
+}
+
+function isWaitingForCode(userId) {
+  return Boolean(userId && waitingForIntegrationCode.get(String(userId)));
+}
+
+export async function handleStart(ctx, store, env = process.env) {
   if (ctx.chat?.type !== 'private') return;
-  const chatId = ctx.chat?.id;
-  const userId = ctx.from?.id ?? null;
-  if (chatId == null) return;
+  const identity = readTelegramIdentity(ctx);
+  if (!identity.chatId || !identity.userId) return;
 
   try {
-    const result = await store.upsertSupportNotificationSubscriber({
-      telegramChatId: chatId,
-      telegramUserId: userId
-    });
-    if (result?.reactivated) {
-      console.log('[chatbot] support_subscriber_reactivated', {
-        telegram_chat_id: String(chatId),
-        subscriber_created: false
-      });
-    } else if (result?.created) {
-      console.log('[chatbot] support_subscriber_registered', {
-        telegram_chat_id: String(chatId),
-        subscriber_created: true
-      });
-    } else {
-      console.log('[chatbot] support_subscriber_registered', {
-        telegram_chat_id: String(chatId),
-        subscriber_created: false,
-        already_active: true
-      });
+    const existing = await store.getSupportNotificationSubscriberByTelegramUserId(identity.userId);
+
+    if (existing?.disabled_by_coadmin) {
+      clearWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_DISABLED_BY_COADMIN_TEXT);
+      return;
     }
-    await ctx.reply(SUPPORT_SUBSCRIBED_TEXT);
+
+    if (existing?.coadmin_uid) {
+      const result = await store.reactivateEnrolledSupportNotificationSubscriber({
+        telegramChatId: identity.chatId,
+        telegramUserId: identity.userId,
+        telegramUsername: identity.username,
+        telegramDisplayName: identity.displayName
+      });
+      if (!result?.ok) {
+        if (result?.reason === 'disabled_by_coadmin') {
+          await ctx.reply(SUPPORT_DISABLED_BY_COADMIN_TEXT);
+          return;
+        }
+        markWaitingForCode(identity.userId);
+        await ctx.reply(SUPPORT_ENTER_INTEGRATION_CODE_TEXT);
+        return;
+      }
+      clearWaitingForCode(identity.userId);
+      if (result.reactivated) {
+        console.log('[chatbot] support_subscriber_reactivated', {
+          telegram_user_id: identity.userId,
+          telegram_chat_id: identity.chatId
+        });
+      } else {
+        console.log('[chatbot] support_subscriber_welcome', {
+          telegram_user_id: identity.userId,
+          telegram_chat_id: identity.chatId
+        });
+      }
+      await ctx.reply(SUPPORT_SUBSCRIBED_TEXT);
+      return;
+    }
+
+    // Missing row OR legacy NULL coadmin_uid — require STG enrollment.
+    markWaitingForCode(identity.userId);
+    console.log('[chatbot] support_subscriber_needs_code', {
+      telegram_user_id: identity.userId,
+      telegram_chat_id: identity.chatId,
+      has_legacy_row: Boolean(existing)
+    });
+    await ctx.reply(SUPPORT_ENTER_INTEGRATION_CODE_TEXT);
   } catch (error) {
-    console.error('[support-notification-bot] subscribe_failed', {
-      telegram_chat_id: String(chatId),
+    console.error('[support-notification-bot] start_failed', {
+      telegram_chat_id: identity.chatId,
       stack: error?.stack || String(error)
     });
+  }
+}
+
+export async function handleTextEnrollment(ctx, store, env = process.env, {
+  validateCode = validateStaffTelegramIntegrationCode
+} = {}) {
+  if (ctx.chat?.type !== 'private') return;
+  // Commands are handled by dedicated handlers; ignore here.
+  const text = String(ctx.message?.text || '').trim();
+  if (!text || text.startsWith('/')) return;
+
+  const identity = readTelegramIdentity(ctx);
+  if (!identity.chatId || !identity.userId) return;
+
+  try {
+    const existing = await store.getSupportNotificationSubscriberByTelegramUserId(identity.userId);
+    if (existing?.disabled_by_coadmin) {
+      clearWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_DISABLED_BY_COADMIN_TEXT);
+      return;
+    }
+    if (existing?.coadmin_uid && existing.is_active) {
+      clearWaitingForCode(identity.userId);
+      return;
+    }
+    if (existing?.coadmin_uid && !existing.is_active) {
+      // Linked but stopped — ask them to /start rather than treat text as a code.
+      await ctx.reply('Send /start to re-enable notifications.');
+      return;
+    }
+
+    // Unlinked / legacy NULL coadmin: accept code if waiting OR text looks like STG-.
+    const looksLikeCode = /^STG-/i.test(text);
+    if (!isWaitingForCode(identity.userId) && !looksLikeCode) {
+      markWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_ENROLLMENT_REQUIRED_TEXT);
+      return;
+    }
+
+    const validation = await validateCode(text, { env });
+    if (validation.reason === 'unavailable' || validation.reason === 'not_configured') {
+      markWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT);
+      return;
+    }
+    if (validation.reason === 'rate_limited') {
+      markWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT);
+      return;
+    }
+    if (!validation.ok) {
+      markWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_INVALID_INTEGRATION_CODE_TEXT);
+      return;
+    }
+
+    const enrolled = await store.enrollSupportNotificationSubscriber({
+      telegramChatId: identity.chatId,
+      telegramUserId: identity.userId,
+      coadminUid: validation.coadminUid,
+      telegramUsername: identity.username,
+      telegramDisplayName: identity.displayName
+    });
+
+    if (!enrolled?.ok) {
+      if (enrolled?.reason === 'disabled_by_coadmin') {
+        clearWaitingForCode(identity.userId);
+        await ctx.reply(SUPPORT_DISABLED_BY_COADMIN_TEXT);
+        return;
+      }
+      if (enrolled?.reason === 'already_linked_other_coadmin') {
+        clearWaitingForCode(identity.userId);
+        await ctx.reply(SUPPORT_ALREADY_LINKED_OTHER_COADMIN_TEXT);
+        return;
+      }
+      markWaitingForCode(identity.userId);
+      await ctx.reply(SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT);
+      return;
+    }
+
+    clearWaitingForCode(identity.userId);
+    console.log('[chatbot] support_subscriber_enrolled', {
+      telegram_user_id: identity.userId,
+      telegram_chat_id: identity.chatId,
+      created: Boolean(enrolled.created)
+    });
+    await ctx.reply(SUPPORT_CONNECTED_TEXT);
+  } catch (error) {
+    console.error('[support-notification-bot] enrollment_failed', {
+      telegram_chat_id: identity.chatId,
+      stack: error?.stack || String(error)
+    });
+    try {
+      await ctx.reply(SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT);
+    } catch {
+      // ignore reply failure
+    }
   }
 }
 
@@ -115,6 +285,17 @@ async function handleUnsubscribe(ctx, store) {
 export async function handleSupportCallback(ctx, store, bot) {
   const action = String(ctx.callbackQuery?.data || '').trim();
   const fromId = ctx.from?.id == null ? null : String(ctx.from.id);
+
+  if (isCashoutClaimCallback(action)) {
+    await handleCashoutClaimCallback(ctx, store);
+    return;
+  }
+
+  if (isCashoutDoneCallback(action)) {
+    await handleCashoutDoneCallback(ctx, store);
+    return;
+  }
+
   const requestId = parseSupportRequestCallback(action);
   if (!requestId) {
     await answerCallback(ctx, 'Unknown action.');
@@ -277,4 +458,9 @@ async function launchSupportBot(bot) {
   } catch (error) {
     console.error('Support notification bot listener failed to start:', error);
   }
+}
+
+/** Test helper: clear in-memory enrollment wait flags. */
+export function __resetStaffTelegramEnrollmentStateForTests() {
+  waitingForIntegrationCode.clear();
 }

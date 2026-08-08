@@ -11,7 +11,15 @@ export const SUPPORT_CLAIM_PREFIX = 'support:claim:';
 export const SUPPORT_DONE_PREFIX = 'support:done:';
 export const SUPPORT_ACCOUNT_NOT_FOUND_TEXT = 'We could not find your RoyalVIP account. Please contact support.';
 export const SUPPORT_SUBSCRIBED_TEXT = '✅ You are now subscribed to RoyalVIP support notifications.';
+export const SUPPORT_CONNECTED_TEXT = '✅ Connected successfully. Royal Support notifications are now enabled.';
 export const SUPPORT_UNSUBSCRIBED_TEXT = 'Notifications disabled.';
+export const SUPPORT_ENTER_INTEGRATION_CODE_TEXT = 'Enter your Staff Telegram Integration Code.';
+export const SUPPORT_INVALID_INTEGRATION_CODE_TEXT = 'Invalid Staff Telegram Integration Code. Please check the code and try again.';
+export const SUPPORT_INTEGRATION_CODE_UNAVAILABLE_TEXT = 'Unable to verify the code right now. Please try again shortly.';
+export const SUPPORT_DISABLED_BY_COADMIN_TEXT = 'Your Telegram staff access has been disabled by your Coadmin.';
+export const SUPPORT_ALREADY_LINKED_OTHER_COADMIN_TEXT = 'This Telegram account is already linked to another Coadmin.';
+export const SUPPORT_ENROLLMENT_REQUIRED_TEXT = 'Please enter your Staff Telegram Integration Code.';
+
 
 export function getSupportNotificationConfig(env = process.env) {
   const token = String(env.SUPPORT_NOTIFICATION_BOT_TOKEN || '').trim();

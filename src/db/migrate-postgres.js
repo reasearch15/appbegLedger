@@ -193,6 +193,11 @@ export async function migratePostgres(driver) {
       telegram_chat_id TEXT NOT NULL UNIQUE,
       telegram_user_id TEXT,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      coadmin_uid TEXT,
+      telegram_username TEXT,
+      telegram_display_name TEXT,
+      linked_at TEXT,
+      disabled_by_coadmin BOOLEAN NOT NULL DEFAULT FALSE,
       subscribed_at TEXT NOT NULL,
       last_delivery_at TEXT,
       last_delivery_status TEXT,
@@ -202,6 +207,56 @@ export async function migratePostgres(driver) {
     );
     CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
       ON support_notification_subscribers(is_active, telegram_chat_id);
+  `);
+  await driver.exec(`
+    ALTER TABLE support_notification_subscribers ADD COLUMN IF NOT EXISTS coadmin_uid TEXT;
+    ALTER TABLE support_notification_subscribers ADD COLUMN IF NOT EXISTS telegram_username TEXT;
+    ALTER TABLE support_notification_subscribers ADD COLUMN IF NOT EXISTS telegram_display_name TEXT;
+    ALTER TABLE support_notification_subscribers ADD COLUMN IF NOT EXISTS linked_at TEXT;
+    ALTER TABLE support_notification_subscribers ADD COLUMN IF NOT EXISTS disabled_by_coadmin BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+  await driver.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_support_notification_subscribers_telegram_user_id
+      ON support_notification_subscribers(telegram_user_id)
+      WHERE telegram_user_id IS NOT NULL AND btrim(telegram_user_id) <> '';
+    CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_coadmin_active
+      ON support_notification_subscribers(coadmin_uid, is_active);
+  `);
+
+  await driver.exec(`
+    CREATE TABLE IF NOT EXISTS cashout_outbox_consumer_state (
+      consumer_name TEXT PRIMARY KEY,
+      last_processed_outbox_id BIGINT NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS cashout_notification_deliveries (
+      id BIGSERIAL PRIMARY KEY,
+      appbeg_cashout_task_id TEXT NOT NULL,
+      coadmin_uid TEXT NOT NULL,
+      subscriber_id BIGINT REFERENCES support_notification_subscribers(id) ON DELETE SET NULL,
+      telegram_chat_id TEXT NOT NULL,
+      telegram_message_id BIGINT,
+      delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_status IN ('pending', 'sent', 'failed', 'edit_failed')),
+      last_error TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      source_outbox_id BIGINT,
+      source_event_type TEXT,
+      last_synced_outbox_id BIGINT,
+      created_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      updated_at TEXT NOT NULL DEFAULT NOW()::TEXT,
+      sent_at TEXT,
+      last_edit_at TEXT,
+      UNIQUE (appbeg_cashout_task_id, telegram_chat_id)
+    );
+    ALTER TABLE cashout_notification_deliveries
+      ADD COLUMN IF NOT EXISTS last_synced_outbox_id BIGINT;
+    CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_status_updated
+      ON cashout_notification_deliveries(delivery_status, updated_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_task
+      ON cashout_notification_deliveries(appbeg_cashout_task_id);
   `);
 
   await driver.exec(`

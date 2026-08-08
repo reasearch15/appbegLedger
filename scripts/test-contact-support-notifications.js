@@ -55,7 +55,7 @@ function baseInfo(overrides = {}) {
 
 function createMemoryStore({
   registrationInfo = baseInfo(),
-  subscribers = [{ telegram_chat_id: '1001', is_active: true }]
+  subscribers = [{ telegram_chat_id: '1001', telegram_user_id: '1001', coadmin_uid: 'coadmin-test', is_active: true }]
 } = {}) {
   let state = {
     current_flow: null,
@@ -72,6 +72,8 @@ function createMemoryStore({
     id: nextSubscriberId++,
     telegram_chat_id: String(row.telegram_chat_id),
     telegram_user_id: row.telegram_user_id == null ? null : String(row.telegram_user_id),
+    coadmin_uid: row.coadmin_uid == null ? null : String(row.coadmin_uid),
+    disabled_by_coadmin: Boolean(row.disabled_by_coadmin),
     is_active: row.is_active !== false,
     subscribed_at: row.subscribed_at || new Date().toISOString(),
     last_delivery_at: null,
@@ -159,13 +161,14 @@ function createMemoryStore({
       supportInflightAt = null;
       return { ok: true };
     },
-    async upsertSupportNotificationSubscriber({ telegramChatId, telegramUserId = null } = {}) {
+    async upsertSupportNotificationSubscriber({ telegramChatId, telegramUserId = null, coadminUid = null } = {}) {
       const chatId = String(telegramChatId);
       const existing = subscriberRows.find((row) => row.telegram_chat_id === chatId);
       if (existing) {
         const wasActive = existing.is_active;
         existing.is_active = true;
         existing.telegram_user_id = telegramUserId == null ? existing.telegram_user_id : String(telegramUserId);
+        if (coadminUid) existing.coadmin_uid = String(coadminUid);
         existing.last_error = null;
         if (!wasActive) existing.subscribed_at = new Date().toISOString();
         return { ok: true, created: false, reactivated: !wasActive, telegramChatId: chatId };
@@ -174,6 +177,8 @@ function createMemoryStore({
         id: nextSubscriberId++,
         telegram_chat_id: chatId,
         telegram_user_id: telegramUserId == null ? null : String(telegramUserId),
+        coadmin_uid: coadminUid == null ? null : String(coadminUid),
+        disabled_by_coadmin: false,
         is_active: true,
         subscribed_at: new Date().toISOString(),
         last_delivery_at: null,
@@ -181,6 +186,19 @@ function createMemoryStore({
         last_error: null
       });
       return { ok: true, created: true, reactivated: false, telegramChatId: chatId };
+    },
+    async enrollSupportNotificationSubscriber({
+      telegramChatId,
+      telegramUserId,
+      coadminUid,
+      telegramUsername = null,
+      telegramDisplayName = null
+    } = {}) {
+      return this.upsertSupportNotificationSubscriber({
+        telegramChatId,
+        telegramUserId,
+        coadminUid
+      });
     },
     async deactivateSupportNotificationSubscriber(telegramChatId, { reason = null } = {}) {
       const row = subscriberRows.find((item) => item.telegram_chat_id === String(telegramChatId));
@@ -190,7 +208,9 @@ function createMemoryStore({
       return { ok: true, reason: 'disabled' };
     },
     async listActiveSupportNotificationSubscribers() {
-      return subscriberRows.filter((row) => row.is_active).map((row) => ({ ...row }));
+      return subscriberRows
+        .filter((row) => row.is_active && row.coadmin_uid && !row.disabled_by_coadmin)
+        .map((row) => ({ ...row }));
     },
     async markSupportNotificationDelivery(telegramChatId, { status = 'sent', error = null, deactivate = false } = {}) {
       const row = subscriberRows.find((item) => item.telegram_chat_id === String(telegramChatId));
@@ -256,25 +276,27 @@ async function run() {
   assert.equal(isPermanentSupportDeliveryError(403, 'Forbidden: bot was blocked by the user'), true);
   assert.equal(isPermanentSupportDeliveryError(500, 'boom'), false);
 
-  // 1 + 2: first /start registers; existing subscriber reactivates
+  // 1 + 2: first enroll registers; existing enrolled subscriber reactivates
   {
     const store = createMemoryStore({ subscribers: [] });
-    const first = await store.upsertSupportNotificationSubscriber({
+    const first = await store.enrollSupportNotificationSubscriber({
       telegramChatId: 777,
-      telegramUserId: 777
+      telegramUserId: 777,
+      coadminUid: 'coadmin-test'
     });
     assert.equal(first.created, true);
     assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 1);
     await store.deactivateSupportNotificationSubscriber('777', { reason: 'user_stop' });
     assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 0);
-    const again = await store.upsertSupportNotificationSubscriber({
+    const again = await store.enrollSupportNotificationSubscriber({
       telegramChatId: '777',
-      telegramUserId: 777
+      telegramUserId: 777,
+      coadminUid: 'coadmin-test'
     });
-    assert.equal(again.reactivated, true);
+    assert.equal(again.created, false);
     assert.equal((await store.listActiveSupportNotificationSubscribers()).length, 1);
     assert.equal(SUPPORT_SUBSCRIBED_TEXT.includes('subscribed'), true);
-    console.log('ok first /start registers and existing subscriber reactivates');
+    console.log('ok first enroll registers and existing subscriber reactivates');
   }
 
   // 3: /stop disables notifications
@@ -308,8 +330,8 @@ async function run() {
   {
     const store = createMemoryStore({
       subscribers: [
-        { telegram_chat_id: '1001', is_active: true },
-        { telegram_chat_id: '1002', is_active: true }
+        { telegram_chat_id: '1001', telegram_user_id: '1001', coadmin_uid: 'coadmin-test', is_active: true },
+        { telegram_chat_id: '1002', telegram_user_id: '1002', coadmin_uid: 'coadmin-test', is_active: true }
       ]
     });
     supportCalls.length = 0;
@@ -328,8 +350,8 @@ async function run() {
   {
     const store = createMemoryStore({
       subscribers: [
-        { telegram_chat_id: '1001', is_active: true },
-        { telegram_chat_id: '1002', is_active: true }
+        { telegram_chat_id: '1001', telegram_user_id: '1001', coadmin_uid: 'coadmin-test', is_active: true },
+        { telegram_chat_id: '1002', telegram_user_id: '1002', coadmin_uid: 'coadmin-test', is_active: true }
       ]
     });
     supportCalls.length = 0;
@@ -349,8 +371,8 @@ async function run() {
   {
     const store = createMemoryStore({
       subscribers: [
-        { telegram_chat_id: '1001', is_active: true },
-        { telegram_chat_id: '1002', is_active: true }
+        { telegram_chat_id: '1001', telegram_user_id: '1001', coadmin_uid: 'coadmin-test', is_active: true },
+        { telegram_chat_id: '1002', telegram_user_id: '1002', coadmin_uid: 'coadmin-test', is_active: true }
       ]
     });
     supportCalls.length = 0;
@@ -370,8 +392,8 @@ async function run() {
   {
     const store = createMemoryStore({
       subscribers: [
-        { telegram_chat_id: '1001', is_active: true },
-        { telegram_chat_id: '1002', is_active: true }
+        { telegram_chat_id: '1001', telegram_user_id: '1001', coadmin_uid: 'coadmin-test', is_active: true },
+        { telegram_chat_id: '1002', telegram_user_id: '1002', coadmin_uid: 'coadmin-test', is_active: true }
       ]
     });
     supportCalls.length = 0;
@@ -568,9 +590,11 @@ async function run() {
       globalThis.fetch = mockSupportFetch(supportCalls);
       supportCalls.length = 0;
 
-      await dbStore.upsertSupportNotificationSubscriber({
+      await dbStore.enrollSupportNotificationSubscriber({
         telegramChatId: '424242',
-        telegramUserId: 424242
+        telegramUserId: 424242,
+        coadminUid: 'coadmin-test',
+        telegramDisplayName: 'Staff'
       });
 
       const saved = await dbStore.upsertTelegramUser({
