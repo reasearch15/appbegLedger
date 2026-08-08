@@ -1550,7 +1550,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!appbegTaskId || !chatId) return null;
     return db.prepare(`
       SELECT id, appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
-             telegram_message_id, delivery_status, last_error, attempt_count,
+             telegram_message_id, message_type, delivery_status, last_error, attempt_count,
              source_outbox_id, source_event_type, last_synced_outbox_id,
              created_at, updated_at, sent_at, last_edit_at
       FROM cashout_notification_deliveries
@@ -1583,10 +1583,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       const result = await db.prepare(`
         INSERT INTO cashout_notification_deliveries (
           appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
-          telegram_message_id, delivery_status, last_error, attempt_count,
+          telegram_message_id, message_type, delivery_status, last_error, attempt_count,
           source_outbox_id, source_event_type, last_synced_outbox_id,
           created_at, updated_at, sent_at, last_edit_at
-        ) VALUES (?, ?, ?, ?, NULL, 'pending', NULL, 0, ?, ?, NULL, ?, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, ?, NULL, 'text', 'pending', NULL, 0, ?, ?, NULL, ?, ?, NULL, NULL)
       `).run(
         taskId,
         ownerUid,
@@ -1611,6 +1611,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   async function markCashoutNotificationDeliverySent({
     deliveryId,
     telegramMessageId,
+    messageType = 'text',
     outboxId = null
   } = {}) {
     const id = Number(deliveryId);
@@ -1618,11 +1619,15 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!Number.isFinite(id) || !Number.isFinite(messageId)) {
       return { ok: false, reason: 'invalid_ids' };
     }
+    const normalizedType = String(messageType || '').trim().toLowerCase() === 'photo'
+      ? 'photo'
+      : 'text';
     const nowText = nowIso();
     await db.prepare(`
       UPDATE cashout_notification_deliveries
       SET delivery_status = 'sent',
           telegram_message_id = ?,
+          message_type = ?,
           last_error = NULL,
           attempt_count = 0,
           sent_at = COALESCE(sent_at, ?),
@@ -1631,6 +1636,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       WHERE id = ?
     `).run(
       messageId,
+      normalizedType,
       nowText,
       outboxId == null ? null : Number(outboxId),
       nowText,
@@ -1740,7 +1746,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const olderThan = olderThanIso ? String(olderThanIso) : nowIso();
     const rows = await db.prepare(`
       SELECT d.id, d.appbeg_cashout_task_id, d.coadmin_uid, d.subscriber_id, d.telegram_chat_id,
-             d.telegram_message_id, d.delivery_status, d.last_error, d.attempt_count,
+             d.telegram_message_id, d.message_type, d.delivery_status, d.last_error, d.attempt_count,
              d.source_outbox_id, d.source_event_type, d.last_synced_outbox_id,
              d.created_at, d.updated_at, d.sent_at, d.last_edit_at,
              s.telegram_user_id AS telegram_user_id
@@ -1769,7 +1775,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!appbegTaskId) return [];
     return db.prepare(`
       SELECT id, appbeg_cashout_task_id, coadmin_uid, subscriber_id, telegram_chat_id,
-             telegram_message_id, delivery_status, last_error, attempt_count,
+             telegram_message_id, message_type, delivery_status, last_error, attempt_count,
              source_outbox_id, source_event_type, last_synced_outbox_id,
              created_at, updated_at, sent_at, last_edit_at
       FROM cashout_notification_deliveries
@@ -1787,7 +1793,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!appbegTaskId) return [];
     return db.prepare(`
       SELECT d.id, d.appbeg_cashout_task_id, d.coadmin_uid, d.subscriber_id, d.telegram_chat_id,
-             d.telegram_message_id, d.delivery_status, d.last_error, d.attempt_count,
+             d.telegram_message_id, d.message_type, d.delivery_status, d.last_error, d.attempt_count,
              d.source_outbox_id, d.source_event_type, d.last_synced_outbox_id,
              d.created_at, d.updated_at, d.sent_at, d.last_edit_at,
              s.telegram_user_id AS telegram_user_id
@@ -8756,6 +8762,8 @@ async function migrate(db) {
       subscriber_id INTEGER,
       telegram_chat_id TEXT NOT NULL,
       telegram_message_id INTEGER,
+      message_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (message_type IN ('text', 'photo')),
       delivery_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (delivery_status IN ('pending', 'sent', 'failed', 'edit_failed')),
       last_error TEXT,
@@ -8772,6 +8780,7 @@ async function migrate(db) {
     )
   `);
   await addColumnIfMissing(db, 'cashout_notification_deliveries', 'last_synced_outbox_id', 'INTEGER');
+  await addColumnIfMissing(db, 'cashout_notification_deliveries', 'message_type', "TEXT NOT NULL DEFAULT 'text'");
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_status_updated
       ON cashout_notification_deliveries(delivery_status, updated_at ASC, id ASC)

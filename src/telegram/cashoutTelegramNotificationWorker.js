@@ -147,14 +147,17 @@ async function deliverToSubscriber({
     await store.markCashoutNotificationDeliverySent({
       deliveryId: row.id,
       telegramMessageId: result.telegramMessageId,
+      messageType: result.messageType || 'text',
       outboxId
     });
     console.log('[cashout-telegram] send_success', {
       task_id: task.taskId,
       telegram_chat_id: chatId,
-      telegram_message_id: result.telegramMessageId
+      telegram_message_id: result.telegramMessageId,
+      message_type: result.messageType || 'text',
+      used_photo_fallback: Boolean(result.usedPhotoFallback)
     });
-    return { sent: true };
+    return { sent: true, messageType: result.messageType || 'text' };
   }
 
   await store.markCashoutNotificationDeliveryFailed({
@@ -206,6 +209,7 @@ async function editOneDelivery({
     chatId,
     messageId,
     task,
+    messageType: delivery.message_type || 'text',
     env,
     fetchImpl,
     viewerTelegramUserId: delivery.telegram_user_id || null
@@ -675,7 +679,8 @@ export async function retryFailedCashoutNotificationDeliveries({
     if (result.ok) {
       await store.markCashoutNotificationDeliverySent({
         deliveryId: row.id,
-        telegramMessageId: result.telegramMessageId
+        telegramMessageId: result.telegramMessageId,
+        messageType: result.messageType || 'text'
       });
       sent += 1;
       continue;

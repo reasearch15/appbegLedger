@@ -254,6 +254,8 @@ export async function migratePostgres(driver) {
       subscriber_id BIGINT REFERENCES support_notification_subscribers(id) ON DELETE SET NULL,
       telegram_chat_id TEXT NOT NULL,
       telegram_message_id BIGINT,
+      message_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (message_type IN ('text', 'photo')),
       delivery_status TEXT NOT NULL DEFAULT 'pending'
         CHECK (delivery_status IN ('pending', 'sent', 'failed', 'edit_failed')),
       last_error TEXT,
@@ -269,6 +271,8 @@ export async function migratePostgres(driver) {
     );
     ALTER TABLE cashout_notification_deliveries
       ADD COLUMN IF NOT EXISTS last_synced_outbox_id BIGINT;
+    ALTER TABLE cashout_notification_deliveries
+      ADD COLUMN IF NOT EXISTS message_type TEXT NOT NULL DEFAULT 'text';
     CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_status_updated
       ON cashout_notification_deliveries(delivery_status, updated_at ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_cashout_notification_deliveries_task

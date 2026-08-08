@@ -84,6 +84,8 @@ export async function fetchCashoutOutboxEvents({
 
 /**
  * Load authoritative cash-out task fields for notification rendering.
+ * Optional task.qrImageUrl (when present) is preserved for Telegram sendPhoto.
+ * paymentDetails / payout destination secrets are never part of this M2M contract.
  */
 export async function fetchCashoutTaskForNotification(taskId, {
   env = process.env,
