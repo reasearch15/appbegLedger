@@ -1531,21 +1531,16 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!name) return { ok: false, reason: 'missing_consumer_name' };
     const outboxId = Math.max(0, Math.floor(Number(lastProcessedOutboxId) || 0));
     const nowText = nowIso();
-    const existing = await getCashoutOutboxConsumerState(name);
-    if (existing) {
-      await db.prepare(`
-        UPDATE cashout_outbox_consumer_state
-        SET last_processed_outbox_id = ?,
-            updated_at = ?
-        WHERE consumer_name = ?
-      `).run(outboxId, nowText, name);
-    } else {
-      await db.prepare(`
-        INSERT INTO cashout_outbox_consumer_state (
-          consumer_name, last_processed_outbox_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?)
-      `).run(name, outboxId, nowText, nowText);
-    }
+    // Use ON CONFLICT so the Postgres driver does not append RETURNING id
+    // (this table's PK is consumer_name, not id).
+    await db.prepare(`
+      INSERT INTO cashout_outbox_consumer_state (
+        consumer_name, last_processed_outbox_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(consumer_name) DO UPDATE SET
+        last_processed_outbox_id = excluded.last_processed_outbox_id,
+        updated_at = excluded.updated_at
+    `).run(name, outboxId, nowText, nowText);
     return { ok: true, state: await getCashoutOutboxConsumerState(name) };
   }
 

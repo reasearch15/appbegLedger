@@ -11,6 +11,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.postgres.sql');
 
 export async function migratePostgres(driver) {
+  // Existing production tables may predate Phase 1 STG columns. Add them before
+  // schema.postgres.sql runs CREATE INDEX on coadmin_uid (CREATE TABLE IF NOT EXISTS
+  // does not alter an older table shape).
+  await driver.exec(`
+    ALTER TABLE IF EXISTS support_notification_subscribers
+      ADD COLUMN IF NOT EXISTS coadmin_uid TEXT;
+    ALTER TABLE IF EXISTS support_notification_subscribers
+      ADD COLUMN IF NOT EXISTS telegram_username TEXT;
+    ALTER TABLE IF EXISTS support_notification_subscribers
+      ADD COLUMN IF NOT EXISTS telegram_display_name TEXT;
+    ALTER TABLE IF EXISTS support_notification_subscribers
+      ADD COLUMN IF NOT EXISTS linked_at TEXT;
+    ALTER TABLE IF EXISTS support_notification_subscribers
+      ADD COLUMN IF NOT EXISTS disabled_by_coadmin BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
   const schemaSql = fs.readFileSync(schemaPath, 'utf8');
   await driver.exec(schemaSql);
   await driver.exec(`
