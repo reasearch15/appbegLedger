@@ -414,6 +414,11 @@ CREATE TABLE IF NOT EXISTS support_notification_subscribers (
   telegram_chat_id TEXT NOT NULL UNIQUE,
   telegram_user_id TEXT,
   is_active INTEGER NOT NULL DEFAULT 1,
+  coadmin_uid TEXT,
+  telegram_username TEXT,
+  telegram_display_name TEXT,
+  linked_at TEXT,
+  disabled_by_coadmin INTEGER NOT NULL DEFAULT 0,
   subscribed_at TEXT NOT NULL,
   last_delivery_at TEXT,
   last_delivery_status TEXT,
@@ -424,6 +429,13 @@ CREATE TABLE IF NOT EXISTS support_notification_subscribers (
 
 CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_active
   ON support_notification_subscribers(is_active, telegram_chat_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_support_notification_subscribers_telegram_user_id
+  ON support_notification_subscribers(telegram_user_id)
+  WHERE telegram_user_id IS NOT NULL AND TRIM(telegram_user_id) != '';
+
+CREATE INDEX IF NOT EXISTS idx_support_notification_subscribers_coadmin_active
+  ON support_notification_subscribers(coadmin_uid, is_active);
 
 CREATE TABLE IF NOT EXISTS support_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

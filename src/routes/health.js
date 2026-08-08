@@ -1,6 +1,10 @@
 import { resolveDatabaseConfig } from '../db/config.js';
 import { CONVERSATION_STATUSES, DEFAULT_TAGS, REGISTRATION_STATUSES } from '../db/index.js';
 import { listenerRoles } from '../config/listeners.js';
+import {
+  CASHOUT_TELEGRAM_CONSUMER_NAME
+} from '../telegram/cashoutTelegramNotificationWorker.js';
+import { getCashoutTelegramFeatureState } from '../telegram/cashoutTelegramFeatureFlags.js';
 
 async function runCheck(name, fn) {
   try {
@@ -15,6 +19,24 @@ async function runCheck(name, fn) {
   }
 }
 
+function buildCashoutTelegramHealth(store) {
+  const state = getCashoutTelegramFeatureState(process.env);
+  return {
+    notificationsEnabled: state.notificationsEnabled,
+    claimEnabled: state.claimEnabled,
+    doneEnabled: state.doneEnabled,
+    configured: state.configured,
+    status: state.status,
+    flags: {
+      notifications: state.notificationsFlag,
+      claim: state.claimFlag,
+      done: state.doneFlag
+    },
+    warnings: state.warnings,
+    contradictions: state.contradictions
+  };
+}
+
 export function registerHealthRoutes(app, { store }) {
   app.get('/api/health', async (req, res) => {
     const dbConfig = resolveDatabaseConfig();
@@ -26,6 +48,34 @@ export function registerHealthRoutes(app, { store }) {
       store.db.prepare('SELECT COUNT(*) AS count FROM telegram_account_sync_checkpoints').get().then((row) => row?.count ?? 0),
       store.db.prepare("SELECT COUNT(*) AS count FROM sync_state WHERE key LIKE 'business_account:checkpoint:%'").get().then((row) => row?.count ?? 0)
     ]);
+
+    const cashoutTelegram = buildCashoutTelegramHealth(store);
+    let cashoutCheckpoint = null;
+    let cashoutDeliveryCounts = null;
+    try {
+      if (typeof store.getCashoutOutboxConsumerState === 'function') {
+        const state = await store.getCashoutOutboxConsumerState(CASHOUT_TELEGRAM_CONSUMER_NAME);
+        cashoutCheckpoint = Number(state?.last_processed_outbox_id || 0);
+      }
+      const failed = await store.db.prepare(`
+        SELECT COUNT(*) AS count FROM cashout_notification_deliveries
+        WHERE delivery_status IN ('failed', 'edit_failed')
+      `).get();
+      const sent = await store.db.prepare(`
+        SELECT COUNT(*) AS count FROM cashout_notification_deliveries
+        WHERE delivery_status = 'sent'
+      `).get();
+      cashoutDeliveryCounts = {
+        failedOrEditFailed: Number(failed?.count || 0),
+        sent: Number(sent?.count || 0)
+      };
+    } catch {
+      cashoutCheckpoint = null;
+      cashoutDeliveryCounts = null;
+    }
+
+    cashoutTelegram.consumerCheckpoint = cashoutCheckpoint;
+    cashoutTelegram.deliveries = cashoutDeliveryCounts;
 
     res.json({
       ok: true,
@@ -44,6 +94,7 @@ export function registerHealthRoutes(app, { store }) {
         syncCheckpoints: Number(checkpoints),
         syncStateCheckpoints: Number(syncStateCheckpoints)
       },
+      cashoutTelegram,
       telegramListenerEnabled: Boolean(process.env.TELEGRAM_BOT_TOKEN),
       conversationStatuses: CONVERSATION_STATUSES,
       registrationStatuses: REGISTRATION_STATUSES,

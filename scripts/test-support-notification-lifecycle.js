@@ -64,8 +64,20 @@ async function run() {
   const dbPath = path.join(tmp, 'test.sqlite');
   let store = await createDataStore({ dialect: 'sqlite', databasePath: dbPath });
 
-  await store.upsertSupportNotificationSubscriber({ telegramChatId: '1001', telegramUserId: 501 });
-  await store.upsertSupportNotificationSubscriber({ telegramChatId: '1002', telegramUserId: 502 });
+  await store.enrollSupportNotificationSubscriber({
+    telegramChatId: '1001',
+    telegramUserId: 501,
+    coadminUid: 'coadmin-test-1',
+    telegramUsername: 'staff01',
+    telegramDisplayName: 'Staff01'
+  });
+  await store.enrollSupportNotificationSubscriber({
+    telegramChatId: '1002',
+    telegramUserId: 502,
+    coadminUid: 'coadmin-test-1',
+    telegramUsername: 'staff02',
+    telegramDisplayName: 'Staff02'
+  });
 
   const calls = [];
   const request = await createRequest(store, 'freeplay');

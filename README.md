@@ -32,7 +32,7 @@ Owner/admin notifications from Contact Support, custom inquiries, and FreePlay a
 SUPPORT_NOTIFICATION_BOT_TOKEN=
 ```
 
-Anyone who sends `/start` to that bot is registered as an active notification subscriber. `/stop` disables notifications for that chat. There is no hardcoded owner chat ID.
+Staff enroll with a Coadmin **Staff Telegram Integration Code** (`STG-…`) after `/start`. Linked staff can `/stop` to disable notifications and `/start` again to reactivate without re-entering the code. Unlinked or legacy unscoped subscribers are not notified. There is no hardcoded owner chat ID.
 
 Personal Telegram private-chat sync is disabled at startup and in `scripts/telegram_account_sync.py`. Do not enable `TELEGRAM_ACCOUNT_SYNC_ENABLED` for user support or registration.
 
