@@ -6269,12 +6269,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const nowText = safeNow.toISOString();
     const expiredStrikeCount = await countRecentExpiredRegistrationPaymentWindows(contactId, safeNow);
     const cooldown = await getActiveRegistrationPaymentCooldown(contactId, nowText);
+    const cooldownActive = Boolean(cooldown.active);
     return {
       contact_id: Number(contactId),
       expired_strike_count: expiredStrikeCount,
-      cooldown_active: cooldown.active,
-      cooldown_until: cooldown.active ? cooldown.cooldown_until : null,
-      registration_allowed: !cooldown.active
+      cooldown_active: cooldownActive,
+      cooldown_until: cooldownActive ? cooldown.cooldown_until : null,
+      registration_allowed: !cooldownActive,
+      // Staff-facing pause fields (same source of truth as cooldown_*)
+      pause_active: cooldownActive,
+      paused_until: cooldownActive ? cooldown.cooldown_until : null,
+      pause_reason: cooldownActive ? 'repeated_missed_payment_windows' : null,
+      pause_reason_label: cooldownActive ? 'Multiple missed payment windows' : null
     };
   }
 
@@ -6290,9 +6296,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const nowText = safeNow.toISOString();
     const previousStatus = await getRegistrationPaymentPenaltyStatus(contactId, safeNow);
     const since = new Date(safeNow.getTime() - REGISTRATION_PAYMENT_COOLDOWN_LOOKBACK_MS).toISOString();
+    const originalPausedUntil = previousStatus?.paused_until || previousStatus?.cooldown_until || null;
+    const wasPaused = Boolean(previousStatus?.pause_active || previousStatus?.cooldown_active);
 
     await db.exec('BEGIN');
     try {
+      // Preserve expired-window history; only mark strikes as cleared so they stop counting.
       await db.prepare(`
         UPDATE registration_payment_windows
         SET registration_penalty_cleared_at = COALESCE(registration_penalty_cleared_at, ?),
@@ -6314,16 +6323,26 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
       await logEvent({
         telegramUserId: contactId,
-        eventType: 'registration_penalty_cleared',
-        title: 'Registration Penalty Cleared',
-        body: 'Registration payment-window penalty was cleared by an admin.',
+        eventType: 'registration_pause_revoked',
+        title: 'Registration Pause Revoked',
+        body: wasPaused
+          ? 'Temporary registration pause was revoked by staff. The player can open a new payment window immediately.'
+          : 'Staff cleared registration payment-window strikes. No active pause was in effect.',
         actorName,
         metadata: {
-          action: 'registration_penalty_cleared',
+          action: 'registration_pause_revoked',
+          // Backward-compatible alias used by older tooling/tests
+          legacyAction: 'registration_penalty_cleared',
           actorId: actorId == null ? null : Number(actorId),
           contactId: Number(contactId),
+          player: existing.username || existing.display_name || existing.telegram_id || contactId,
+          revokedBy: actorName,
+          originalReason: 'repeated_missed_payment_windows',
+          originalPausedUntil,
+          revokedAt: nowText,
           previousExpiredWindowCount: previousStatus?.expired_strike_count || 0,
-          previousCooldownExpiry: previousStatus?.cooldown_until || null,
+          previousCooldownExpiry: originalPausedUntil,
+          wasPaused,
           timestamp: nowText
         },
         createdAt: nowText

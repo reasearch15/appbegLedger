@@ -1779,7 +1779,7 @@ function detailsPanel() {
 
       ${isAdmin() ? `
       <section class="card">
-        <div class="card-title">Registration payment-window penalty</div>
+        <div class="card-title">Registration Pause</div>
         ${registrationPenaltyPanel()}
       </section>
       ` : ''}
@@ -1908,10 +1908,17 @@ function registrationPanel() {
   const source = contact.telegram_sync_source || contact.active_messaging_source || 'bot_api';
   const paymentAccount = info.payment_tag_masked
     || (info.payment_tag ? `${String(info.payment_tag).slice(0, 2)}••••${String(info.payment_tag).slice(-2)}` : '-');
+  const penalty = state.registrationPaymentPenalty || {};
+  const pauseActive = Boolean(penalty.pause_active || penalty.cooldown_active);
   return `
     ${infoRow('Source', source === 'bot_api' ? 'Bot API' : source)}
     ${infoRow('Registered', contact.registration_status === 'Registered' ? 'Yes' : 'No')}
     ${infoRow('Status', contact.registration_status || 'New')}
+    ${pauseActive ? `
+      ${infoRow('Registration Status', 'Paused')}
+      ${infoRow('Reason', penalty.pause_reason_label || 'Multiple missed payment windows')}
+      ${infoRow('Paused Until', fmtDateTime(penalty.paused_until || penalty.cooldown_until))}
+    ` : ''}
     ${infoRow('Current Step', state.automationState?.current_step || '-')}
     ${infoRow('RoyalVIP Username', info.preferred_appbeg_username || contact.appbeg_account_id || '-')}
     ${infoRow('Payment App', info.payment_method_name || info.payment_app || '-')}
@@ -1937,25 +1944,33 @@ function registrationPenaltyPanel() {
     expired_strike_count: 0,
     cooldown_active: false,
     cooldown_until: null,
-    registration_allowed: true
+    registration_allowed: true,
+    pause_active: false,
+    paused_until: null,
+    pause_reason_label: null
   };
   const clearState = state.registrationPenaltyClearState || {};
   const strikes = Number(penalty.expired_strike_count || 0);
-  const cooldownActive = Boolean(penalty.cooldown_active);
-  const canClear = strikes > 0 || cooldownActive;
+  const pauseActive = Boolean(penalty.pause_active || penalty.cooldown_active);
+  const canRevoke = pauseActive || strikes > 0;
   const clearing = Boolean(clearState.clearing);
   return `
-    ${infoRow('Expired windows in 24h', strikes)}
-    ${infoRow('Cooldown', cooldownActive ? 'Active' : 'Inactive')}
-    ${cooldownActive ? infoRow('Cooldown expires', fmtDateTime(penalty.cooldown_until)) : ''}
+    ${pauseActive ? `
+      ${infoRow('Registration Status', 'Paused')}
+      ${infoRow('Reason', penalty.pause_reason_label || 'Multiple missed payment windows')}
+      ${infoRow('Paused Until', fmtDateTime(penalty.paused_until || penalty.cooldown_until))}
+    ` : `
+      ${infoRow('Registration Status', 'Not paused')}
+    `}
+    ${infoRow('Missed windows (24h)', strikes)}
     ${infoRow('Registration allowed', penalty.registration_allowed ? 'Yes' : 'No')}
     <div class="control-grid">
       <button
         type="button"
-        class="button secondary"
+        class="button ${pauseActive ? '' : 'secondary'}"
         data-registration-penalty-action="clear"
-        ${!canClear || clearing ? 'disabled' : ''}
-      >${clearing ? 'Clearing...' : 'Clear registration penalty'}</button>
+        ${!canRevoke || clearing ? 'disabled' : ''}
+      >${clearing ? 'Resuming...' : 'Resume Registration Now'}</button>
     </div>
     ${clearState.success ? `<div class="settings-success">${escapeHtml(clearState.success)}</div>` : ''}
     ${clearState.error ? `<div class="settings-error">${escapeHtml(clearState.error)}</div>` : ''}
@@ -4348,11 +4363,9 @@ async function clearRegistrationPenalty() {
   const contactId = Number(state.selectedContactId);
   if (!contactId || state.registrationPenaltyClearState?.clearing) return;
   const proceed = window.confirm([
-    "Clear this user's registration penalty?",
+    "Resume this player's registration now?",
     '',
-    'This will reset their expired registration payment-window strikes and remove any active registration cooldown. They will be able to start registration again immediately.',
-    '',
-    'Payments, deposits, cashouts, completed registrations, and chat history will not be changed.'
+    'They will be able to open a new payment window immediately.'
   ].join('\n'));
   if (!proceed) return;
 
@@ -4368,14 +4381,14 @@ async function clearRegistrationPenalty() {
     state.registrationPenaltyClearState = {
       clearing: false,
       error: null,
-      success: 'Registration penalty cleared. This contact can start registration again immediately.'
+      success: 'Registration pause revoked. This player can open a new payment window immediately.'
     };
     contactDetailCache.delete(contactId);
-    await refreshSelectedContact({ force: true, reason: 'registration penalty cleared' });
+    await refreshSelectedContact({ force: true, reason: 'registration pause revoked' });
   } catch (error) {
     state.registrationPenaltyClearState = {
       clearing: false,
-      error: error.message || 'Could not clear registration penalty.',
+      error: error.message || 'Could not revoke registration pause.',
       success: null
     };
   }
