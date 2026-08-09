@@ -10,12 +10,15 @@ import {
   UNMATCHED_REASON
 } from '../src/payments/constants.js';
 import {
+  classifyUnmatchedPayment,
   findMatchingActivePaymentWindow,
   isEligibleActivePaymentWindow,
   windowMatchesParsed
 } from '../src/payments/paymentWindowMatcher.js';
 import { reprocessPaymentEvent, routePaymentEvent } from '../src/payments/router.js';
 import { parsePaymentMessage } from '../src/payments/parser.js';
+import { unmatchedReasonDisplay } from '../public/paymentStatus.js';
+import { paymentQrCaption } from '../src/payments/methodUtils.js';
 
 function makeWindow(overrides = {}) {
   return {
@@ -646,6 +649,84 @@ async function run() {
     assert.equal(result.unmatchedReason, UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME);
     assert.equal(store.payments.get(8).unmatched_reason, UNMATCHED_REASON.AMBIGUOUS_ABBREVIATED_NAME);
     console.log('ok ambiguous surname-initial windows go to manual review');
+  }
+
+  // Exact amount matches; nearby amounts do not
+  {
+    const window = makeWindow({
+      id: 401,
+      payment_display_name: 'John Smith',
+      first_deposit_amount: 5.5,
+      expected_payment_cents: 550
+    });
+    const exact = parsePaymentMessage(paymentText('John Smith', '5.50'));
+    const rounded = parsePaymentMessage(paymentText('John Smith', '5.00'));
+    const low = parsePaymentMessage(paymentText('John Smith', '5.49'));
+    const high = parsePaymentMessage(paymentText('John Smith', '5.51'));
+    assert.equal(findMatchingActivePaymentWindow([window], exact).result, 'exact_match');
+    assert.equal(findMatchingActivePaymentWindow([window], rounded).result, 'no_match');
+    assert.equal(findMatchingActivePaymentWindow([window], low).result, 'no_match');
+    assert.equal(findMatchingActivePaymentWindow([window], high).result, 'no_match');
+    console.log('ok exact $5.50 matches and nearby amounts do not');
+  }
+
+  // Admin amount-mismatch diagnostics show received vs expected
+  {
+    const window = makeWindow({
+      id: 402,
+      payment_display_name: 'John Smith',
+      first_deposit_amount: 5.5,
+      expected_payment_cents: 550
+    });
+    const parsed = parsePaymentMessage(paymentText('John Smith', '5.00'));
+    const classification = classifyUnmatchedPayment({ activeWindows: [window], parsed });
+    assert.equal(classification.reason, UNMATCHED_REASON.AMOUNT_MISMATCH);
+    assert.match(classification.detail, /Amount mismatch/);
+    assert.match(classification.detail, /Received: \$5\.00/);
+    assert.match(classification.detail, /Expected: \$5\.50/);
+    assert.equal(classification.expectedAmount, 5.5);
+    console.log('ok amount-mismatch detail shows received vs expected');
+  }
+
+  // Router persists amount_mismatch (not no_active_window) when active window amount differs
+  {
+    const windows = [makeWindow({
+      id: 403,
+      payment_display_name: 'John Smith',
+      first_deposit_amount: 5.5,
+      expected_payment_cents: 550
+    })];
+    const store = createRouterStore({ windows });
+    store.payments.set(9, {
+      id: 9,
+      message_text: paymentText('John Smith', '5.00'),
+      telegram_group_id: 'g1',
+      telegram_message_id: 9,
+      message_date: new Date().toISOString(),
+      routed_at: null,
+      routing_status: 'unrouted'
+    });
+    const result = await routePaymentEvent(store, 9);
+    assert.equal(result.outcome, ROUTING_STATUS.SEARCHING);
+    assert.equal(result.unmatchedReason, UNMATCHED_REASON.AMOUNT_MISMATCH);
+    assert.equal(store.payments.get(9).unmatched_reason, UNMATCHED_REASON.AMOUNT_MISMATCH);
+    assert.match(String(store.payments.get(9).routing_reason || ''), /Received: \$5\.00/);
+    assert.match(String(store.payments.get(9).routing_reason || ''), /Expected: \$5\.50/);
+    assert.match(unmatchedReasonDisplay(store.payments.get(9)), /Expected: \$5\.50/);
+    console.log('ok router stores amount_mismatch diagnostics for staff');
+  }
+
+  // Player QR warning uses the same dynamic expected amount
+  {
+    const caption = paymentQrCaption({
+      paymentMethodName: 'Chime',
+      firstDepositAmount: 5.5,
+      paymentDisplayName: 'John Smith'
+    });
+    assert.match(caption, /YOUR EXACT PAYMENT AMOUNT: \$5\.50/);
+    assert.match(caption, /Please send exactly \$5\.50/);
+    assert.match(caption, /❌ \$5\.00 — Wrong/);
+    console.log('ok player warning contains the dynamically expected amount');
   }
 
   console.log('ALL ACTIVE-WINDOW MATCHER CHECKS PASSED');

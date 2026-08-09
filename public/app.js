@@ -25,7 +25,8 @@ import {
   formatFreezeCountdown,
   MATCHING_STATUS,
   resolvePaymentFreezeAt,
-  reviewReasonLabel
+  reviewReasonLabel,
+  unmatchedReasonDisplay
 } from './paymentStatus.js';
 import { createOngoingController } from './ongoing.js';
 
@@ -2185,7 +2186,10 @@ function paymentDetailPanel() {
         ${infoRow('Handled By', payment.handled_by || '-')}
         ${infoRow('Matched Contact', payment.contact_id || '-')}
         ${infoRow('Payment Window', payment.registration_payment_window_id || payment.matched_window_id || '-')}
-        ${infoRow('Unmatched Reason', payment.unmatched_reason || '-')}
+        <div class="info-row"><span>Unmatched Reason</span><strong style="white-space:pre-line">${escapeHtml(unmatchedReasonDisplay(payment))}</strong></div>
+        ${payment.unmatched_reason && !String(unmatchedReasonDisplay(payment)).includes(String(payment.unmatched_reason))
+    ? infoRow('Unmatched Code', payment.unmatched_reason)
+    : ''}
         ${infoRow('Sender', payment.sender_name || payment.sender_username || 'Unknown')}
         ${infoRow('Timestamp', fmtDateTime(payment.message_date))}
         ${infoRow('Group', payment.telegram_group_title || payment.telegram_group_id)}
@@ -2223,7 +2227,9 @@ function paymentDetailPanel() {
           ${infoRow('Flow Type', window.flow_type || 'registration')}
           ${infoRow('Contact', window.contact_id)}
           ${infoRow('Display Name', window.payment_display_name || '-')}
-          ${infoRow('Expected Amount', window.first_deposit_amount != null ? `$${window.first_deposit_amount}` : '-')}
+          ${infoRow('Expected Amount', window.expected_payment_cents != null
+    ? `$${(Number(window.expected_payment_cents) / 100).toFixed(2)}`
+    : (window.first_deposit_amount != null ? `$${window.first_deposit_amount}` : '-'))}
           ${infoRow('Window Status', window.status)}
           ${infoRow('Matched Payment Event', window.matched_payment_event_id || '-')}
           ${infoRow('Created', window.created_at ? fmtDateTime(window.created_at) : '-')}

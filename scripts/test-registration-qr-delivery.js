@@ -130,17 +130,34 @@ async function run() {
   const { filePath } = createTempPng();
   const relativePath = path.relative(process.cwd(), filePath).split(path.sep).join('/');
 
-  // Caption includes payment name + $amount
+  // Caption includes exact-amount warning + $amount from the required payment
   const caption = paymentQrCaption({
     paymentMethodName: 'Chime',
-    firstDepositAmount: 9,
+    firstDepositAmount: 5.5,
     paymentDisplayName: 'Amy fei'
   });
-  assert.match(caption, /Please send \$9 using the QR code above/);
+  assert.match(caption, /YOUR EXACT PAYMENT AMOUNT: \$5\.50/);
+  assert.match(caption, /Please send exactly \$5\.50/);
+  assert.match(caption, /SEND THE EXACT AMOUNT/);
+  assert.match(caption, /✅ \$5\.50 — Correct/);
+  assert.match(caption, /❌ \$5\.00 — Wrong/);
+  assert.match(caption, /❌ \$5\.49 — Wrong/);
+  assert.match(caption, /❌ \$5\.51 — Wrong/);
   assert.match(caption, /Payment Name: Amy fei/);
-  assert.match(caption, /Amount: \$9/);
+  assert.match(caption, /Amount: \$5\.50/);
   assert.match(caption, /7 minutes/);
-  console.log('ok caption includes payment name and amount');
+  assert.doesNotMatch(caption, /non-zero cents|payment window|matching algorithm/i);
+  console.log('ok caption warns to send the exact dynamic amount');
+
+  const depositCaption = paymentQrCaption({
+    paymentMethodName: 'Chime',
+    firstDepositAmount: 10,
+    paymentDisplayName: 'Amy fei',
+    flowType: 'deposit'
+  });
+  assert.match(depositCaption, /YOUR EXACT PAYMENT AMOUNT: \$10\.00/);
+  assert.match(depositCaption, /Please send exactly \$10\.00/);
+  console.log('ok deposit caption also shows exact amount');
 
   // Local filesystem resolve
   const local = resolvePaymentQrTelegramInput(filePath);

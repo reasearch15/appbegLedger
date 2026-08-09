@@ -37,7 +37,7 @@ export const MANUAL_REVIEW_REASON_LABELS = {
   no_active_window: 'No active matching window',
   window_expired: 'Payment window expired',
   amount_mismatch: 'Amount mismatch',
-  name_mismatch: 'Name mismatch',
+  name_mismatch: 'Payment name mismatch',
   unsupported_payment_method: 'Unsupported payment method'
 };
 

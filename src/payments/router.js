@@ -17,7 +17,7 @@ import {
   shouldAutoIgnore
 } from './messageClassifier.js';
 import {
-  classifyUnmatchedReason,
+  classifyUnmatchedPayment,
   findMatchingActivePaymentWindow,
   isDepositWindow,
   isRegistrationWindow
@@ -38,6 +38,7 @@ function isTerminalRouted(payment) {
 async function freezePayment(store, payment, {
   reason,
   unmatchedReason,
+  unmatchedDetail = null,
   contactId = null,
   windowId = null,
   metadata = {}
@@ -51,7 +52,7 @@ async function freezePayment(store, payment, {
   await store.updatePaymentRouting(payment.id, {
     routing_status: routingStatus,
     routing_owner: ROUTING_OWNER.APPBEG,
-    routing_reason: reason,
+    routing_reason: unmatchedDetail || reason,
     contact_id: contactId,
     registration_payment_window_id: windowId,
     routed_at: new Date().toISOString(),
@@ -62,9 +63,10 @@ async function freezePayment(store, payment, {
   await store.logPaymentRouting(
     payment.id,
     isAmbiguous ? 'payment_manual_review' : 'payment_frozen',
-    reason,
+    unmatchedDetail || reason,
     {
       unmatchedReason,
+      unmatchedDetail,
       status: isAmbiguous ? 'manual_review' : 'frozen',
       ...metadata
     }
@@ -73,7 +75,8 @@ async function freezePayment(store, payment, {
     ok: true,
     payment: await store.getPaymentEvent(payment.id),
     outcome: routingStatus,
-    unmatchedReason
+    unmatchedReason,
+    unmatchedDetail
   };
 }
 
@@ -137,24 +140,26 @@ async function notifyUnselectedDepositCandidates(store, payment, windows = [], {
   }
 }
 
-async function keepSearching(store, payment, { freezeAt, unmatchedReason, metadata = {} }) {
+async function keepSearching(store, payment, { freezeAt, unmatchedReason, unmatchedDetail = null, metadata = {} }) {
   const nextFreezeAt = freezeAt || payment.freeze_at || computePaymentFreezeAt(payment.message_date || payment.created_at || new Date());
+  const reasonCode = unmatchedReason || UNMATCHED_REASON.NO_ACTIVE_WINDOW;
   console.log(
-    `[payment-router] payment_searching payment=${payment.id} freeze_at=${nextFreezeAt} reason=${unmatchedReason || 'no_active_window'}`
+    `[payment-router] payment_searching payment=${payment.id} freeze_at=${nextFreezeAt} reason=${reasonCode}`
   );
   await store.updatePaymentRouting(payment.id, {
     routing_status: ROUTING_STATUS.SEARCHING,
     routing_owner: ROUTING_OWNER.APPBEG,
-    routing_reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+    routing_reason: unmatchedDetail || ROUTING_REASON.NO_ACTIVE_WINDOW,
     contact_id: null,
     registration_payment_window_id: null,
     routed_at: null,
     handled_by: null,
     freeze_at: nextFreezeAt,
-    unmatched_reason: unmatchedReason || UNMATCHED_REASON.NO_ACTIVE_WINDOW
+    unmatched_reason: reasonCode
   });
-  await store.logPaymentRouting(payment.id, 'payment_searching', 'No eligible active payment window yet; continuing search until freeze_at.', {
-    unmatchedReason,
+  await store.logPaymentRouting(payment.id, 'payment_searching', unmatchedDetail || 'No eligible active payment window yet; continuing search until freeze_at.', {
+    unmatchedReason: reasonCode,
+    unmatchedDetail,
     freezeAt: nextFreezeAt,
     status: 'searching',
     ...metadata
@@ -163,7 +168,8 @@ async function keepSearching(store, payment, { freezeAt, unmatchedReason, metada
     ok: true,
     payment: await store.getPaymentEvent(payment.id),
     outcome: ROUTING_STATUS.SEARCHING,
-    unmatchedReason,
+    unmatchedReason: reasonCode,
+    unmatchedDetail,
     freezeAt: nextFreezeAt
   };
 }
@@ -570,23 +576,40 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
 
   // No eligible active window. Keep searching until freeze_at; never auto-match expired/history.
   const freezeAt = payment.freeze_at || computePaymentFreezeAt(payment.message_date || payment.created_at || now);
-  const unmatchedReason = classifyUnmatchedReason({
+  const unmatched = classifyUnmatchedPayment({
     activeWindows: match.eligibleWindows || activeWindows,
-    parsed
+    parsed,
+    now
   });
+  const unmatchedReason = unmatched.reason;
+  const unmatchedDetail = unmatched.detail;
   console.log('[payment-router] payment_window_no_match', JSON.stringify({
     ...baseMatchLog,
     matchingMethod: 'no_match',
     unmatchedReason,
-    eligibleWindowCount: (match.eligibleWindows || activeWindows || []).length
+    unmatchedDetail,
+    eligibleWindowCount: (match.eligibleWindows || activeWindows || []).length,
+    expectedAmount: unmatched.expectedAmount,
+    candidateWindowId: unmatched.candidateWindow?.id ?? null
   }));
 
   if (hasSearchExpired({ freeze_at: freezeAt }, now)) {
+    const freezeReason = unmatchedReason === UNMATCHED_REASON.AMOUNT_MISMATCH
+      ? (unmatchedDetail || 'Amount mismatch')
+      : unmatchedReason === UNMATCHED_REASON.NAME_MISMATCH
+        ? (unmatchedDetail || 'Payment name mismatch')
+        : unmatchedReason === UNMATCHED_REASON.WINDOW_EXPIRED
+          ? (unmatchedDetail || ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED)
+          : ROUTING_REASON.NO_ACTIVE_WINDOW;
     return freezePayment(store, payment, {
-      reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+      reason: freezeReason,
       unmatchedReason,
+      unmatchedDetail,
+      contactId: unmatched.candidateWindow?.contact_id ?? null,
+      windowId: unmatched.candidateWindow?.id ?? null,
       metadata: {
         amount: parsed.amount,
+        expectedAmount: unmatched.expectedAmount,
         paymentApp: parsed.payment_app,
         senderName: parsed.payment_sender_name,
         freezeAt
@@ -597,8 +620,10 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   return keepSearching(store, payment, {
     freezeAt,
     unmatchedReason,
+    unmatchedDetail,
     metadata: {
       amount: parsed.amount,
+      expectedAmount: unmatched.expectedAmount,
       paymentApp: parsed.payment_app,
       senderName: parsed.payment_sender_name
     }

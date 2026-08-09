@@ -68,22 +68,76 @@ export function parsePaymentMethodSelection(text, methods = []) {
   return null;
 }
 
+/**
+ * Format a payment amount with a $ and exactly two decimal places.
+ * Used for exact-amount player warnings (must match matcher cents).
+ */
+export function formatExactPaymentAmount(amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) return null;
+  const cents = Math.round(value * 100);
+  if (!Number.isSafeInteger(cents)) return null;
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/**
+ * Prominent player-facing warning: send the exact required amount.
+ * `amount` must be the same value stored on the payment window / used by the matcher.
+ */
+export function exactPaymentAmountWarning(amount) {
+  const money = formatExactPaymentAmount(amount);
+  if (!money) return null;
+  const cents = Math.round(Number(amount) * 100);
+  const examples = [];
+  const seen = new Set([money]);
+  const pushWrong = (value) => {
+    const formatted = formatExactPaymentAmount(value);
+    if (!formatted || seen.has(formatted)) return;
+    seen.add(formatted);
+    examples.push(`❌ ${formatted} — Wrong`);
+  };
+  pushWrong(Math.floor(Number(amount)));
+  pushWrong((cents - 1) / 100);
+  pushWrong((cents + 1) / 100);
+  return [
+    '⚠️ IMPORTANT — SEND THE EXACT AMOUNT',
+    '',
+    `Please send exactly ${money}.`,
+    '',
+    'Do not round or change the amount.',
+    'Even a $0.01 difference may prevent your payment from being matched and loaded automatically.',
+    '',
+    'Example:',
+    `✅ ${money} — Correct`,
+    ...examples
+  ].join('\n');
+}
+
 export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName, flowType = 'registration', creditedDepositAmount = null }) {
-  const amount = formatDepositAmount(firstDepositAmount);
-  const money = amount.startsWith('$') ? amount : `$${amount}`;
-  const credited = creditedDepositAmount == null ? null : formatDepositAmount(creditedDepositAmount);
-  const creditedMoney = credited ? (credited.startsWith('$') ? credited : `$${credited}`) : null;
+  const money = formatExactPaymentAmount(firstDepositAmount)
+    || (() => {
+      const amount = formatDepositAmount(firstDepositAmount);
+      return amount.startsWith('$') ? amount : `$${amount}`;
+    })();
+  const creditedMoney = creditedDepositAmount == null
+    ? null
+    : (formatExactPaymentAmount(creditedDepositAmount) || (() => {
+      const credited = formatDepositAmount(creditedDepositAmount);
+      return credited.startsWith('$') ? credited : `$${credited}`;
+    })());
   const closing = flowType === 'deposit'
     ? 'We will automatically verify your payment and credit your deposit.'
     : 'We will automatically verify your payment and continue your registration.';
   const registrationCreditLines = flowType === 'deposit' || !creditedMoney
     ? []
-    : [
-      `Balance credit after verification: ${creditedMoney}`,
-      'The cents identify your payment; your balance is rounded up.'
-    ];
+    : [`Balance credit after verification: ${creditedMoney}`];
+  const exactWarning = exactPaymentAmountWarning(firstDepositAmount);
   return [
-    `Please send ${money} using the QR code above.`,
+    `💰 YOUR EXACT PAYMENT AMOUNT: ${money}`,
+    '',
+    `Please send exactly ${money} using the payment information below.`,
+    '',
+    exactWarning,
     '',
     `Payment Name: ${paymentDisplayName || '-'}`,
     `Amount: ${money}`,
@@ -91,7 +145,7 @@ export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymen
     '',
     'You have 7 minutes to complete your payment.',
     closing
-  ].join('\n');
+  ].filter((line, index, lines) => !(line === '' && lines[index - 1] === '')).join('\n');
 }
 
 export function formatDepositAmount(amount) {

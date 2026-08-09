@@ -13,7 +13,9 @@ import {
 import {
   formatFreezeCountdown,
   renderPaymentStatusCell,
-  resolvePaymentFreezeAt
+  resolvePaymentFreezeAt,
+  unmatchedReasonDisplay,
+  paymentStatusDetailCopy
 } from '../public/paymentStatus.js';
 import {
   shouldShowPaymentTopScrollbar,
@@ -71,6 +73,18 @@ function run() {
     routing_status: 'manual_review',
     unmatched_reason: 'ambiguous_match'
   }, now), MATCHING_STATUS.MANUAL_REVIEW);
+
+  // Amount mismatch staff diagnostics (not "no active window")
+  const amountMismatchPayment = {
+    routing_status: 'frozen',
+    unmatched_reason: 'amount_mismatch',
+    routing_reason: 'Amount mismatch\nReceived: $5.00\nExpected: $5.50'
+  };
+  assert.equal(deriveMatchingStatus(amountMismatchPayment, now), MATCHING_STATUS.FROZEN);
+  assert.match(unmatchedReasonDisplay(amountMismatchPayment), /Received: \$5\.00/);
+  assert.match(unmatchedReasonDisplay(amountMismatchPayment), /Expected: \$5\.50/);
+  assert.match(paymentStatusDetailCopy(amountMismatchPayment), /Expected: \$5\.50/);
+  assert.doesNotMatch(paymentStatusDetailCopy(amountMismatchPayment), /No active matching registration/);
 
   // Sort priority
   assert.ok(MATCHING_STATUS_SORT_PRIORITY.searching < MATCHING_STATUS_SORT_PRIORITY.manual_review);

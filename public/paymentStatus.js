@@ -179,7 +179,11 @@ const REVIEW_REASON_LABELS = {
   duplicate_payment: 'Duplicate payment',
   parser_exception: 'Parser exception',
   invalid_payment_app: 'Invalid payment app',
-  staff_review_requested: 'Staff review requested'
+  staff_review_requested: 'Staff review requested',
+  no_active_window: 'No active matching window',
+  window_expired: 'Payment window expired',
+  amount_mismatch: 'Amount mismatch',
+  name_mismatch: 'Payment name mismatch'
 };
 
 export function reviewReasonLabel(reason) {
@@ -187,9 +191,27 @@ export function reviewReasonLabel(reason) {
   return REVIEW_REASON_LABELS[reason] || String(reason).replace(/_/g, ' ');
 }
 
+/**
+ * Staff-facing unmatched reason with received/expected detail when available.
+ * Prefers routing_reason when it already contains a structured mismatch detail.
+ */
+export function unmatchedReasonDisplay(payment = {}) {
+  const code = payment.unmatched_reason || null;
+  const routingReason = String(payment.routing_reason || '').trim();
+  if (routingReason && /Received:\s*\$/i.test(routingReason)) {
+    return routingReason;
+  }
+  if (!code) return routingReason || '-';
+  if (code === 'amount_mismatch' && routingReason) return routingReason;
+  if (code === 'name_mismatch' && routingReason) return routingReason;
+  if (code === 'window_expired' && routingReason) return routingReason;
+  return reviewReasonLabel(code);
+}
+
 export function paymentStatusDetailCopy(payment = {}) {
   const status = deriveMatchingStatus(payment);
   const flow = payment.flow_type || payment.window_flow_type;
+  const unmatched = payment.unmatched_reason || null;
   if (status === MATCHING_STATUS.MATCHED) {
     if (flow === 'deposit') return 'Deposit accepted. Waiting for remaining processing if applicable.';
     return 'Payment verified. Registration continues.';
@@ -199,12 +221,24 @@ export function paymentStatusDetailCopy(payment = {}) {
     return 'Registration payment completed.';
   }
   if (status === MATCHING_STATUS.FROZEN) {
+    if (unmatched === 'amount_mismatch') {
+      return unmatchedReasonDisplay(payment) || 'Active window found, but the payment amount did not match.';
+    }
+    if (unmatched === 'name_mismatch') {
+      return unmatchedReasonDisplay(payment) || 'Active window found, but the payment name did not match.';
+    }
+    if (unmatched === 'window_expired') {
+      return unmatchedReasonDisplay(payment) || 'A matching payment window had already expired.';
+    }
     return 'No active matching registration or deposit window was found.';
   }
   if (status === MATCHING_STATUS.MANUAL_REVIEW) {
     return 'Multiple active matching windows';
   }
   if (status === MATCHING_STATUS.SEARCHING) {
+    if (unmatched === 'amount_mismatch') {
+      return unmatchedReasonDisplay(payment) || 'Still searching — amount does not match an active window.';
+    }
     return 'Still inside the automatic matching window.';
   }
   return payment.routing_reason || '—';

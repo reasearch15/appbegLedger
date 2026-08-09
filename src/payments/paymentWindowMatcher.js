@@ -1,5 +1,6 @@
-import { amountCents, amountsExactlyMatch, normalizePaymentName, paymentAppsMatch, paymentNameMatchMethod, paymentNamesMatch } from './matchUtils.js';
+import { amountCents, normalizePaymentName, paymentAppsMatch, paymentNameMatchMethod, paymentNamesMatch } from './matchUtils.js';
 import { PAYMENT_WINDOW_FLOW, UNMATCHED_REASON } from './constants.js';
+import { formatExactPaymentAmount } from './methodUtils.js';
 
 const ELIGIBLE_FLOW_TYPES = new Set([
   PAYMENT_WINDOW_FLOW.REGISTRATION,
@@ -29,12 +30,71 @@ export function isEligibleActivePaymentWindow(window, { now = new Date() } = {})
   return true;
 }
 
-function windowAmountMatchesParsed(window, parsed) {
+export function windowExpectedAmountCents(window) {
+  if (!window) return null;
   if (window.expected_payment_cents != null && window.expected_payment_cents !== '') {
     const expectedCents = Number(window.expected_payment_cents);
-    return Number.isSafeInteger(expectedCents) && expectedCents === amountCents(parsed.amount);
+    if (Number.isSafeInteger(expectedCents)) return expectedCents;
   }
-  return amountsExactlyMatch(window.first_deposit_amount, parsed.amount);
+  return amountCents(window.first_deposit_amount);
+}
+
+function windowAmountMatchesParsed(window, parsed) {
+  const expectedCents = windowExpectedAmountCents(window);
+  if (expectedCents == null) return false;
+  return expectedCents === amountCents(parsed.amount);
+}
+
+function formatMoneyFromCents(cents) {
+  if (!Number.isSafeInteger(cents)) return null;
+  return formatExactPaymentAmount(cents / 100);
+}
+
+function pickClosestAmountWindow(windows, parsed) {
+  const receivedCents = amountCents(parsed?.amount);
+  if (!Number.isSafeInteger(receivedCents) || !windows?.length) return windows?.[0] || null;
+  let best = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const window of windows) {
+    const expectedCents = windowExpectedAmountCents(window);
+    if (!Number.isSafeInteger(expectedCents)) continue;
+    const delta = Math.abs(expectedCents - receivedCents);
+    if (delta < bestDelta) {
+      best = window;
+      bestDelta = delta;
+    }
+  }
+  return best || windows[0];
+}
+
+/**
+ * Staff-facing unmatched detail for amount mismatches.
+ * Example:
+ *   Amount mismatch
+ *   Received: $5.00
+ *   Expected: $5.50
+ */
+export function formatAmountMismatchDetail(parsed, window) {
+  const received = formatExactPaymentAmount(parsed?.amount)
+    || formatMoneyFromCents(amountCents(parsed?.amount))
+    || '-';
+  const expectedCents = windowExpectedAmountCents(window);
+  const expected = formatMoneyFromCents(expectedCents)
+    || formatExactPaymentAmount(window?.first_deposit_amount)
+    || '-';
+  return [
+    'Amount mismatch',
+    `Received: ${received}`,
+    `Expected: ${expected}`
+  ].join('\n');
+}
+
+export function formatNameMismatchDetail(parsed, window) {
+  return [
+    'Payment name mismatch',
+    `Received: ${parsed?.payment_sender_name || '-'}`,
+    `Expected: ${window?.payment_display_name || '-'}`
+  ].join('\n');
 }
 
 /**
@@ -111,23 +171,122 @@ export function findMatchingActivePaymentWindow(windows = [], parsed, { now = ne
   return { result: 'no_match', window: null, windows: [], eligibleWindows, matchMethod: 'no_match' };
 }
 
-export function classifyUnmatchedReason({
+/**
+ * Classify why a payment did not auto-match.
+ * Returns a structured result so staff UI can show received vs expected amounts.
+ */
+export function classifyUnmatchedPayment({
   activeWindows = [],
-  parsed = null
+  parsed = null,
+  now = new Date()
 } = {}) {
-  if (!parsed) return UNMATCHED_REASON.NO_ACTIVE_WINDOW;
+  const empty = {
+    reason: UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+    detail: null,
+    candidateWindow: null,
+    receivedAmount: parsed?.amount ?? null,
+    expectedAmount: null
+  };
+  if (!parsed) return empty;
 
-  const eligible = (activeWindows || []).filter((window) => isEligibleActivePaymentWindow(window));
+  const eligible = (activeWindows || []).filter((window) => isEligibleActivePaymentWindow(window, { now }));
+  if (!eligible.length) {
+    const expiredNameHits = (activeWindows || []).filter((window) => {
+      const expiresAt = new Date(window?.expires_at).getTime();
+      const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+      const expired = Number.isFinite(expiresAt) && Number.isFinite(nowMs) && expiresAt <= nowMs;
+      const unmatched = window?.matched_payment_event_id == null || window.matched_payment_event_id === '';
+      const flowType = window?.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+      return expired
+        && unmatched
+        && ELIGIBLE_FLOW_TYPES.has(flowType)
+        && paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name);
+    });
+    if (expiredNameHits.length) {
+      const candidate = pickClosestAmountWindow(expiredNameHits, parsed);
+      return {
+        reason: UNMATCHED_REASON.WINDOW_EXPIRED,
+        detail: [
+          'Payment window expired',
+          `Received: ${formatExactPaymentAmount(parsed.amount) || '-'}`,
+          `Expected: ${formatMoneyFromCents(windowExpectedAmountCents(candidate)) || formatExactPaymentAmount(candidate?.first_deposit_amount) || '-'}`
+        ].join('\n'),
+        candidateWindow: candidate,
+        receivedAmount: parsed.amount ?? null,
+        expectedAmount: candidate?.first_deposit_amount ?? null
+      };
+    }
+    return empty;
+  }
+
   const nameHits = eligible.filter((window) => (
     paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name)
   ));
-  const amountHits = eligible.filter((window) => (
-    windowAmountMatchesParsed(window, parsed)
+  const amountHits = eligible.filter((window) => windowAmountMatchesParsed(window, parsed));
+  const nameHitsWithAmount = nameHits.filter((window) => windowAmountMatchesParsed(window, parsed));
+  const amountHitsWithName = amountHits.filter((window) => (
+    paymentNamesMatch(window.payment_display_name, parsed.payment_sender_name)
   ));
 
-  if (nameHits.length && !amountHits.length) return UNMATCHED_REASON.AMOUNT_MISMATCH;
-  if (amountHits.length && !nameHits.length) return UNMATCHED_REASON.NAME_MISMATCH;
-  return UNMATCHED_REASON.NO_ACTIVE_WINDOW;
+  // Name matched an active window, but none of those windows have the exact amount.
+  if (nameHits.length && !nameHitsWithAmount.length) {
+    const candidate = pickClosestAmountWindow(nameHits, parsed);
+    const expectedCents = windowExpectedAmountCents(candidate);
+    return {
+      reason: UNMATCHED_REASON.AMOUNT_MISMATCH,
+      detail: formatAmountMismatchDetail(parsed, candidate),
+      candidateWindow: candidate,
+      receivedAmount: parsed.amount ?? null,
+      expectedAmount: Number.isSafeInteger(expectedCents) ? expectedCents / 100 : (candidate?.first_deposit_amount ?? null)
+    };
+  }
+
+  // Amount matched an active window, but payment name did not.
+  if (amountHits.length && !amountHitsWithName.length) {
+    const candidate = amountHits[0];
+    return {
+      reason: UNMATCHED_REASON.NAME_MISMATCH,
+      detail: formatNameMismatchDetail(parsed, candidate),
+      candidateWindow: candidate,
+      receivedAmount: parsed.amount ?? null,
+      expectedAmount: candidate?.first_deposit_amount ?? null
+    };
+  }
+
+  // Single active window with a different amount (even if name also differs).
+  if (eligible.length === 1 && !windowAmountMatchesParsed(eligible[0], parsed)) {
+    const candidate = eligible[0];
+    const expectedCents = windowExpectedAmountCents(candidate);
+    return {
+      reason: UNMATCHED_REASON.AMOUNT_MISMATCH,
+      detail: formatAmountMismatchDetail(parsed, candidate),
+      candidateWindow: candidate,
+      receivedAmount: parsed.amount ?? null,
+      expectedAmount: Number.isSafeInteger(expectedCents) ? expectedCents / 100 : (candidate?.first_deposit_amount ?? null)
+    };
+  }
+
+  // Active windows exist but nothing is a clear full match — prefer amount diagnostics when amounts differ.
+  if (eligible.length) {
+    const candidate = pickClosestAmountWindow(eligible, parsed);
+    const expectedCents = windowExpectedAmountCents(candidate);
+    if (candidate && !windowAmountMatchesParsed(candidate, parsed)) {
+      return {
+        reason: UNMATCHED_REASON.AMOUNT_MISMATCH,
+        detail: formatAmountMismatchDetail(parsed, candidate),
+        candidateWindow: candidate,
+        receivedAmount: parsed.amount ?? null,
+        expectedAmount: Number.isSafeInteger(expectedCents) ? expectedCents / 100 : (candidate?.first_deposit_amount ?? null)
+      };
+    }
+  }
+
+  return empty;
+}
+
+/** Back-compat wrapper: returns reason code string only. */
+export function classifyUnmatchedReason(args = {}) {
+  return classifyUnmatchedPayment(args).reason;
 }
 
 export function isRegistrationWindow(window) {

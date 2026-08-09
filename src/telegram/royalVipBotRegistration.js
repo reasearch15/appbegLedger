@@ -17,7 +17,7 @@ import {
   validateAppBegPassword,
   validateAppBegUsername
 } from '../registration/appbegValidation.js';
-import { formatDepositAmount } from '../payments/methodUtils.js';
+import { formatDepositAmount, formatExactPaymentAmount } from '../payments/methodUtils.js';
 import {
   BOT_REGISTRATION_FLOW,
   clearedBotRegistrationInfo,
@@ -136,6 +136,18 @@ function buildSendPaymentQrPayload(info, qrSource, amount, creditAmount = null) 
     firstDepositAmount: amount,
     creditedDepositAmount: creditAmount
   };
+}
+
+function registrationExpectedPaymentAmount(info = {}) {
+  if (info.first_deposit_amount != null && info.first_deposit_amount !== '') {
+    return info.first_deposit_amount;
+  }
+  if (info.requested_deposit_amount != null && info.requested_deposit_amount !== '') {
+    return info.requested_deposit_amount;
+  }
+  const cents = Number(info.registration_payment_cents);
+  if (Number.isSafeInteger(cents)) return cents / 100;
+  return null;
 }
 
 function flowReminder(promptText, info, step, buttons = registrationNavButtons()) {
@@ -639,32 +651,43 @@ export async function continueRoyalVipRegistration({
       };
     }
     if (text && !isCasualOffTopicMessage(text) && !/^(done|paid|i have paid)$/i.test(text)) {
+      const money = formatExactPaymentAmount(registrationExpectedPaymentAmount(info));
       return {
         kind: 'registration_waiting_payment',
         replies: [{
           text: [
             'We are still waiting to verify your payment.',
+            money ? '' : null,
+            money ? `💰 YOUR EXACT PAYMENT AMOUNT: ${money}` : null,
+            money ? `Please send exactly ${money}. Do not round or change the amount.` : null,
+            '',
             'No further questions are needed right now.',
             'We will continue automatically once payment is verified.'
-          ].join('\n'),
+          ].filter((line) => line != null).join('\n'),
           buttons: cancelButtons
         }],
         statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
         escalate: false
       };
     }
-    return {
-      kind: 'registration_waiting_payment',
-      replies: [{
-        text: [
-          'We will automatically verify your payment and continue your registration.',
-          'Please complete the QR payment within 7 minutes.'
-        ].join('\n'),
-        buttons: cancelButtons
-      }],
-      statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
-      escalate: false
-    };
+    {
+      const money = formatExactPaymentAmount(registrationExpectedPaymentAmount(info));
+      return {
+        kind: 'registration_waiting_payment',
+        replies: [{
+          text: [
+            money ? `💰 YOUR EXACT PAYMENT AMOUNT: ${money}` : null,
+            money ? `Please send exactly ${money}. Do not round or change the amount.` : null,
+            money ? '' : null,
+            'We will automatically verify your payment and continue your registration.',
+            'Please complete the QR payment within 7 minutes.'
+          ].filter((line) => line != null).join('\n'),
+          buttons: cancelButtons
+        }],
+        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
+        escalate: false
+      };
+    }
   }
 
   if (normalizedStep === 'username') {

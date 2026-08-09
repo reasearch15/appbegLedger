@@ -8,7 +8,7 @@ import {
   MIN_REGISTRATION_DEPOSIT,
   parseMoneyToCents
 } from '../registration/utils.js';
-import { formatDepositAmount } from '../payments/methodUtils.js';
+import { formatDepositAmount, formatExactPaymentAmount } from '../payments/methodUtils.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 import { resolveRegistrationDefaultQr } from './royalVipBotRegistration.js';
 import { registeredMenuButtons } from './botRegistrationState.js';
@@ -216,12 +216,17 @@ export async function normalizeRegisteredDepositAttempt(store, contactId, info =
 
 function resumeActiveDepositDecision(activeWindow, info = {}) {
   const amount = activeWindow.first_deposit_amount ?? info.deposit_requested_amount;
+  const money = formatExactPaymentAmount(amount) || `$${formatDepositAmount(amount)}`;
   return {
     kind: 'deposit_waiting_payment',
     replies: [{
       text: [
         'We are waiting to verify your deposit payment.',
-        `Amount: $${formatDepositAmount(amount)}`,
+        '',
+        `💰 YOUR EXACT PAYMENT AMOUNT: ${money}`,
+        `Please send exactly ${money}.`,
+        'Do not round or change the amount.',
+        '',
         'You have 7 minutes from when the QR was sent.',
         'We will confirm automatically once payment is verified.'
       ].join('\n'),
