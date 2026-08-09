@@ -4746,12 +4746,19 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     const requestedCents = amount == null
       ? windowExpectedCents
       : parseMoneyToCents(String(amount));
+    // Player coin credit (may be rounded up for registration, e.g. $5.50 → 6).
     const authoritativeCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
       ? registrationCreditCentsValue
       : windowExpectedCents;
     const authoritativeAmount = centsToDollars(authoritativeCents);
+    // Authoritative money actually received — never use the rounded coin credit.
+    const paymentCents = receivedPaymentCents;
+    const paymentAmount = centsToDollars(paymentCents);
     if (!Number.isSafeInteger(authoritativeCents) || authoritativeCents <= 0 || authoritativeAmount == null) {
       throw new Error('Matched payment window amount must be positive.');
+    }
+    if (!Number.isSafeInteger(paymentCents) || paymentCents <= 0 || paymentAmount == null) {
+      throw new Error('Matched payment amount must be positive.');
     }
     if (!Number.isSafeInteger(requestedCents) || requestedCents <= 0) {
       throw new Error('Deposit credit amount must be positive.');
@@ -4813,20 +4820,24 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     await patchCreditMetadata(metadataPatch);
     console.log(
       `[ledger] deposit_credit_started contact=${id} payment=${eventId} window=${matchedWindowId} ` +
-      `player=${resolvedPlayerUid} amount=${authoritativeAmount} key=${idempotencyKey} flow=${sourceFlow}`
+      `player=${resolvedPlayerUid} amount=${authoritativeAmount} payment=${paymentAmount} ` +
+      `key=${idempotencyKey} flow=${sourceFlow}`
     );
 
     let result;
     try {
       result = await creditAppBegDepositViaApi({
         playerUid: resolvedPlayerUid,
+        // Keep player coin credit unchanged (rounded registration credit when applicable).
         amount: authoritativeAmount,
         externalReference: idempotencyKey,
         sourceFlow,
         ledgerContactId: id,
         paymentEventId: eventId,
         windowId: matchedWindowId,
-        actorName
+        actorName,
+        paymentAmount,
+        paymentCents
       });
     } catch (error) {
       const failedPatch = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
@@ -4894,6 +4905,26 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       };
     await patchCreditMetadata(successPatch);
 
+    // Persist actual payment amount on the financial event metadata without changing amount_npr
+    // (amount_npr remains the player coin credit).
+    try {
+      const appbeg = globalThis.appbegStore;
+      if (typeof appbeg?.preserveLedgerDepositPaymentMeta === 'function') {
+        await appbeg.preserveLedgerDepositPaymentMeta({
+          paymentEventId: eventId,
+          financialEventId: result.financialEventId || null,
+          paymentCents,
+          paymentAmount,
+          externalReference: idempotencyKey
+        });
+      }
+    } catch (error) {
+      console.error(
+        `[ledger] preserve_payment_meta_failed contact=${id} payment=${eventId} ` +
+        `error=${error?.message || error}`
+      );
+    }
+
     await logEvent({
       telegramUserId: id,
       eventType: result.alreadyCredited ? 'deposit_credit_already_credited' : 'deposit_credit_succeeded',
@@ -4904,6 +4935,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         paymentEventId: eventId,
         windowId: matchedWindowId,
         amount: authoritativeAmount,
+        paymentAmount,
+        paymentCents,
         playerUid: resolvedPlayerUid,
         idempotencyKey,
         sourceFlow,
@@ -4913,7 +4946,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     console.log(
       `[ledger] deposit_credit_${result.alreadyCredited ? 'already_credited' : 'succeeded'} ` +
       `contact=${id} payment=${eventId} window=${matchedWindowId} player=${resolvedPlayerUid} ` +
-      `amount=${authoritativeAmount} key=${idempotencyKey}`
+      `amount=${authoritativeAmount} payment=${paymentAmount} key=${idempotencyKey}`
     );
 
     return {
@@ -4922,12 +4955,55 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       credited: result.credited,
       alreadyCredited: result.alreadyCredited,
       amount: authoritativeAmount,
+      paymentAmount,
+      paymentCents,
       paymentEventId: eventId,
       windowId: matchedWindowId,
       playerUid: resolvedPlayerUid,
       idempotencyKey,
       financialEventId: result.financialEventId || null
     };
+  }
+
+  /**
+   * Resolve proven payment cents for Ledger payment event IDs.
+   * Prefers registration_payment_windows.received_payment_cents, then parsed_amount.
+   * Returns Map<string, number> (eventId → cents). Never guesses.
+   */
+  async function getPaymentCentsByEventIds(eventIds = []) {
+    const ids = [...new Set(
+      (Array.isArray(eventIds) ? eventIds : [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )];
+    if (!ids.length) return new Map();
+
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = await db.prepare(`
+      SELECT
+        pe.id,
+        w.received_payment_cents,
+        w.received_payment_amount,
+        pe.parsed_amount
+      FROM payment_events pe
+      LEFT JOIN registration_payment_windows w
+        ON w.matched_payment_event_id = pe.id
+      WHERE pe.id IN (${placeholders})
+    `).all(...ids);
+
+    const byId = new Map();
+    for (const row of rows) {
+      let cents = row.received_payment_cents != null ? Number(row.received_payment_cents) : null;
+      if (!Number.isSafeInteger(cents) || cents <= 0) {
+        cents = parseMoneyToCents(String(
+          row.received_payment_amount != null ? row.received_payment_amount : row.parsed_amount
+        ));
+      }
+      if (Number.isSafeInteger(cents) && cents > 0) {
+        byId.set(String(row.id), cents);
+      }
+    }
+    return byId;
   }
 
   async function cancelDepositEvent(depositEventId, { cancelledBy = 'Staff', reason = '' } = {}) {
@@ -8119,6 +8195,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     findLatestExpiredDepositByPaymentTag,
     completeDepositEvent,
     creditRegisteredDeposit,
+    getPaymentCentsByEventIds,
     cancelDepositEvent,
     getPaymentSyncState,
     updatePaymentSyncState,

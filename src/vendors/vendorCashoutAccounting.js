@@ -10,7 +10,10 @@
  */
 
 export function roundCurrency(amount) {
-  return Math.round(Number(amount || 0) * 100) / 100;
+  const value = Number(amount || 0);
+  if (!Number.isFinite(value)) return 0;
+  // Integer-cents rounding avoids IEEE artifacts (e.g. 8.5 * 0.15 → 1.275 → 1.28).
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 export function normalizeVendorCashoutAmount(value) {

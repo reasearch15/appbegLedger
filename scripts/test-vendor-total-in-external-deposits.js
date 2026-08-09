@@ -29,8 +29,17 @@ function ledgerCredit({
   source = 'authority_ledger_deposit_credit',
   type = 'ledger_deposit_credit',
   activityAt = '2026-07-27T13:00:00+05:45',
-  paymentEventId = `pay-${firebaseId}`
+  paymentEventId = `pay-${firebaseId}`,
+  paymentAmount = null,
+  paymentCents = null
 } = {}) {
+  const meta = {
+    sourceFlow,
+    paymentEventId,
+    externalReference: `appbegledger-payment-event:${paymentEventId}`
+  };
+  if (paymentCents != null) meta.paymentCents = paymentCents;
+  if (paymentAmount != null) meta.paymentAmount = paymentAmount;
   return {
     uid: PLAYER,
     firebase_id: firebaseId,
@@ -40,11 +49,7 @@ function ledgerCredit({
     source,
     actor_uid: 'appbeg_ledger',
     actor_role: 'ledger',
-    meta: {
-      sourceFlow,
-      paymentEventId,
-      externalReference: `appbegledger-payment-event:${paymentEventId}`
-    },
+    meta,
     activity_at: activityAt
   };
 }
@@ -427,6 +432,145 @@ function testCharlieShapeWithStaffLoad() {
   assert.equal(players[0].net, -24);
 }
 
+function testPaymentAmountPreferredOverCreditedCoins() {
+  // $5.50 paid → 6 coins credited; vendor Total In must use $5.50
+  const row = ledgerCredit({
+    amount: 6,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'pay-550-credit-6',
+    paymentEventId: '1530',
+    paymentAmount: 5.5,
+    paymentCents: 550
+  });
+  assert.equal(row.amount_npr, 6, 'player credit amount_npr stays 6');
+  assert.equal(appBegFinancialTesting.vendorTotalInAmount(row), 5.5);
+  const { players } = aggregate([row]);
+  assert.equal(players[0].total_in, 5.5);
+}
+
+function testPaymentAmountFiveForty() {
+  const row = ledgerCredit({
+    amount: 6,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'pay-540-credit-6',
+    paymentEventId: '1044',
+    paymentAmount: 5.4,
+    paymentCents: 540
+  });
+  assert.equal(row.amount_npr, 6);
+  const { players } = aggregate([row]);
+  assert.equal(players[0].total_in, 5.4);
+}
+
+function testExactDollarPaymentUnchanged() {
+  const row = ledgerCredit({
+    amount: 10,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'pay-1000',
+    paymentEventId: 'p-10',
+    paymentAmount: 10,
+    paymentCents: 1000
+  });
+  assert.equal(row.amount_npr, 10);
+  const { players } = aggregate([row]);
+  assert.equal(players[0].total_in, 10);
+}
+
+function testTenTwentyFivePaymentExact() {
+  // Whatever player-credit rules produce for coins, financial amount stays $10.25
+  const row = ledgerCredit({
+    amount: 11,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'pay-1025',
+    paymentEventId: 'p-1025',
+    paymentAmount: 10.25,
+    paymentCents: 1025
+  });
+  assert.equal(row.amount_npr, 11, 'credited coins may differ');
+  const { players } = aggregate([row]);
+  assert.equal(players[0].total_in, 10.25);
+}
+
+function testHistoricalPaymentLookupViaEventId() {
+  const row = ledgerCredit({
+    amount: 6,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'hist-550',
+    paymentEventId: '1530'
+    // no paymentAmount/paymentCents in meta — historical recovery
+  });
+  const { players } = appBegFinancialTesting.aggregateFinancialEventsForUids(
+    [PLAYER],
+    [row],
+    {
+      activeBounds: appBegFinancialTesting.businessDayBounds(TEST_NOW, 'Asia/Kathmandu'),
+      timeZone: 'Asia/Kathmandu',
+      paymentCentsByEventId: new Map([['1530', 550]])
+    }
+  );
+  assert.equal(players[0].total_in, 5.5);
+  assert.equal(row.amount_npr, 6);
+}
+
+function testFallbackToAmountWhenPaymentUnknown() {
+  const row = ledgerCredit({
+    amount: 6,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'fallback-6',
+    paymentEventId: 'missing-payment'
+  });
+  const { players } = aggregate([row]);
+  assert.equal(players[0].total_in, 6);
+}
+
+function testCameronShapePaymentPlusCoadmin() {
+  const { players } = aggregate([
+    ledgerCredit({
+      amount: 6,
+      sourceFlow: 'registration_initial_deposit',
+      firebaseId: 'cameron-reg',
+      paymentEventId: '1530',
+      paymentAmount: 5.5,
+      paymentCents: 550
+    }),
+    coadminAddCoin({ amount: 3, firebaseId: 'cameron-coadmin-3' }),
+    {
+      uid: PLAYER,
+      firebase_id: 'cameron-freeplay',
+      event_type: 'freeplay',
+      amount_npr: 3,
+      source: 'authority_freeplay_claim',
+      actor_role: 'player',
+      activity_at: '2026-08-09T14:40:28+05:45'
+    },
+    gameDeposit({ amount: 6, firebaseId: 'cameron-game-6' })
+  ]);
+  assert.equal(players[0].total_in, 8.5);
+  assert.equal(players[0].total_out, 0);
+  assert.equal(players[0].net, 8.5);
+  const accounting = computeVendorAccountingFromTotals({
+    totalIn: players[0].total_in,
+    totalOut: players[0].total_out,
+    commissionPercentage: 15,
+    settlementTotal: 0
+  });
+  assert.equal(accounting.net, 8.5);
+  assert.equal(accounting.receivable, 1.28);
+  assert.equal(accounting.outstanding, 1.28);
+}
+
+function testPaymentCentsMetaWinsOverPaymentAmount() {
+  const row = ledgerCredit({
+    amount: 6,
+    sourceFlow: 'registration_initial_deposit',
+    firebaseId: 'cents-wins',
+    paymentEventId: 'x1',
+    paymentAmount: 9.99,
+    paymentCents: 550
+  });
+  assert.equal(appBegFinancialTesting.vendorTotalInAmount(row), 5.5);
+}
+
 function main() {
   testLedgerDepositCreditCounts();
   testCoadminPaidCoinLoadCounts();
@@ -447,6 +591,14 @@ function main() {
   testCompletedCashoutStillCountsAsTotalOut();
   testNetAndReceivableUseCorrectedTotalIn();
   testCharlieShapeWithStaffLoad();
+  testPaymentAmountPreferredOverCreditedCoins();
+  testPaymentAmountFiveForty();
+  testExactDollarPaymentUnchanged();
+  testTenTwentyFivePaymentExact();
+  testHistoricalPaymentLookupViaEventId();
+  testFallbackToAmountWhenPaymentUnknown();
+  testCameronShapePaymentPlusCoadmin();
+  testPaymentCentsMetaWinsOverPaymentAmount();
   console.log('vendor total-in coadmin/staff paid loads: ok');
 }
 

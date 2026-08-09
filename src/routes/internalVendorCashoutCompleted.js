@@ -48,7 +48,11 @@ async function loadVendorAccountingSnapshot({
           .concat(String(playerUid || '').trim() ? [String(playerUid).trim()] : [])
       )];
       if (uids.length) {
-        const report = await appbegStore.getFinancialReportForPlayerUids(uids);
+        const report = await appbegStore.getFinancialReportForPlayerUids(uids, {
+          resolvePaymentCentsByEventIds: typeof store?.getPaymentCentsByEventIds === 'function'
+            ? async (eventIds) => store.getPaymentCentsByEventIds(eventIds)
+            : null
+        });
         if (report?.configured !== false) {
           financialSource = report.source || 'appbeg_financial_events_cache';
           for (const row of report.players || []) {

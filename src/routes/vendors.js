@@ -17,7 +17,8 @@ function zeroFinancial() {
 function roundCurrency(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) return null;
-  return Math.round(amount * 100) / 100;
+  // Integer-cents rounding avoids IEEE artifacts (e.g. 8.5 * 0.15 → 1.275 → 1.28).
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
 function normalizeFinancial(financial = {}) {
@@ -234,7 +235,7 @@ function handleVendorError(res, error) {
   return res.status(500).json({ error: 'Vendor request failed.' });
 }
 
-async function loadFinancialByUid(appbegStore, players) {
+async function loadFinancialByUid(appbegStore, players, store = null) {
   const uids = [...new Set(players
     .map((player) => String(player.appbeg_player_uid || '').trim())
     .filter(Boolean))];
@@ -247,7 +248,11 @@ async function loadFinancialByUid(appbegStore, players) {
     };
   }
   try {
-    const report = await appbegStore.getFinancialReportForPlayerUids(uids);
+    const report = await appbegStore.getFinancialReportForPlayerUids(uids, {
+      resolvePaymentCentsByEventIds: typeof store?.getPaymentCentsByEventIds === 'function'
+        ? async (eventIds) => store.getPaymentCentsByEventIds(eventIds)
+        : null
+    });
     return {
       configured: report.configured !== false,
       source: report.source || null,
@@ -469,7 +474,7 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     const players = typeof store.listAllVendorPlayers === 'function'
       ? await store.listAllVendorPlayers()
       : [];
-    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financialByUid = await loadFinancialByUid(appbegStore, players, store);
     let settlements = [];
     let settlementsAvailable = true;
     if (typeof store.listAllVendorSettlements === 'function') {
@@ -527,7 +532,7 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
       vendor_code: vendor.vendor_code || null,
       player_count: players.length
     }));
-    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financialByUid = await loadFinancialByUid(appbegStore, players, store);
     const financial = summarizePlayersFinancial(players, financialByUid);
     if (financial.financial_available !== false) {
       financial.net = financial.total_in - financial.total_out;
@@ -694,7 +699,7 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     const vendor = await store.getVendor(vendorId);
     if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
     const players = await store.listVendorPlayers(vendorId);
-    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financialByUid = await loadFinancialByUid(appbegStore, players, store);
     const financial = summarizePlayersFinancial(players, financialByUid);
     if (financial.financial_available !== false) {
       financial.net = financial.total_in - financial.total_out;
@@ -737,7 +742,7 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     const dir = String(req.query?.dir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
     const query = String(req.query?.query ?? req.query?.q ?? '').trim().toLowerCase();
     const players = await store.listVendorPlayers(vendorId);
-    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financialByUid = await loadFinancialByUid(appbegStore, players, store);
     const payload = players.map((player) => vendorPlayerPayload({
       ...player,
       financial: financialForPlayer(player, financialByUid)
@@ -779,7 +784,7 @@ export function registerVendorRoutes(app, { store, requireAdmin, appbegStore = n
     const vendor = await store.getVendor(vendorId);
     if (!vendor) return res.status(404).json({ error: 'Vendor not found.' });
     const players = await store.listVendorPlayers(vendorId);
-    const financialByUid = await loadFinancialByUid(appbegStore, players);
+    const financialByUid = await loadFinancialByUid(appbegStore, players, store);
     const financial = summarizePlayersFinancial(players, financialByUid);
     if (financial.financial_available !== false) financial.net = financial.total_in - financial.total_out;
     const receivable = financial.financial_available === false

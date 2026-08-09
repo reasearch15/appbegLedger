@@ -5,6 +5,7 @@ import {
   pivotGameUsernames,
   ROYALVIP_GAME_PLATFORMS
 } from './appbegGamePlatforms.js';
+import { centsToDollars, parseMoneyToCents } from '../registration/utils.js';
 
 const { Pool } = pg;
 const DEFAULT_LIMIT = 50;
@@ -487,8 +488,84 @@ function metaValue(row, key) {
   return String(row?.[`meta_${key}`] ?? meta[key] ?? '').trim();
 }
 
+function metaRaw(row, key) {
+  const meta = row?.meta && typeof row.meta === 'object' ? row.meta : {};
+  if (row?.[`meta_${key}`] !== undefined && row?.[`meta_${key}`] !== null) {
+    return row[`meta_${key}`];
+  }
+  return meta[key];
+}
+
+/** Credited coin / raw event amount (player credit). Not vendor revenue for ledger deposits. */
 function eventAmount(row) {
   return Number(row.amount_npr ?? row.amountNpr ?? row.amount ?? 0);
+}
+
+function isLedgerDepositCreditEvent(row) {
+  const type = String(row.event_type || '').trim().toLowerCase();
+  const source = String(row.source || '').trim().toLowerCase();
+  return type === 'ledger_deposit_credit'
+    || source === 'authority_ledger_deposit_credit';
+}
+
+function resolveLedgerPaymentEventId(row) {
+  const fromMeta = metaValue(row, 'paymentEventId');
+  if (fromMeta) return fromMeta;
+  const column = String(row.payment_event_id || '').trim();
+  if (column) return column;
+  const external = metaValue(row, 'externalReference');
+  const match = external.match(/^appbegledger-payment-event:(\d+)$/i);
+  return match ? match[1] : '';
+}
+
+/**
+ * Authoritative payment cents from financial-event metadata when present.
+ * Priority: meta.paymentCents → meta.paymentAmount.
+ */
+function paymentCentsFromMeta(row) {
+  const centsRaw = metaRaw(row, 'paymentCents');
+  if (centsRaw != null && centsRaw !== '') {
+    const cents = Number(centsRaw);
+    if (Number.isSafeInteger(cents) && cents > 0) return cents;
+  }
+  const amountRaw = metaRaw(row, 'paymentAmount');
+  if (amountRaw != null && amountRaw !== '') {
+    const cents = parseMoneyToCents(String(amountRaw));
+    if (Number.isSafeInteger(cents) && cents > 0) return cents;
+  }
+  return null;
+}
+
+function paymentCentsMapGet(paymentCentsByEventId, paymentEventId) {
+  if (!paymentCentsByEventId || !paymentEventId) return null;
+  const key = String(paymentEventId);
+  const value = typeof paymentCentsByEventId.get === 'function'
+    ? paymentCentsByEventId.get(key)
+    : paymentCentsByEventId[key];
+  const cents = Number(value);
+  return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+}
+
+/**
+ * Vendor Total In amount for one included financial event.
+ *
+ * Ledger-backed deposits:
+ *   A) meta.paymentCents
+ *   B) meta.paymentAmount
+ *   C) proven paymentCentsByEventId[paymentEventId] (historical recovery)
+ *   D) amount_npr fallback only when payment cannot be proven
+ *
+ * Coadmin / staff / cashouts: amount_npr (unchanged).
+ */
+function vendorTotalInAmount(row, { paymentCentsByEventId } = {}) {
+  if (isLedgerDepositCreditEvent(row)) {
+    const fromMeta = paymentCentsFromMeta(row);
+    if (fromMeta != null) return fromMeta / 100;
+    const paymentEventId = resolveLedgerPaymentEventId(row);
+    const fromLookup = paymentCentsMapGet(paymentCentsByEventId, paymentEventId);
+    if (fromLookup != null) return fromLookup / 100;
+  }
+  return Math.abs(eventAmount(row));
 }
 
 /**
@@ -607,7 +684,7 @@ function financialDedupeKey(row, fallback) {
     || fallback;
 }
 
-function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } = {}) {
+function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone, paymentCentsByEventId } = {}) {
   const byUid = new Map(uids.map((uid) => [uid, zeroFinancialRow(uid)]));
   const seen = new Set();
   const counts = {
@@ -644,7 +721,9 @@ function aggregateFinancialEventsForUids(uids, rows, { activeBounds, timeZone } 
     seen.add(key);
 
     const player = byUid.get(uid);
-    const amount = Math.abs(Number(row.amount_npr ?? row.amountNpr ?? row.amount ?? 0));
+    const amount = isIn
+      ? Math.abs(Number(vendorTotalInAmount(row, { paymentCentsByEventId })))
+      : Math.abs(Number(row.amount_npr ?? row.amountNpr ?? row.amount ?? 0));
     if (Number.isFinite(amount)) {
       if (isIn) player.total_in += amount;
       if (isOut) player.total_out += amount;
@@ -974,7 +1053,9 @@ export async function createAppBegStore(env = process.env) {
 
   async function getFinancialReportForPlayerUids(playerUids = [], {
     today = new Date(),
-    timeZone = env.VENDOR_DASHBOARD_TIME_ZONE || env.TZ || DEFAULT_BUSINESS_TIME_ZONE
+    timeZone = env.VENDOR_DASHBOARD_TIME_ZONE || env.TZ || DEFAULT_BUSINESS_TIME_ZONE,
+    resolvePaymentCentsByEventIds = null,
+    paymentCentsByEventId = null
   } = {}) {
     const uids = [...new Set((Array.isArray(playerUids) ? playerUids : [])
       .map((uid) => String(uid || '').trim())
@@ -1029,6 +1110,8 @@ export async function createAppBegStore(env = process.env) {
     const metaReversedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'reversedAt'` : 'NULL::text';
     const metaRefundedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'refundedAt'` : 'NULL::text';
     const metaDeletedAtExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'deletedAt'` : 'NULL::text';
+    const metaPaymentAmountExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'paymentAmount'` : 'NULL::text';
+    const metaPaymentCentsExpr = cols.meta ? `f.${quoteIdent(cols.meta)} ->> 'paymentCents'` : 'NULL::text';
     const dedupeTextExpr = cols.dedupe ? `NULLIF(f.${quoteIdent(cols.dedupe)}::text, '')` : 'NULL::text';
     const activeDay = Number.isNaN(new Date(today).getTime()) ? new Date() : new Date(today);
     const activeBounds = businessDayBounds(activeDay, timeZone);
@@ -1043,14 +1126,7 @@ export async function createAppBegStore(env = process.env) {
       meta_column: cols.meta || null
     });
 
-    const players = [];
-    const totalsCounts = {
-      scanned: 0,
-      included: 0,
-      excluded_status: 0,
-      excluded_type: 0,
-      deduped: 0
-    };
+    const eventRows = [];
     for (const chunk of chunkArray(uids, FINANCIAL_QUERY_CHUNK_SIZE)) {
       const result = await pool.query(`
       WITH requested(uid) AS (
@@ -1082,19 +1158,62 @@ export async function createAppBegStore(env = process.env) {
           ${metaReversedAtExpr} AS "meta_reversedAt",
           ${metaRefundedAtExpr} AS "meta_refundedAt",
           ${metaDeletedAtExpr} AS "meta_deletedAt",
+          ${metaPaymentAmountExpr} AS "meta_paymentAmount",
+          ${metaPaymentCentsExpr} AS "meta_paymentCents",
           ${dedupeKeyExpr} AS dedupe_key
         FROM ${quoteIdent(financialPlan.table)} f
         JOIN requested r ON f.${quoteIdent(cols.playerUid)}::text = r.uid
     `, [chunk]);
-      const chunkReport = aggregateFinancialEventsForUids(chunk, result.rows, {
-        activeBounds,
-        timeZone: activeBounds.timeZone
-      });
-      for (const key of Object.keys(totalsCounts)) {
-        totalsCounts[key] += Number(chunkReport.counts[key] || 0);
-      }
-      players.push(...chunkReport.players);
+      eventRows.push(...result.rows);
     }
+
+    let paymentMap = new Map();
+    if (paymentCentsByEventId instanceof Map) {
+      paymentMap = new Map(
+        [...paymentCentsByEventId.entries()]
+          .map(([key, value]) => [String(key), Number(value)])
+          .filter(([, value]) => Number.isSafeInteger(value) && value > 0)
+      );
+    } else if (paymentCentsByEventId && typeof paymentCentsByEventId === 'object') {
+      paymentMap = new Map(
+        Object.entries(paymentCentsByEventId)
+          .map(([key, value]) => [String(key), Number(value)])
+          .filter(([, value]) => Number.isSafeInteger(value) && value > 0)
+      );
+    }
+
+    // Historical recovery only when meta lacks payment amount (new events are self-contained).
+    if (typeof resolvePaymentCentsByEventIds === 'function') {
+      const needed = [];
+      for (const row of eventRows) {
+        if (!isLedgerDepositCreditEvent(row)) continue;
+        if (paymentCentsFromMeta(row) != null) continue;
+        const paymentEventId = resolveLedgerPaymentEventId(row);
+        if (paymentEventId && !paymentMap.has(String(paymentEventId))) {
+          needed.push(paymentEventId);
+        }
+      }
+      if (needed.length) {
+        const resolved = await resolvePaymentCentsByEventIds([...new Set(needed)]);
+        const entries = resolved instanceof Map
+          ? resolved.entries()
+          : Object.entries(resolved || {});
+        for (const [key, value] of entries) {
+          const cents = Number(value);
+          if (Number.isSafeInteger(cents) && cents > 0) {
+            paymentMap.set(String(key), cents);
+          }
+        }
+      }
+    }
+
+    const chunkReport = aggregateFinancialEventsForUids(uids, eventRows, {
+      activeBounds,
+      timeZone: activeBounds.timeZone,
+      paymentCentsByEventId: paymentMap
+    });
+    const players = chunkReport.players;
+    const totalsCounts = chunkReport.counts;
     const summary = summarizeFinancialRows(players);
     logFinancialTrace('event_inclusion_counts', {
       source: financialPlan.table,
@@ -1104,6 +1223,7 @@ export async function createAppBegStore(env = process.env) {
       excluded_status: totalsCounts.excluded_status,
       excluded_type: totalsCounts.excluded_type,
       deduped: totalsCounts.deduped,
+      payment_meta_lookups: paymentMap.size,
       total_in: summary.total_in,
       total_out: summary.total_out
     });
@@ -1118,6 +1238,201 @@ export async function createAppBegStore(env = process.env) {
       players,
       summary
     };
+  }
+
+  /**
+   * Non-destructive: merge paymentAmount/paymentCents into financial event meta.
+   * Never modifies amount_npr (player coin credit).
+   */
+  async function preserveLedgerDepositPaymentMeta({
+    paymentEventId = null,
+    financialEventId = null,
+    paymentCents = null,
+    paymentAmount = null,
+    externalReference = null
+  } = {}) {
+    if (!financialPlan?.configured || !financialPlan.columns.meta) {
+      return { updated: 0, reason: 'financial_meta_unavailable' };
+    }
+    const cents = Number(paymentCents);
+    if (!Number.isSafeInteger(cents) || cents <= 0) {
+      return { updated: 0, reason: 'invalid_payment_cents' };
+    }
+    const amount = paymentAmount != null && Number.isFinite(Number(paymentAmount))
+      ? Number(paymentAmount)
+      : centsToDollars(cents);
+    if (amount == null || !(amount > 0)) {
+      return { updated: 0, reason: 'invalid_payment_amount' };
+    }
+
+    const cols = financialPlan.columns;
+    const firebaseId = String(financialEventId || '').trim() || null;
+    const peid = paymentEventId != null ? String(paymentEventId).trim() : null;
+    const ext = String(externalReference || '').trim()
+      || (peid ? `appbegledger-payment-event:${peid}` : null);
+
+    const clauses = [];
+    const params = [amount, cents];
+    let index = 3;
+    if (firebaseId && cols.firebaseId) {
+      clauses.push(`f.${quoteIdent(cols.firebaseId)}::text = $${index}`);
+      params.push(firebaseId);
+      index += 1;
+    }
+    if (peid) {
+      clauses.push(`f.${quoteIdent(cols.meta)} ->> 'paymentEventId' = $${index}`);
+      params.push(peid);
+      index += 1;
+    }
+    if (ext) {
+      clauses.push(`f.${quoteIdent(cols.meta)} ->> 'externalReference' = $${index}`);
+      params.push(ext);
+      index += 1;
+    }
+    if (!clauses.length) {
+      return { updated: 0, reason: 'missing_event_locator' };
+    }
+
+    const typeCol = cols.type;
+    const sourceCol = cols.source;
+    const typeFilter = typeCol
+      ? `LOWER(COALESCE(f.${quoteIdent(typeCol)}, '')::text) = 'ledger_deposit_credit'`
+      : 'FALSE';
+    const sourceFilter = sourceCol
+      ? `LOWER(COALESCE(f.${quoteIdent(sourceCol)}, '')::text) = 'authority_ledger_deposit_credit'`
+      : 'FALSE';
+    const deletedFilter = cols.deletedAt
+      ? `AND f.${quoteIdent(cols.deletedAt)} IS NULL`
+      : '';
+
+    const result = await pool.query(
+      `
+      UPDATE ${quoteIdent(financialPlan.table)} f
+      SET ${quoteIdent(cols.meta)} = COALESCE(f.${quoteIdent(cols.meta)}, '{}'::jsonb)
+        || jsonb_build_object(
+          'paymentAmount', to_jsonb($1::numeric),
+          'paymentCents', to_jsonb($2::int)
+        )
+      WHERE (${typeFilter} OR ${sourceFilter})
+        ${deletedFilter}
+        AND (${clauses.join(' OR ')})
+      `,
+      params
+    );
+
+    logFinancialTrace('preserve_ledger_deposit_payment_meta', {
+      payment_event_id: peid,
+      financial_event_id: firebaseId,
+      payment_cents: cents,
+      payment_amount: amount,
+      updated: result.rowCount || 0
+    });
+
+    return { updated: Number(result.rowCount || 0), paymentCents: cents, paymentAmount: amount };
+  }
+
+  /**
+   * Idempotent, non-destructive meta backfill for proven Ledger-backed deposits.
+   * Does not modify amount_npr. Skips rows without a recoverable paymentEventId / payment cents.
+   */
+  async function backfillLedgerDepositPaymentMeta({ resolvePaymentCentsByEventIds } = {}) {
+    if (!financialPlan?.configured || !financialPlan.columns.meta) {
+      return { scanned: 0, updated: 0, skipped: 0, reason: 'financial_meta_unavailable' };
+    }
+    if (typeof resolvePaymentCentsByEventIds !== 'function') {
+      return { scanned: 0, updated: 0, skipped: 0, reason: 'missing_payment_resolver' };
+    }
+
+    const cols = financialPlan.columns;
+    const typeFilter = cols.type
+      ? `LOWER(COALESCE(f.${quoteIdent(cols.type)}, '')::text) = 'ledger_deposit_credit'`
+      : 'FALSE';
+    const sourceFilter = cols.source
+      ? `LOWER(COALESCE(f.${quoteIdent(cols.source)}, '')::text) = 'authority_ledger_deposit_credit'`
+      : 'FALSE';
+    const deletedFilter = cols.deletedAt
+      ? `AND f.${quoteIdent(cols.deletedAt)} IS NULL`
+      : '';
+    const firebaseIdExpr = cols.firebaseId ? `f.${quoteIdent(cols.firebaseId)}::text` : 'NULL::text';
+
+    const result = await pool.query(
+      `
+      SELECT
+        ${firebaseIdExpr} AS firebase_id,
+        f.${quoteIdent(cols.meta)} AS meta,
+        f.${quoteIdent(cols.meta)} ->> 'paymentEventId' AS payment_event_id,
+        f.${quoteIdent(cols.meta)} ->> 'externalReference' AS external_reference,
+        f.${quoteIdent(cols.meta)} ->> 'paymentCents' AS payment_cents,
+        f.${quoteIdent(cols.meta)} ->> 'paymentAmount' AS payment_amount
+      FROM ${quoteIdent(financialPlan.table)} f
+      WHERE (${typeFilter} OR ${sourceFilter})
+        ${deletedFilter}
+      `
+    );
+
+    const neededIds = [];
+    for (const row of result.rows) {
+      const existingCents = paymentCentsFromMeta({
+        meta: row.meta,
+        meta_paymentCents: row.payment_cents,
+        meta_paymentAmount: row.payment_amount
+      });
+      if (existingCents != null) continue;
+      const peid = resolveLedgerPaymentEventId({
+        meta: row.meta,
+        payment_event_id: row.payment_event_id,
+        meta_paymentEventId: row.payment_event_id,
+        meta_externalReference: row.external_reference
+      });
+      if (peid) neededIds.push(peid);
+    }
+
+    const paymentMap = neededIds.length
+      ? await resolvePaymentCentsByEventIds([...new Set(neededIds)])
+      : new Map();
+    const resolvedMap = paymentMap instanceof Map
+      ? paymentMap
+      : new Map(Object.entries(paymentMap || {}));
+
+    let updated = 0;
+    let skipped = 0;
+    for (const row of result.rows) {
+      const existingCents = paymentCentsFromMeta({
+        meta: row.meta,
+        meta_paymentCents: row.payment_cents,
+        meta_paymentAmount: row.payment_amount
+      });
+      if (existingCents != null) {
+        skipped += 1;
+        continue;
+      }
+      const peid = resolveLedgerPaymentEventId({
+        meta: row.meta,
+        payment_event_id: row.payment_event_id,
+        meta_paymentEventId: row.payment_event_id,
+        meta_externalReference: row.external_reference
+      });
+      const cents = paymentCentsMapGet(resolvedMap, peid);
+      if (cents == null) {
+        skipped += 1;
+        continue;
+      }
+      const patch = await preserveLedgerDepositPaymentMeta({
+        paymentEventId: peid,
+        financialEventId: row.firebase_id,
+        paymentCents: cents,
+        paymentAmount: centsToDollars(cents),
+        externalReference: row.external_reference || (peid ? `appbegledger-payment-event:${peid}` : null)
+      });
+      updated += Number(patch.updated || 0);
+    }
+
+    logFinancialTrace('backfill_ledger_deposit_payment_meta', {
+      scanned: result.rows.length,
+      updated,
+      skipped
+    });
+    return { scanned: result.rows.length, updated, skipped };
   }
 
   async function getPlayerByUid(uid) {
@@ -1163,6 +1478,8 @@ export async function createAppBegStore(env = process.env) {
     getPlayerByUsername,
     exportPlayersCsv,
     getFinancialReportForPlayerUids,
+    preserveLedgerDepositPaymentMeta,
+    backfillLedgerDepositPaymentMeta,
     async close() {
       await pool.end();
     }
@@ -1173,5 +1490,9 @@ export const appBegFinancialTesting = {
   buildFinancialPlan,
   aggregateFinancialEventsForUids,
   businessDayBounds,
-  isExternalDepositCreditIn
+  isExternalDepositCreditIn,
+  isLedgerDepositCreditEvent,
+  vendorTotalInAmount,
+  paymentCentsFromMeta,
+  resolveLedgerPaymentEventId
 };
