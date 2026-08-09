@@ -7,8 +7,6 @@
  */
 
 import {
-  MIN_REGISTRATION_DEPOSIT,
-  parseFirstDepositAmount,
   parseRegistrationPaymentAmount,
   chatbotWelcomeCooldownMs,
   isReferralSkipInput
@@ -44,11 +42,25 @@ export const PAYMENT_NAME_PROMPT = [
 ].join('\n');
 
 export const DEPOSIT_AMOUNT_PROMPT = [
-  'Enter the exact amount you will deposit.',
+  'Please enter the exact amount you paid, including cents.',
   '',
-  `Minimum deposit: $${MIN_REGISTRATION_DEPOSIT}`,
+  'Examples:',
+  '$5.05',
+  '$10.25',
+  '$20.50',
   '',
-  'Please include cents (do not use .00). Your full deposit will be credited after registration.'
+  'You can also type: 5.05 or 5¢5',
+  '',
+  'Minimum payment: $5.01',
+  'Whole amounts like $10.00 are not accepted.'
+].join('\n');
+
+export const REGISTRATION_AMOUNT_INVALID_MESSAGE = [
+  'Please enter the amount including cents.',
+  '',
+  'Try: 5.05, $10.25, 20.50, or 5¢5',
+  '',
+  'Whole amounts like $10.00 are not accepted.'
 ].join('\n');
 
 export const USERNAME_PROMPT = [
@@ -543,11 +555,7 @@ export async function continueRoyalVipRegistration({
       return {
         kind: 'registration_ask_first_deposit_amount',
         replies: [{
-          text: [
-            `Please enter a valid registration payment of at least $${MIN_REGISTRATION_DEPOSIT} with non-zero cents.`,
-            '',
-            'Please include cents and do not use .00.'
-          ].join('\n'),
+          text: REGISTRATION_AMOUNT_INVALID_MESSAGE,
           buttons: registrationNavButtons()
         }],
         statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'first_deposit_amount', registrationInfo: info },

@@ -78,13 +78,14 @@ async function run() {
 
   decision = await decideBotReply({ store, contact, messageText: '10' });
   assertEqual(decision.kind, 'registration_ask_first_deposit_amount');
-  assertIncludes(decision.replies[0].text, 'include cents');
+  assertIncludes(decision.replies[0].text, 'including cents');
+  assertIncludes(decision.replies[0].text, '5¢5');
   apply(store, decision);
   console.log('ok whole-dollar registration deposit asks for cents');
 
-  decision = await decideBotReply({ store, contact, messageText: '10.01' });
+  decision = await decideBotReply({ store, contact, messageText: '$10.5' });
   assertEqual(decision.kind, 'registration_send_payment_qr');
-  assertEqual(decision.sendPaymentQr.firstDepositAmount, 10.01);
+  assertEqual(decision.sendPaymentQr.firstDepositAmount, 10.5);
   assertEqual(decision.sendPaymentQr.paymentDisplayName, 'John Smith');
   assertEqual(decision.setStatus, undefined);
   console.log('ok valid deposit queues payment qr send');

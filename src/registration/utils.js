@@ -88,14 +88,45 @@ export function parseFirstDepositAmount(text, { minAmount = MIN_REGISTRATION_DEP
   return rounded;
 }
 
+/**
+ * Parse a money amount string into integer cents when the intent is unambiguous.
+ *
+ * Accepted examples:
+ *   5.25, $5.25 → 525
+ *   10.5, $10.5 → 1050 (one decimal digit pads to tenths: $10.50)
+ *   5¢5, $5¢5 → 505 (one digit after ¢ is literal cents: $5.05, not $5.50)
+ *   5¢05, 5¢50 → 505, 550
+ *
+ * Strips harmless whitespace and `$`. Rejects mixed `.` + `¢` and other malformed input.
+ * Does not enforce registration-only rules (minimum / non-zero cents).
+ */
 export function parseMoneyToCents(text) {
-  const raw = String(text || '').trim();
-  const match = raw.match(/^\$?(\d+)(?:\.(\d{1,2}))?$/);
+  const raw = String(text || '')
+    .trim()
+    .replace(/\$/g, '')
+    .replace(/\s+/g, '');
+  if (!raw) return null;
+
+  // Decimal + cent-sign together is ambiguous (e.g. 5.5¢5).
+  if (raw.includes('¢') && raw.includes('.')) return null;
+
+  const centSignMatch = raw.match(/^(\d+)¢(\d{1,2})$/);
+  if (centSignMatch) {
+    const dollars = Number.parseInt(centSignMatch[1], 10);
+    // One digit after ¢ is literal: 5¢5 → 5 cents ($X.05), not padded to 50.
+    const cents = Number.parseInt(centSignMatch[2], 10);
+    if (!Number.isSafeInteger(dollars) || dollars < 0) return null;
+    if (!Number.isInteger(cents) || cents < 0 || cents > 99) return null;
+    return dollars * 100 + cents;
+  }
+
+  const match = raw.match(/^(\d+)(?:\.(\d{1,2}))?$/);
   if (!match) return null;
   const dollars = Number.parseInt(match[1], 10);
   const centsText = (match[2] || '').padEnd(2, '0');
   const cents = centsText ? Number.parseInt(centsText, 10) : 0;
-  if (!Number.isSafeInteger(dollars) || !Number.isInteger(cents)) return null;
+  if (!Number.isSafeInteger(dollars) || dollars < 0) return null;
+  if (!Number.isInteger(cents) || cents < 0 || cents > 99) return null;
   return dollars * 100 + cents;
 }
 

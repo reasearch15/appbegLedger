@@ -11,7 +11,11 @@ import {
   maskPaymentIdentifier,
   redactRegistrationInfoForApi
 } from '../src/telegram/botRegistrationState.js';
-import { parseFirstDepositAmount, parseRegistrationPaymentAmount, MIN_REGISTRATION_DEPOSIT } from '../src/registration/utils.js';
+import { parseFirstDepositAmount, parseMoneyToCents, parseRegistrationPaymentAmount, MIN_REGISTRATION_DEPOSIT } from '../src/registration/utils.js';
+import {
+  DEPOSIT_AMOUNT_PROMPT,
+  REGISTRATION_AMOUNT_INVALID_MESSAGE
+} from '../src/telegram/royalVipBotRegistration.js';
 import { validateAppBegPassword } from '../src/registration/appbegValidation.js';
 import { amountsMatch, paymentNamesMatch } from '../src/payments/matchUtils.js';
 import { REGISTRATION_PAYMENT_EXPIRY_MESSAGE } from '../src/telegram/paymentWindowExpiryWorker.js';
@@ -96,6 +100,72 @@ async function run() {
   assert.equal(parseRegistrationPaymentAmount('10.00'), null);
   console.log('ok registration cents payment credits upward');
 
+  // Forgiving registration amount formats (normalize → same cents)
+  assert.equal(parseMoneyToCents('5.25'), 525);
+  assert.equal(parseMoneyToCents('$5.25'), 525);
+  assert.equal(parseMoneyToCents('10.5'), 1050);
+  assert.equal(parseMoneyToCents('$10.5'), 1050);
+  assert.equal(parseMoneyToCents('5¢5'), 505);
+  assert.equal(parseMoneyToCents('$5¢5'), 505);
+  assert.equal(parseMoneyToCents('5¢05'), 505);
+  assert.equal(parseMoneyToCents('$5¢05'), 505);
+  assert.equal(parseMoneyToCents('5¢50'), 550);
+  assert.equal(parseMoneyToCents('$5¢50'), 550);
+  assert.equal(parseMoneyToCents('  $5.25  '), 525);
+  assert.equal(parseMoneyToCents('$ 10.25'), 1025);
+
+  assert.equal(parseRegistrationPaymentAmount('5.25').paymentCents, 525);
+  assert.equal(parseRegistrationPaymentAmount('$5.25').paymentCents, 525);
+  assert.equal(parseRegistrationPaymentAmount('10.5').paymentCents, 1050);
+  assert.equal(parseRegistrationPaymentAmount('$10.5').paymentCents, 1050);
+  assert.equal(parseRegistrationPaymentAmount('5¢5').paymentCents, 505);
+  assert.equal(parseRegistrationPaymentAmount('$5¢5').paymentCents, 505);
+  assert.equal(parseRegistrationPaymentAmount('5¢05').paymentCents, 505);
+  assert.equal(parseRegistrationPaymentAmount('$5¢05').paymentCents, 505);
+  assert.equal(parseRegistrationPaymentAmount('5¢50').paymentCents, 550);
+  assert.equal(parseRegistrationPaymentAmount('$5¢50').paymentCents, 550);
+  assert.equal(parseRegistrationPaymentAmount('5.05').paymentAmount, 5.05);
+  assert.equal(parseRegistrationPaymentAmount('5.05').creditAmount, 6);
+  console.log('ok forgiving registration amount formats');
+
+  // Whole-dollar rejection (payment-matching still requires non-zero cents)
+  assert.equal(parseRegistrationPaymentAmount('10'), null);
+  assert.equal(parseRegistrationPaymentAmount('$10'), null);
+  assert.equal(parseRegistrationPaymentAmount('10.00'), null);
+  assert.equal(parseRegistrationPaymentAmount('$10.00'), null);
+  assert.equal(parseRegistrationPaymentAmount('5'), null);
+  assert.equal(parseRegistrationPaymentAmount('$5.00'), null);
+  // parseMoneyToCents still accepts whole dollars for other flows
+  assert.equal(parseMoneyToCents('10'), 1000);
+  assert.equal(parseMoneyToCents('$10.00'), 1000);
+  console.log('ok whole-dollar registration amounts rejected');
+
+  // Minimum payment: effective floor is $5.01
+  assert.equal(parseRegistrationPaymentAmount('4.99'), null);
+  assert.equal(parseRegistrationPaymentAmount('$4.99'), null);
+  assert.equal(parseRegistrationPaymentAmount('5.00'), null);
+  assert.equal(parseRegistrationPaymentAmount('5.01').paymentCents, 501);
+  assert.equal(parseRegistrationPaymentAmount('$5.01').paymentCents, 501);
+  assert.equal(parseRegistrationPaymentAmount('5¢1').paymentCents, 501);
+  console.log('ok registration minimum payment $5.01');
+
+  // Malformed / ambiguous input
+  assert.equal(parseMoneyToCents(''), null);
+  assert.equal(parseMoneyToCents('$'), null);
+  assert.equal(parseMoneyToCents('abc'), null);
+  assert.equal(parseMoneyToCents('5¢'), null);
+  assert.equal(parseMoneyToCents('¢5'), null);
+  assert.equal(parseMoneyToCents('5¢555'), null);
+  assert.equal(parseMoneyToCents('5.5¢5'), null);
+  assert.equal(parseMoneyToCents('5¢5.0'), null);
+  assert.equal(parseMoneyToCents('5.25.1'), null);
+  assert.equal(parseMoneyToCents('10.001'), null);
+  assert.equal(parseMoneyToCents('5,25'), null);
+  assert.equal(parseRegistrationPaymentAmount('5¢'), null);
+  assert.equal(parseRegistrationPaymentAmount('5.5¢5'), null);
+  assert.equal(parseRegistrationPaymentAmount('abc'), null);
+  console.log('ok malformed/ambiguous registration amounts rejected');
+
   // Password min 6, never log raw value in review
   assert.equal(validateAppBegPassword('12345').ok, false);
   assert.equal(validateAppBegPassword('secret1').ok, true);
@@ -153,11 +223,13 @@ async function run() {
   });
   assert.equal(named.kind, 'registration_ask_first_deposit_amount');
   assert.match(named.replies[0].text, /Thank you, John Smith/);
-  assert.match(named.replies[0].text, /\$5/);
+  assert.match(named.replies[0].text, /Minimum payment: \$5\.01/);
+  assert.match(named.replies[0].text, /5¢5/);
+  assert.ok(named.replies[0].text.includes(DEPOSIT_AMOUNT_PROMPT));
   fresh.apply(named);
   console.log('ok payment name advances to deposit amount');
 
-  // Invalid amount rejected
+  // Invalid amount rejected with helpful examples
   const badAmount = await decideBotReply({
     store: fresh,
     contact: { ...guest, registration_status: 'Collecting Info' },
@@ -165,7 +237,36 @@ async function run() {
   });
   assert.equal(badAmount.kind, 'registration_ask_first_deposit_amount');
   assert.equal(badAmount.statePatch.currentStep, 'first_deposit_amount');
+  assert.equal(badAmount.replies[0].text, REGISTRATION_AMOUNT_INVALID_MESSAGE);
+  assert.match(badAmount.replies[0].text, /Try: 5\.05/);
+  assert.doesNotMatch(badAmount.replies[0].text, /non-zero cents/);
   console.log('ok whole-dollar registration amount rejected');
+
+  // Cent-sign format accepted in the bot flow (separate store so main flow stays at 10.37)
+  {
+    const centStore = createMockStore();
+    centStore.apply(await decideBotReply({
+      store: centStore,
+      contact: guest,
+      messageText: '',
+      action: 'bot:register'
+    }));
+    centStore.apply(await decideBotReply({
+      store: centStore,
+      contact: { ...guest, registration_status: 'Collecting Info' },
+      messageText: 'John Smith'
+    }));
+    const centSignOk = await decideBotReply({
+      store: centStore,
+      contact: { ...guest, registration_status: 'Collecting Info' },
+      messageText: '5¢5'
+    });
+    assert.equal(centSignOk.kind, 'registration_send_payment_qr');
+    assert.equal(centSignOk.sendPaymentQr.firstDepositAmount, 5.05);
+    assert.equal(centSignOk.sendPaymentQr.creditedDepositAmount, 6);
+    assert.equal(centSignOk.statePatch.registrationInfo.registration_payment_cents, 505);
+    console.log('ok 5¢5 registration amount queues QR');
+  }
 
   // Valid amount queues QR
   const amountOk = await decideBotReply({
@@ -193,8 +294,8 @@ async function run() {
     contact: { ...guest, registration_status: 'Waiting For Payment' },
     messageText: 'hello'
   });
-  assert.equal(waiting.kind, 'menu_waiting_payment');
-  assert.equal(waiting.statePatch, null);
+  assert.equal(waiting.kind, 'registration_waiting_payment');
+  assert.equal(waiting.statePatch?.currentStep, 'await_payment');
   assert.deepEqual(waiting.replies[0].buttons.flat().map((button) => button.text), ['Cancel Registration']);
   console.log('ok waiting payment greeting shows safe recovery menu');
 
