@@ -335,23 +335,30 @@ h1 {
   font-weight: 800;
 }
 
+.vendor-telegram-handle {
+  margin: 2px 0 4px;
+  color: #6fbf00;
+  font-weight: 800;
+  font-size: 0.98rem;
+}
+
 .vendor-telegram-qr-block {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .vendor-telegram-qr {
   display: block;
-  width: 168px;
-  height: 168px;
+  width: min(100%, 260px);
+  height: auto;
   padding: 0;
   background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  image-rendering: pixelated;
+  border: 0;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
 }
 
 .vendor-telegram-qr-missing {

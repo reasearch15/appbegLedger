@@ -248,7 +248,7 @@ async function testDeleteRollbackPreservesSettlementHistory() {
 
 async function testVendorUiControlsAndNoStaffCopy() {
   const source = await fs.readFile(path.join(process.cwd(), 'public/app.js'), 'utf8');
-  assert.match(source, /Vendor Bot Link/);
+  assert.match(source, /Telegram Bot/);
   assert.match(source, /data-vendor-copy="link"/);
   assert.match(source, /data-vendor-copy="code"/);
   assert.match(source, /data-vendor-open-bot/);
@@ -271,11 +271,27 @@ async function testVendorUiControlsAndNoStaffCopy() {
 }
 
 async function testVendorTelegramQrHelpers() {
-  const { telegramQrFilename, DOWNLOAD_QR_SIZE } = await import('../public/telegramQr.js');
+  const {
+    telegramQrFilename,
+    telegramHandleFromUrl,
+    DOWNLOAD_CARD_WIDTH,
+    QR_ERROR_CORRECTION,
+    LOGO_SIZE_RATIO
+  } = await import('../public/telegramQr.js');
+
   assert.equal(telegramQrFilename('Acme Games'), 'acme-games-telegram-qr.png');
   assert.equal(telegramQrFilename('  Vendor #2!! '), 'vendor-2-telegram-qr.png');
   assert.equal(telegramQrFilename(''), 'vendor-telegram-qr.png');
-  assert.ok(DOWNLOAD_QR_SIZE >= 512);
+  assert.ok(DOWNLOAD_CARD_WIDTH >= 1024);
+  assert.equal(QR_ERROR_CORRECTION, 'H');
+  assert.ok(LOGO_SIZE_RATIO > 0 && LOGO_SIZE_RATIO <= 0.25);
+
+  assert.equal(
+    telegramHandleFromUrl('https://t.me/Royal_Sweeps_bot?start=VND-000004'),
+    '@Royal_Sweeps_bot'
+  );
+  assert.equal(telegramHandleFromUrl('https://t.me/BotAlpha?start=VND-000001'), '@BotAlpha');
+  assert.equal(telegramHandleFromUrl(''), '');
 
   const QRCode = (await import('qrcode')).default;
   const linkA = buildVendorBotLink('VND-000001', { TELEGRAM_BOT_USERNAME: 'BotAlpha' });
@@ -285,7 +301,7 @@ async function testVendorTelegramQrHelpers() {
   assert.notEqual(linkA, linkB);
 
   for (const link of [linkA, linkB]) {
-    const created = QRCode.create(link, { errorCorrectionLevel: 'M' });
+    const created = QRCode.create(link, { errorCorrectionLevel: QR_ERROR_CORRECTION });
     const encoded = created.segments.map((segment) => {
       const data = segment.data;
       if (typeof data === 'string') return data;
@@ -295,10 +311,10 @@ async function testVendorTelegramQrHelpers() {
 
     const png = await QRCode.toBuffer(link, {
       type: 'png',
-      width: DOWNLOAD_QR_SIZE,
-      margin: 4,
-      errorCorrectionLevel: 'M',
-      color: { dark: '#000000', light: '#ffffff' }
+      width: 1024,
+      margin: 3,
+      errorCorrectionLevel: QR_ERROR_CORRECTION,
+      color: { dark: '#0a7a45', light: '#ffffff' }
     });
     assert.equal(png[0], 0x89);
     assert.equal(png[1], 0x50);
@@ -312,6 +328,33 @@ async function testVendorTelegramQrHelpers() {
   assert.match(qrSource, /URL\.revokeObjectURL/);
   assert.match(qrSource, /createObjectURL/);
   assert.match(qrSource, /from '\.\/lib\/qrcode\.js'/);
+  assert.match(qrSource, /renderBrandedTelegramQrCard/);
+  assert.match(qrSource, /Scan to open Telegram/);
+  assert.match(qrSource, /drawCenterLogo|drawTelegramPlane/);
+
+  // Optional end-to-end decode of the branded card when node-canvas is available.
+  try {
+    const { createCanvas } = await import('canvas');
+    const jsQR = (await import('jsqr')).default;
+    globalThis.document = {
+      createElement(tag) {
+        if (tag === 'canvas') return createCanvas(10, 10);
+        throw new Error(`unsupported element: ${tag}`);
+      }
+    };
+    const { renderBrandedTelegramQrCard } = await import('../public/telegramQr.js');
+    for (const link of [linkA, linkB]) {
+      const canvas = createCanvas(100, 100);
+      await renderBrandedTelegramQrCard(canvas, { url: link, width: 1080 });
+      const image = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+      const decoded = jsQR(image.data, canvas.width, canvas.height);
+      assert.equal(decoded?.data, link);
+    }
+  } catch (error) {
+    if (!/Cannot find package|Cannot find module/.test(String(error?.message || error))) {
+      throw error;
+    }
+  }
 }
 
 await testVendorBotLinks();

@@ -29,7 +29,7 @@ import {
   unmatchedReasonDisplay
 } from './paymentStatus.js';
 import { createOngoingController } from './ongoing.js';
-import { downloadTelegramQr, paintTelegramQr, telegramQrFilename } from './telegramQr.js';
+import { downloadTelegramQr, paintTelegramQr, telegramQrFilename, telegramHandleFromUrl } from './telegramQr.js';
 
 const app = document.querySelector('#app');
 const socket = io({ withCredentials: true });
@@ -3205,14 +3205,20 @@ function vendorsWorkspace() {
             </div>
             <div class="vendor-bot-link-card">
               <div class="vendor-bot-link-main">
-                <div class="subtle">Vendor Bot Link</div>
-                ${vendorBotLinkValue(selected)
-                  ? `<a class="mono vendor-bot-link" href="${escapeHtml(vendorBotLinkValue(selected))}" target="_blank" rel="noopener noreferrer">${escapeHtml(vendorBotLinkValue(selected))}</a>
+                <div class="subtle">Telegram Bot</div>
+                ${(() => {
+                  const botLink = vendorBotLinkValue(selected);
+                  if (!botLink) {
+                    return '<div class="subtle vendor-telegram-qr-missing">Telegram link not configured</div>';
+                  }
+                  const handle = telegramHandleFromUrl(botLink);
+                  return `${handle ? `<div class="vendor-telegram-handle">${escapeHtml(handle)}</div>` : ''}
+                    <a class="mono vendor-bot-link" href="${escapeHtml(botLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(botLink)}</a>
                     <div class="vendor-telegram-qr-block">
-                      <canvas class="vendor-telegram-qr" data-vendor-telegram-qr data-qr-url="${escapeHtml(vendorBotLinkValue(selected))}" width="168" height="168" aria-label="Telegram bot QR code"></canvas>
+                      <canvas class="vendor-telegram-qr" data-vendor-telegram-qr data-qr-url="${escapeHtml(botLink)}" width="260" height="340" aria-label="Branded Telegram bot QR code"></canvas>
                       <button class="button" type="button" data-vendor-download-qr>Download QR</button>
-                    </div>`
-                  : '<div class="subtle vendor-telegram-qr-missing">Telegram link not configured</div>'}
+                    </div>`;
+                })()}
               </div>
               <div class="settings-actions vendor-bot-link-actions">
                 <button class="button secondary" type="button" data-vendor-copy="link" ${vendorBotLinkValue(selected) ? '' : 'disabled'}>Copy Link</button>
