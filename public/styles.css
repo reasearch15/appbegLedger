@@ -316,10 +316,15 @@ h1 {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 14px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.vendor-bot-link-main {
+  min-width: 0;
+  flex: 1;
 }
 
 .vendor-bot-link {
@@ -330,10 +335,45 @@ h1 {
   font-weight: 800;
 }
 
+.vendor-telegram-qr-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.vendor-telegram-qr {
+  display: block;
+  width: 168px;
+  height: 168px;
+  padding: 0;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+
+.vendor-telegram-qr-missing {
+  margin-top: 6px;
+}
+
 .vendor-bot-link-actions {
   margin-top: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .vendor-bot-link-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vendor-bot-link-actions {
+    justify-content: flex-start;
+  }
 }
 
 .vendor-danger-zone {

@@ -34,7 +34,9 @@
     "test:support-notification-lifecycle": "node scripts/test-support-notification-lifecycle.js",
     "test:default-coadmin": "node scripts/test-default-coadmin-on-contact.js",
     "test:telegram-cleanup": "node scripts/test-telegram-cleanup-architecture.js",
-    "test:vendor-cashout-completed": "node scripts/test-vendor-cashout-completed.js"
+    "test:vendor-cashout-completed": "node scripts/test-vendor-cashout-completed.js",
+    "test:vendor-admin": "node scripts/test-vendor-admin-improvements.js",
+    "build:qrcode": "npx --yes esbuild node_modules/qrcode/lib/browser.js --bundle --format=esm --outfile=public/lib/qrcode.js --platform=browser"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -46,6 +48,7 @@
     "helmet": "^8.0.0",
     "multer": "^2.2.0",
     "pg": "^8.22.0",
+    "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
     "telegraf": "^4.16.3"
   }

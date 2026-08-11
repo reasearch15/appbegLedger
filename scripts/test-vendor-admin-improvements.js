@@ -117,6 +117,8 @@ async function testVendorPayloadHasBotLinkAndNoStaffLink() {
         ledgerUser: { role: 'admin' },
         body: {
           name: 'Bot Link Vendor',
+          username: 'bot_link_vendor',
+          password: 'password123',
           commissionPercentage: 7.5,
           [['linked', 'Staff', 'Uid'].join('')]: 'obsolete',
           notes: 'Payload test'
@@ -154,7 +156,11 @@ async function testVendorPayloadLinkUnavailable() {
       const routes = registerTestRoutes(store);
       const createRes = await runHandlers(routes['POST /api/vendors'], {
         ledgerUser: { role: 'admin' },
-        body: { name: 'No Link Vendor' }
+        body: {
+          name: 'No Link Vendor',
+          username: 'no_link_vendor',
+          password: 'password123'
+        }
       });
       assert.equal(createRes.statusCode, 201);
       assert.equal(createRes.payload.vendor.vendorBotLink, null);
@@ -246,6 +252,10 @@ async function testVendorUiControlsAndNoStaffCopy() {
   assert.match(source, /data-vendor-copy="link"/);
   assert.match(source, /data-vendor-copy="code"/);
   assert.match(source, /data-vendor-open-bot/);
+  assert.match(source, /data-vendor-download-qr/);
+  assert.match(source, /data-vendor-telegram-qr/);
+  assert.match(source, /Telegram link not configured/);
+  assert.match(source, /Download QR/);
   assert.match(source, /window\.open\(url, '_blank', 'noopener,noreferrer'\)/);
   assert.match(source, /await refreshVendors\(\)/);
   const retiredTerms = [
@@ -260,6 +270,50 @@ async function testVendorUiControlsAndNoStaffCopy() {
   }
 }
 
+async function testVendorTelegramQrHelpers() {
+  const { telegramQrFilename, DOWNLOAD_QR_SIZE } = await import('../public/telegramQr.js');
+  assert.equal(telegramQrFilename('Acme Games'), 'acme-games-telegram-qr.png');
+  assert.equal(telegramQrFilename('  Vendor #2!! '), 'vendor-2-telegram-qr.png');
+  assert.equal(telegramQrFilename(''), 'vendor-telegram-qr.png');
+  assert.ok(DOWNLOAD_QR_SIZE >= 512);
+
+  const QRCode = (await import('qrcode')).default;
+  const linkA = buildVendorBotLink('VND-000001', { TELEGRAM_BOT_USERNAME: 'BotAlpha' });
+  const linkB = buildVendorBotLink('VND-000002', { TELEGRAM_BOT_USERNAME: 'BotBeta' });
+  assert.equal(linkA, 'https://t.me/BotAlpha?start=VND-000001');
+  assert.equal(linkB, 'https://t.me/BotBeta?start=VND-000002');
+  assert.notEqual(linkA, linkB);
+
+  for (const link of [linkA, linkB]) {
+    const created = QRCode.create(link, { errorCorrectionLevel: 'M' });
+    const encoded = created.segments.map((segment) => {
+      const data = segment.data;
+      if (typeof data === 'string') return data;
+      return Buffer.from(data).toString('utf8');
+    }).join('');
+    assert.equal(encoded, link);
+
+    const png = await QRCode.toBuffer(link, {
+      type: 'png',
+      width: DOWNLOAD_QR_SIZE,
+      margin: 4,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000', light: '#ffffff' }
+    });
+    assert.equal(png[0], 0x89);
+    assert.equal(png[1], 0x50);
+    assert.equal(png[2], 0x4e);
+    assert.equal(png[3], 0x47);
+    assert.ok(png.length > 1500, 'PNG should be large enough for print/share use');
+  }
+
+  assert.equal(buildVendorBotLink('VND-000001', {}), null);
+  const qrSource = await fs.readFile(path.join(process.cwd(), 'public/telegramQr.js'), 'utf8');
+  assert.match(qrSource, /URL\.revokeObjectURL/);
+  assert.match(qrSource, /createObjectURL/);
+  assert.match(qrSource, /from '\.\/lib\/qrcode\.js'/);
+}
+
 await testVendorBotLinks();
 await testVendorPayloadHasBotLinkAndNoStaffLink();
 await testVendorPayloadLinkUnavailable();
@@ -268,4 +322,5 @@ await testDeleteVendorBlockedWithOwnedPlayers();
 await testDeleteUnknownVendor();
 await testDeleteRollbackPreservesSettlementHistory();
 await testVendorUiControlsAndNoStaffCopy();
+await testVendorTelegramQrHelpers();
 console.log('Vendor admin improvement tests passed.');

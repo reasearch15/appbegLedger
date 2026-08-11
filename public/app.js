@@ -29,6 +29,7 @@ import {
   unmatchedReasonDisplay
 } from './paymentStatus.js';
 import { createOngoingController } from './ongoing.js';
+import { downloadTelegramQr, paintTelegramQr, telegramQrFilename } from './telegramQr.js';
 
 const app = document.querySelector('#app');
 const socket = io({ withCredentials: true });
@@ -3203,11 +3204,15 @@ function vendorsWorkspace() {
               </div>
             </div>
             <div class="vendor-bot-link-card">
-              <div>
+              <div class="vendor-bot-link-main">
                 <div class="subtle">Vendor Bot Link</div>
                 ${vendorBotLinkValue(selected)
-                  ? `<a class="mono vendor-bot-link" href="${escapeHtml(vendorBotLinkValue(selected))}" target="_blank" rel="noopener noreferrer">${escapeHtml(vendorBotLinkValue(selected))}</a>`
-                  : '<div class="subtle">Vendor bot link unavailable</div>'}
+                  ? `<a class="mono vendor-bot-link" href="${escapeHtml(vendorBotLinkValue(selected))}" target="_blank" rel="noopener noreferrer">${escapeHtml(vendorBotLinkValue(selected))}</a>
+                    <div class="vendor-telegram-qr-block">
+                      <canvas class="vendor-telegram-qr" data-vendor-telegram-qr data-qr-url="${escapeHtml(vendorBotLinkValue(selected))}" width="168" height="168" aria-label="Telegram bot QR code"></canvas>
+                      <button class="button" type="button" data-vendor-download-qr>Download QR</button>
+                    </div>`
+                  : '<div class="subtle vendor-telegram-qr-missing">Telegram link not configured</div>'}
               </div>
               <div class="settings-actions vendor-bot-link-actions">
                 <button class="button secondary" type="button" data-vendor-copy="link" ${vendorBotLinkValue(selected) ? '' : 'disabled'}>Copy Link</button>
@@ -4073,6 +4078,13 @@ function bindEvents() {
     openVendorBot();
   });
 
+  document.querySelector('[data-vendor-download-qr]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    void downloadSelectedVendorTelegramQr();
+  });
+
+  void hydrateVendorTelegramQr();
+
   document.querySelector('[data-delete-vendor]')?.addEventListener('click', (event) => {
     event.preventDefault();
     void deleteSelectedVendor();
@@ -4865,6 +4877,38 @@ function openVendorBot() {
     return;
   }
   window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+async function hydrateVendorTelegramQr() {
+  const canvas = document.querySelector('[data-vendor-telegram-qr]');
+  if (!canvas) return;
+  const url = String(canvas.dataset.qrUrl || '').trim();
+  if (!url) return;
+  try {
+    await paintTelegramQr(canvas, url);
+  } catch (error) {
+    console.error('Could not render vendor Telegram QR.', error);
+  }
+}
+
+async function downloadSelectedVendorTelegramQr() {
+  const selected = state.selectedVendor;
+  const url = vendorBotLinkValue(selected);
+  if (!url) {
+    state.vendorError = 'Telegram link not configured';
+    state.vendorSuccess = null;
+    render();
+    return;
+  }
+  try {
+    await downloadTelegramQr(url, telegramQrFilename(selected?.name));
+    state.vendorError = null;
+    state.vendorSuccess = 'Telegram QR downloaded.';
+  } catch (error) {
+    state.vendorError = error.message || 'Could not download Telegram QR.';
+    state.vendorSuccess = null;
+  }
+  render();
 }
 
 async function deleteSelectedVendor() {
