@@ -1,15 +1,32 @@
 /**
  * AppBeg Freeplay issuance boundary.
  *
- * Ledger has no client that actually issues Freeplay. AppBeg financial cache
- * only mentions `authority_freeplay_claim` as a player-side claim event, not
- * an admin issuance API.
+ * Re-investigated locally: Ledger has deposit credit (`/api/internal/ledger/credit-deposit`),
+ * player create, and cashout clients. Freeplay appears only as a player-side
+ * `authority_freeplay_claim` financial-cache event, not an admin issuance API.
  *
- * Do not invent an HTTP contract. Staff Give/Decline is implemented locally;
- * issuance remains blocked until a proven AppBeg endpoint exists.
+ * Do not invent an HTTP contract. Staff may APPROVE a request locally.
+ * `decision = given` is allowed only after a proven AppBeg issuance succeeds.
+ *
+ * The idempotency key is stable per support_requests.id so RETRY cannot mint
+ * a second financial identity for the same Freeplay request.
  */
 
 export const FREEPLAY_ISSUANCE_BLOCKER = 'no_proven_appbeg_freeplay_endpoint';
+
+export const FREEPLAY_DECISION = {
+  APPROVED: 'approved',
+  GIVEN: 'given',
+  DECLINED: 'declined'
+};
+
+export const FREEPLAY_ISSUANCE_STATUS = {
+  PENDING: 'pending',
+  ISSUING: 'issuing',
+  ISSUED: 'issued',
+  FAILED: 'failed',
+  UNAVAILABLE: 'unavailable'
+};
 
 export function buildFreeplayIdempotencyKey(requestId) {
   const id = Number(requestId);

@@ -252,6 +252,8 @@ async function run() {
     recipientContactId: ayush.id
   });
   assert.equal(Number(w1.id), Number(w2.id));
+  assert.equal(Number(w1.first_deposit_amount), 0);
+  assert.equal(w1.expected_payment_cents == null || w1.expected_payment_cents === '', true);
   const expires = new Date(w1.expires_at).getTime() - Date.now();
   assert.ok(expires > 14 * 60 * 1000 && expires <= 15 * 60 * 1000 + 2000);
   console.log('ok one active deposit window; 15 minute lifetime; payer vs recipient stored');
@@ -348,6 +350,10 @@ async function run() {
   const firstGive = await resolveFreeplayGive(store, requestId, 10, '8002', 'Coadmin');
   assert.equal(firstGive.ok, true);
   assert.equal(firstGive.issuanceBlocked, true);
+  assert.equal(firstGive.issued, false);
+  assert.equal(firstGive.request.decision, 'approved');
+  assert.notEqual(firstGive.request.decision, 'given');
+  assert.equal(firstGive.request.issuance_status, 'unavailable');
   assert.equal(firstGive.error.code, FREEPLAY_ISSUANCE_BLOCKER);
   const secondGive = await resolveFreeplayGive(store, requestId, 10, '9001', 'Root');
   assert.equal(secondGive.ok, false);

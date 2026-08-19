@@ -6,9 +6,11 @@ import {
   OPERATIONAL_ROLES,
   assertNotRootRemoval,
   canManageStaff,
+  describeRootAdminEstablishment,
   normalizeTelegramUserId,
   rootAdminTelegramUserIdFromEnv
 } from '../telegram/operationalRoles.js';
+import { FREEPLAY_DECISION, FREEPLAY_ISSUANCE_STATUS } from '../appbeg/freeplayIssuanceClient.js';
 
 export function attachTelegramFirstStore(store, {
   db,
@@ -79,6 +81,25 @@ export function attachTelegramFirstStore(store, {
       ok: true,
       created: true,
       role: await getActiveOperationalRole(rootId)
+    };
+  }
+
+  async function inspectRootAdminBinding(env = process.env) {
+    const establishment = describeRootAdminEstablishment(env);
+    const bound = await db.prepare(`
+      SELECT * FROM operational_roles
+      WHERE role = 'root_admin' AND revoked_at IS NULL
+      LIMIT 1
+    `).get();
+    const boundTelegramUserId = bound?.telegram_user_id || null;
+    return {
+      ...establishment,
+      boundTelegramUserId,
+      aligned: Boolean(
+        establishment.configuredTelegramUserId
+        && boundTelegramUserId
+        && String(boundTelegramUserId) === String(establishment.configuredTelegramUserId)
+      )
     };
   }
 
@@ -470,10 +491,11 @@ export function attachTelegramFirstStore(store, {
     if (!Number.isInteger(id) || id <= 0 || !actorId) {
       return { ok: false, reason: 'invalid_claim' };
     }
-    if (!['given', 'declined'].includes(decision)) {
+    if (![FREEPLAY_DECISION.APPROVED, FREEPLAY_DECISION.DECLINED].includes(decision)) {
       return { ok: false, reason: 'invalid_decision' };
     }
     const now = nowIso();
+    const terminal = decision === FREEPLAY_DECISION.DECLINED;
     const result = await db.prepare(`
       UPDATE support_requests
       SET decision = ?,
@@ -481,7 +503,8 @@ export function attachTelegramFirstStore(store, {
           decided_by_telegram_user_id = ?,
           decided_by_name = ?,
           decided_at = ?,
-          status = 'completed',
+          issuance_status = CASE WHEN ? = 'approved' THEN 'pending' ELSE issuance_status END,
+          status = ?,
           completed_by_telegram_user_id = ?,
           completed_by_name = ?,
           completed_at = ?,
@@ -496,9 +519,11 @@ export function attachTelegramFirstStore(store, {
       actorId,
       actorName,
       now,
-      actorId,
-      actorName,
-      now,
+      decision,
+      terminal ? 'completed' : 'claimed',
+      terminal ? actorId : null,
+      terminal ? actorName : null,
+      terminal ? now : null,
       now,
       id
     );
@@ -521,6 +546,86 @@ export function attachTelegramFirstStore(store, {
       WHERE id = ?
     `).run(issuanceStatus || null, issuanceError, now, requestId);
     return await db.prepare('SELECT * FROM support_requests WHERE id = ?').get(requestId);
+  }
+
+  async function beginFreeplayIssuance(requestId, { recoverIssuing = false } = {}) {
+    const id = Number(requestId);
+    if (!Number.isInteger(id) || id <= 0) return { ok: false, reason: 'invalid_request' };
+    const now = nowIso();
+    const allowed = recoverIssuing
+      ? [
+          FREEPLAY_ISSUANCE_STATUS.PENDING,
+          FREEPLAY_ISSUANCE_STATUS.FAILED,
+          FREEPLAY_ISSUANCE_STATUS.UNAVAILABLE,
+          FREEPLAY_ISSUANCE_STATUS.ISSUING
+        ]
+      : [
+          FREEPLAY_ISSUANCE_STATUS.PENDING,
+          FREEPLAY_ISSUANCE_STATUS.FAILED,
+          FREEPLAY_ISSUANCE_STATUS.UNAVAILABLE
+        ];
+    const placeholders = allowed.map(() => '?').join(', ');
+    const result = await db.prepare(`
+      UPDATE support_requests
+      SET issuance_status = ?, updated_at = ?
+      WHERE id = ?
+        AND kind = 'freeplay'
+        AND decision = ?
+        AND (issuance_status IS NULL OR issuance_status IN (${placeholders}))
+    `).run(
+      FREEPLAY_ISSUANCE_STATUS.ISSUING,
+      now,
+      id,
+      FREEPLAY_DECISION.APPROVED,
+      ...allowed
+    );
+    const request = await db.prepare('SELECT * FROM support_requests WHERE id = ?').get(id);
+    if (!result.changes) {
+      return {
+        ok: false,
+        reason: request?.decision === FREEPLAY_DECISION.GIVEN ? 'already_issued' : 'issuance_locked',
+        request
+      };
+    }
+    return { ok: true, request };
+  }
+
+  async function markFreeplayGiven(requestId) {
+    const id = Number(requestId);
+    if (!Number.isInteger(id) || id <= 0) return { ok: false, reason: 'invalid_request' };
+    const now = nowIso();
+    const result = await db.prepare(`
+      UPDATE support_requests
+      SET decision = ?,
+          issuance_status = ?,
+          issuance_error = NULL,
+          status = 'completed',
+          completed_by_telegram_user_id = decided_by_telegram_user_id,
+          completed_by_name = decided_by_name,
+          completed_at = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND kind = 'freeplay'
+        AND decision = ?
+        AND issuance_status = ?
+    `).run(
+      FREEPLAY_DECISION.GIVEN,
+      FREEPLAY_ISSUANCE_STATUS.ISSUED,
+      now,
+      now,
+      id,
+      FREEPLAY_DECISION.APPROVED,
+      FREEPLAY_ISSUANCE_STATUS.ISSUING
+    );
+    const request = await db.prepare('SELECT * FROM support_requests WHERE id = ?').get(id);
+    if (!result.changes) {
+      return {
+        ok: false,
+        reason: request?.decision === FREEPLAY_DECISION.GIVEN ? 'already_issued' : 'not_issuable',
+        request
+      };
+    }
+    return { ok: true, request };
   }
 
   async function listPendingFreeplayRequests(limit = 50) {
@@ -668,6 +773,7 @@ export function attachTelegramFirstStore(store, {
     listActiveOperationalRoles,
     listOperationalRoleHistory,
     bootstrapRootAdminFromEnv,
+    inspectRootAdminBinding,
     grantOperationalRole,
     revokeOperationalRole,
     getConfidenceMode,
@@ -686,6 +792,8 @@ export function attachTelegramFirstStore(store, {
     listUnmatchedPaymentsForIdentity,
     claimFreeplayDecision,
     updateFreeplayIssuance,
+    beginFreeplayIssuance,
+    markFreeplayGiven,
     listPendingFreeplayRequests,
     listPendingReviewPayments,
     listUnmatchedPaymentsForPayer,

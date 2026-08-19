@@ -176,3 +176,18 @@ export function freeplayConfirmButtons(requestId) {
     ]]
   };
 }
+
+export function freeplayIssuedPlayerText(amount) {
+  return `Your Freeplay of $${Number(amount).toFixed(2)} has been issued.`;
+}
+
+export function freeplayNotLoadedStaffText({ username, amount, approvedBy, reason = null } = {}) {
+  return [
+    '🔴 FREEPLAY NOT LOADED',
+    `Player: ${username || 'Unknown'}`,
+    `Amount: $${Number(amount).toFixed(2)}`,
+    `Approved by: ${approvedBy || 'Staff'}`,
+    '',
+    reason || 'AppBeg Freeplay issuance is not configured.'
+  ].join('\n');
+}

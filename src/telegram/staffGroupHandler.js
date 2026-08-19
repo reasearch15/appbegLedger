@@ -16,6 +16,7 @@ import {
 } from './staffOperations.js';
 import {
   canManageStaff,
+  canOperatePayments,
   canToggleConfidenceMode,
   isStaffGroupChat,
   normalizeTelegramUserId
@@ -31,7 +32,9 @@ import {
   freeplayCardText,
   freeplayCardButtons,
   freeplayConfirmText,
-  freeplayConfirmButtons
+  freeplayConfirmButtons,
+  freeplayIssuedPlayerText,
+  freeplayNotLoadedStaffText
 } from './staffCards.js';
 import { queueBotReply } from './chatbotProcessor.js';
 
@@ -68,6 +71,31 @@ function parseId(prefix, data) {
   if (!raw.startsWith(prefix)) return null;
   const id = Number(raw.slice(prefix.length));
   return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+async function currentOperationalActor(store, telegramUserId) {
+  const actorId = normalizeTelegramUserId(telegramUserId);
+  const role = actorId ? await store.getActiveOperationalRole(actorId) : null;
+  if (!role || !canOperatePayments(role.role)) return null;
+  return { actorId, role };
+}
+
+function logUnauthorizedStaffGroupInbound(ctx, reason) {
+  console.warn('[staff-topic] unauthorized_inbound', JSON.stringify({
+    telegramUserId: normalizeTelegramUserId(ctx.from?.id),
+    chatId: ctx.chat?.id ?? null,
+    threadId: ctx.message?.message_thread_id
+      ?? ctx.callbackQuery?.message?.message_thread_id
+      ?? null,
+    reason,
+    hasMedia: Boolean(
+      ctx.message?.photo
+      || ctx.message?.document
+      || ctx.message?.video
+      || ctx.message?.audio
+      || ctx.message?.voice
+    )
+  }));
 }
 
 async function reply(ctx, text, extra = undefined) {
@@ -293,25 +321,36 @@ export async function handleStaffCallbackQuery({ ctx, store }) {
         ctx.from?.first_name || null
       );
       clearPending(actorId);
-      await ctx.answerCbQuery(result.ok ? 'Resolved' : 'Already resolved');
-      if (result.ok && result.request?.contact_id) {
-        const contact = await store.getUserProfile(result.request.contact_id);
+      if (!result.ok) {
+        await ctx.answerCbQuery('Already resolved');
+        return true;
+      }
+      const approvedBy = ctx.from?.first_name || actorId;
+      if (result.issued) {
+        await ctx.answerCbQuery('Issued');
+        const contact = result.request?.contact_id
+          ? await store.getUserProfile(result.request.contact_id)
+          : null;
         if (contact) {
-          const playerText = result.issuanceBlocked
-            ? 'Your Freeplay request was approved. Issuance is pending AppBeg availability.'
-            : `Your Freeplay request was approved for $${Number(pending.amount).toFixed(2)}.`;
           await queueBotReply({
             store,
             user: contact,
-            text: playerText,
+            text: freeplayIssuedPlayerText(pending.amount),
             buttons: [],
             bot: globalThis.telegramBot || null
           }).catch(() => null);
         }
+        return true;
       }
-      if (result.issuanceBlocked) {
-        await reply(ctx, 'Freeplay decision saved. AppBeg issuance is not available from Ledger (no proven endpoint).');
-      }
+      await ctx.answerCbQuery('Approved, not issued');
+      await reply(ctx, freeplayNotLoadedStaffText({
+        username: result.request?.username,
+        amount: pending.amount,
+        approvedBy,
+        reason: result.error?.code === 'no_proven_appbeg_freeplay_endpoint'
+          ? 'AppBeg Freeplay issuance is not configured.'
+          : 'AppBeg Freeplay issuance failed. The request was not marked given.'
+      }));
       return true;
     }
     const msgContactId = parseId(STAFF_CB.FP_MSG, data);
@@ -332,10 +371,13 @@ export async function handleStaffCallbackQuery({ ctx, store }) {
 
 export async function handleStaffGroupMessage({ ctx, store, bot }) {
   if (!isStaffGroupChat(ctx.chat?.id)) return false;
-  const actorId = normalizeTelegramUserId(ctx.from?.id);
-  const role = actorId ? await store.getActiveOperationalRole(actorId) : null;
-  if (!role) return true;
-  const text = String(ctx.message.text || ctx.message.caption || '').trim();
+  const actor = await currentOperationalActor(store, ctx.from?.id);
+  if (!actor) {
+    logUnauthorizedStaffGroupInbound(ctx, 'no_operational_role');
+    return true;
+  }
+  const { actorId } = actor;
+  const text = String(ctx.message?.text || ctx.message?.caption || '').trim();
   if (!text) return true;
 
   const pending = getPending(actorId);
@@ -391,9 +433,18 @@ export async function handleStaffGroupMessage({ ctx, store, bot }) {
     return true;
   }
   if (pending?.kind === 'message_player') {
-    const result = await staffMessagePlayer(store, pending.contactId, text, actorId);
-    clearPending(actorId);
-    await ctx.reply(result.delivered ? 'Message sent privately.' : 'Message saved. Player delivery failed.');
+    try {
+      const result = await staffMessagePlayer(store, pending.contactId, text, actorId);
+      clearPending(actorId);
+      await ctx.reply(result.delivered ? 'Message sent privately.' : 'Message saved. Player delivery failed.');
+    } catch (error) {
+      if (error.code === 'FORBIDDEN') {
+        logUnauthorizedStaffGroupInbound(ctx, 'revoked_before_forward');
+        clearPending(actorId);
+        return true;
+      }
+      await ctx.reply(error.message || 'Could not message player.');
+    }
     return true;
   }
 
@@ -403,10 +454,17 @@ export async function handleStaffGroupMessage({ ctx, store, bot }) {
   if (!topic) return true;
   const contact = await store.getUserProfile(topic.contact_id);
   if (!contact) return true;
+  const liveActor = await currentOperationalActor(store, actorId);
+  if (!liveActor) {
+    logUnauthorizedStaffGroupInbound(ctx, 'revoked_before_forward');
+    return true;
+  }
   await store.storeOutgoingMessage?.({
+    telegramUserId: contact.id,
     userId: contact.id,
     text,
     senderType: 'staff',
+    staffName: ctx.from?.first_name || liveActor.actorId,
     telegramMessageId: ctx.message.message_id
   }).catch(() => null);
   try {

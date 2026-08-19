@@ -53,6 +53,26 @@ export function rootAdminTelegramUserIdFromEnv(env = process.env) {
   return normalizeTelegramUserId(env.ROOT_ADMIN_TELEGRAM_USER_ID);
 }
 
+/**
+ * Root Admin is the numeric Telegram user ID of the Royal VIP channel
+ * creator/owner. Telegram Bot API cannot reliably prove channel ownership
+ * (the creator may be hidden; the bot may not be a channel administrator).
+ *
+ * ROOT_ADMIN_TELEGRAM_USER_ID is therefore an explicit trusted bootstrap
+ * value. It is never inferred from username, first staff member, channel
+ * membership, or callback payload.
+ *
+ * Ownership machine-verified: NO
+ */
+export function describeRootAdminEstablishment(env = process.env) {
+  return {
+    machineVerified: false,
+    source: 'trusted_bootstrap_env',
+    configuredTelegramUserId: rootAdminTelegramUserIdFromEnv(env),
+    requirement: 'ROOT_ADMIN_TELEGRAM_USER_ID must be the numeric Telegram user ID of the Royal VIP channel creator/owner.'
+  };
+}
+
 export function isStaffGroupChat(chatId, env = process.env) {
   const configured = staffGroupIdFromEnv(env);
   if (!configured) return false;

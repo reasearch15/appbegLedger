@@ -3,7 +3,7 @@ import { CONFIDENCE } from '../payments/confidenceEngine.js';
 import { ROUTING_STATUS } from '../payments/constants.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 import { queueBotReply } from './chatbotProcessor.js';
-import { FREEPLAY_ISSUANCE_BLOCKER, buildFreeplayIdempotencyKey, issueAppBegFreeplay } from '../appbeg/freeplayIssuanceClient.js';
+import { FREEPLAY_ISSUANCE_BLOCKER, FREEPLAY_DECISION, FREEPLAY_ISSUANCE_STATUS, buildFreeplayIdempotencyKey, issueAppBegFreeplay } from '../appbeg/freeplayIssuanceClient.js';
 import {
   STAFF_CB,
   isStaffCallback,
@@ -224,9 +224,11 @@ export async function staffMessagePlayer(store, contactId, text, actorTelegramUs
   const body = String(text || '').trim();
   if (!body) throw new Error('Message is empty.');
   await store.storeOutgoingMessage?.({
+    telegramUserId: contact.id,
     userId: contact.id,
     text: body,
-    senderType: 'staff'
+    senderType: 'staff',
+    staffName: String(actorTelegramUserId)
   }).catch(() => null);
   try {
     await queueBotReply({
@@ -285,7 +287,7 @@ export async function staffRetryCredit(store, paymentId, actorTelegramUserId) {
   });
 }
 
-export async function resolveFreeplayGive(store, requestId, amount, actorTelegramUserId, actorName) {
+export async function resolveFreeplayGive(store, requestId, amount, actorTelegramUserId, actorName, { issuer = issueAppBegFreeplay } = {}) {
   await requireOperationalRole(store, actorTelegramUserId);
   const parsedAmount = Number(amount);
   if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
@@ -295,27 +297,74 @@ export async function resolveFreeplayGive(store, requestId, amount, actorTelegra
   }
   const claimed = await store.claimFreeplayDecision({
     requestId,
-    decision: 'given',
+    decision: FREEPLAY_DECISION.APPROVED,
     amount: parsedAmount,
     actorTelegramUserId,
     actorName
   });
   if (!claimed.ok) return claimed;
+  return attemptFreeplayIssuance(store, requestId, parsedAmount, { issuer, recoverIssuing: false });
+}
+
+export async function retryFreeplayIssuance(store, requestId, actorTelegramUserId, { issuer = issueAppBegFreeplay } = {}) {
+  await requireOperationalRole(store, actorTelegramUserId);
+  const request = await store.db.prepare('SELECT * FROM support_requests WHERE id = ?').get(requestId);
+  if (!request || request.kind !== 'freeplay') {
+    return { ok: false, reason: 'not_found', request: request || null };
+  }
+  if (request.decision === FREEPLAY_DECISION.GIVEN) {
+    return { ok: false, reason: 'already_issued', request, idempotencyKey: buildFreeplayIdempotencyKey(requestId) };
+  }
+  if (request.decision !== FREEPLAY_DECISION.APPROVED) {
+    return { ok: false, reason: 'not_approved', request };
+  }
+  const parsedAmount = Number(request.decided_amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    const error = new Error('Enter a valid Freeplay amount.');
+    error.code = 'INVALID_AMOUNT';
+    throw error;
+  }
+  return attemptFreeplayIssuance(store, requestId, parsedAmount, { issuer, recoverIssuing: true });
+}
+
+async function attemptFreeplayIssuance(store, requestId, amount, { issuer, recoverIssuing }) {
+  const idempotencyKey = buildFreeplayIdempotencyKey(requestId);
+  const began = await store.beginFreeplayIssuance(requestId, { recoverIssuing });
+  if (!began.ok) {
+    return { ...began, issuanceBlocked: began.request?.decision !== FREEPLAY_DECISION.GIVEN, issued: began.request?.decision === FREEPLAY_DECISION.GIVEN, idempotencyKey };
+  }
   try {
-    await issueAppBegFreeplay({
+    await issuer({
       requestId,
-      amount: parsedAmount,
-      idempotencyKey: buildFreeplayIdempotencyKey(requestId)
+      amount,
+      idempotencyKey
     });
   } catch (error) {
-    await store.updateFreeplayIssuance(requestId, {
-      issuanceStatus: error.code === FREEPLAY_ISSUANCE_BLOCKER ? 'unavailable' : 'failed',
+    const issuanceStatus = error.code === FREEPLAY_ISSUANCE_BLOCKER
+      ? FREEPLAY_ISSUANCE_STATUS.UNAVAILABLE
+      : FREEPLAY_ISSUANCE_STATUS.FAILED;
+    const request = await store.updateFreeplayIssuance(requestId, {
+      issuanceStatus,
       issuanceError: String(error.message || error).slice(0, 500)
     });
-    return { ...claimed, issuanceBlocked: true, error };
+    return {
+      ok: true,
+      request,
+      issued: false,
+      issuanceBlocked: true,
+      idempotencyKey,
+      error
+    };
   }
-  await store.updateFreeplayIssuance(requestId, { issuanceStatus: 'issued' });
-  return { ...claimed, issuanceBlocked: false };
+  const given = await store.markFreeplayGiven(requestId);
+  return {
+    ok: given.ok,
+    request: given.request,
+    issued: given.ok,
+    issuanceBlocked: false,
+    idempotencyKey,
+    reason: given.ok ? undefined : given.reason
+  };
 }
 
 export async function resolveFreeplayDecline(store, requestId, actorTelegramUserId, actorName) {

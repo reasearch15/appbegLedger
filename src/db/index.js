@@ -301,8 +301,8 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return { user, conversation, inserted: result.changes > 0, firstMessage: result.changes > 0 && existingMessageCount === 0 };
   }
 
-  async function storeOutgoingMessage({ telegramUserId, telegramMessageId, text, payload, senderType = 'staff', staffName = 'Staff', messageType = 'text', source = 'bot_api', sentAt = nowIso() }) {
-    const user = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(telegramUserId);
+  async function storeOutgoingMessage({ telegramUserId, userId, telegramMessageId, text, payload, senderType = 'staff', staffName = 'Staff', messageType = 'text', source = 'bot_api', sentAt = nowIso() }) {
+    const user = await db.prepare('SELECT * FROM telegram_users WHERE id = ?').get(telegramUserId ?? userId);
     if (!user) throw new Error('Telegram user not found.');
     const conversation = await ensureConversation(user.id, sentAt);
 
@@ -8363,6 +8363,17 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   });
   await store.bootstrapRootAdminFromEnv().catch((error) => {
     console.warn('[ops] root_admin_bootstrap_skipped', error.message);
+  });
+  await store.inspectRootAdminBinding?.().then((binding) => {
+    console.info('[ops] root_admin_binding', JSON.stringify({
+      machineVerified: binding.machineVerified,
+      source: binding.source,
+      configuredTelegramUserId: binding.configuredTelegramUserId,
+      boundTelegramUserId: binding.boundTelegramUserId,
+      aligned: binding.aligned
+    }));
+  }).catch((error) => {
+    console.warn('[ops] root_admin_binding_inspect_failed', error.message);
   });
   await store.backfillLegacyPaymentIdentityEvidence({ limit: 2000 }).catch((error) => {
     console.warn('[payments] legacy_identity_backfill_skipped', error.message);
