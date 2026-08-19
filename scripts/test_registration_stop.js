@@ -104,7 +104,7 @@ async function run() {
 
   const store = createFakeStore();
   let decision = await decideAndApply(store, contact, '/register');
-  assertEqual(decision.statePatch.currentStep, 'payment_name');
+  assertEqual(decision.statePatch.currentStep, 'username');
   assertEqual(store.state.current_flow, 'bot_registration');
 
   decision = await decideAndApply(store, contact, 'stop');
@@ -118,32 +118,30 @@ async function run() {
   console.log('ok Register -> Stop -> idle');
 
   decision = await decideAndApply(store, contact, '/register');
-  assertEqual(decision.kind, 'registration_ask_payment_name');
-  assertEqual(decision.statePatch.currentStep, 'payment_name');
-  console.log('ok Register after Stop starts fresh payment name flow');
+  assertEqual(decision.kind, 'registration_ask_username');
+  assertEqual(decision.statePatch.currentStep, 'username');
+  console.log('ok Register after Stop starts fresh username flow');
 
   const nameStore = createFakeStore();
   await decideAndApply(nameStore, contact, '/register');
-  await decideAndApply(nameStore, contact, 'John Smith');
-  assertEqual(nameStore.state.current_step, 'first_deposit_amount');
-  assertEqual(nameStore.state.registration_info.payment_display_name, 'John Smith');
+  await decideAndApply(nameStore, contact, 'JohnVIP01');
+  assertEqual(nameStore.state.current_step, 'password');
 
   decision = await decideAndApply(nameStore, contact, 'cancel');
   assertEqual(decision.kind, 'registration_cancel_confirm');
   decision = await decideAndApply(nameStore, contact, '', 'register:cancel_confirm');
   assertEqual(decision.kind, 'registration_stopped');
   assertEqual(nameStore.state.current_flow, null);
-  assertEqual(nameStore.state.registration_info.payment_display_name, undefined);
 
   await decideAndApply(nameStore, contact, '/register');
-  assertEqual(nameStore.state.current_step, 'payment_name');
-  console.log('ok Register -> Name -> Stop -> Register starts fresh');
+  assertEqual(nameStore.state.current_step, 'username');
+  console.log('ok Register -> Username -> Stop -> Register starts fresh');
 
-  const paymentStore = createFakeStore();
-  await decideAndApply(paymentStore, contact, '/register');
-  await decideAndApply(paymentStore, contact, 'John Smith');
-  await decideAndApply(paymentStore, contact, '25.50');
-  paymentStore.state.current_step = 'await_payment';
+  const paymentStore = createFakeStore({
+    current_flow: 'bot_registration',
+    current_step: 'await_payment',
+    registration_info: { preferred_appbeg_username: 'JohnVIP01' }
+  });
   paymentStore.setPaymentWindow({ id: 42, status: 'active' });
 
   decision = await decideAndApply(paymentStore, contact, 'quit');
@@ -157,13 +155,13 @@ async function run() {
 
   const waitStore = createFakeStore({
     current_flow: 'bot_registration',
-    current_step: 'payment_name',
+    current_step: 'username',
     registration_info: {}
   });
   decision = await decideBotReply({ store: waitStore, contact, messageText: 'stop' });
   assertEqual(decision.kind, 'registration_cancel_confirm');
   assertEqual(decision.kind !== 'registration_ask_first_deposit_amount', true);
-  console.log('ok stop is not treated as payment name');
+  console.log('ok stop is not treated as a username');
 
   console.log('ALL REGISTRATION STOP CHECKS PASSED');
 }

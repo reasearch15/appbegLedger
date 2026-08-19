@@ -25,6 +25,7 @@ import {
 import { continueBotRegistrationAfterPayment } from './registrationPaymentFlow.js';
 import { continueRegisteredDepositAfterPayment } from './depositPaymentFlow.js';
 import { queueBotReply } from '../telegram/chatbotProcessorDelivery.js';
+import { routeParsedPaymentWithConfidence } from './confidenceRouter.js';
 
 const DEPOSIT_AMBIGUITY_MESSAGE = 'We found another active deposit request with the same payment details. Your payment is safe, but it needs staff verification before we can credit it. Please wait while our team confirms ownership.';
 const DEPOSIT_AMBIGUITY_NOT_SELECTED_MESSAGE = 'We reviewed the payment and it did not match your deposit request. No funds were credited to your account from that payment. You may start a new deposit request if needed.';
@@ -517,6 +518,11 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
     senderName: parsed.payment_sender_name
   });
 
+  const confidenceRoute = await routeParsedPaymentWithConfidence(store, payment, parsed, { bot, io, now });
+  if (confidenceRoute.used) {
+    return confidenceRoute.result;
+  }
+
   const activeWindows = await store.listActiveRegistrationPaymentWindows();
   const match = findMatchingActivePaymentWindow(activeWindows, parsed, { now });
 
@@ -594,27 +600,26 @@ export async function routePaymentEvent(store, paymentId, { force = false, bot =
   }));
 
   if (hasSearchExpired({ freeze_at: freezeAt }, now)) {
-    const freezeReason = unmatchedReason === UNMATCHED_REASON.AMOUNT_MISMATCH
-      ? (unmatchedDetail || 'Amount mismatch')
-      : unmatchedReason === UNMATCHED_REASON.NAME_MISMATCH
-        ? (unmatchedDetail || 'Payment name mismatch')
-        : unmatchedReason === UNMATCHED_REASON.WINDOW_EXPIRED
-          ? (unmatchedDetail || ROUTING_REASON.REGISTRATION_WINDOW_EXPIRED)
-          : ROUTING_REASON.NO_ACTIVE_WINDOW;
-    return freezePayment(store, payment, {
-      reason: freezeReason,
-      unmatchedReason,
-      unmatchedDetail,
-      contactId: unmatched.candidateWindow?.contact_id ?? null,
-      windowId: unmatched.candidateWindow?.id ?? null,
-      metadata: {
-        amount: parsed.amount,
-        expectedAmount: unmatched.expectedAmount,
-        paymentApp: parsed.payment_app,
-        senderName: parsed.payment_sender_name,
-        freezeAt
-      }
+    await store.updatePaymentRouting(payment.id, {
+      routing_status: ROUTING_STATUS.UNMATCHED,
+      routing_owner: ROUTING_OWNER.APPBEG,
+      routing_reason: unmatchedDetail || ROUTING_REASON.NO_ACTIVE_WINDOW,
+      unmatched_reason: unmatchedReason,
+      routed_at: new Date().toISOString(),
+      frozen_at: null,
+      handled_by: null
     });
+    await store.logPaymentRouting(payment.id, 'payment_unmatched', 'No eligible window; left unmatched instead of auto-freeze.', {
+      unmatchedReason,
+      unmatchedDetail
+    });
+    return {
+      ok: true,
+      payment: await store.getPaymentEvent(payment.id),
+      outcome: ROUTING_STATUS.UNMATCHED,
+      unmatchedReason,
+      unmatchedDetail
+    };
   }
 
   return keepSearching(store, payment, {

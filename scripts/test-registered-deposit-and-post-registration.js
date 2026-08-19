@@ -267,19 +267,21 @@ async function run() {
   assert.doesNotMatch(sent.text, /AppBeg/);
   assert.doesNotMatch(sent.text, /Secret123/);
   assert.deepEqual(sent.payload.buttons.map((row) => row.map((button) => button.text)), [
-    ['🟢 Deposit', '🔴 Royal VIP'],
-    ['My Account', 'Help', 'Support']
+    ['PLAY'],
+    ['DEPOSIT'],
+    ['FREEPLAY'],
+    ['My Account', 'Help', 'SUPPORT']
   ]);
-  assert.equal(sent.payload.buttons[0][1].web_app.url, 'https://royal.youplatform.org');
-  assert.equal(sent.payload.buttons[0][1].url, undefined);
-  assert.equal(sent.payload.buttons[0][1].data, undefined);
-  assert.deepEqual(sent.payload.reply_markup.inline_keyboard[0][1], {
-    text: '🔴 Royal VIP',
+  assert.equal(sent.payload.buttons[0][0].web_app.url, 'https://royal.youplatform.org');
+  assert.equal(sent.payload.buttons[0][0].url, undefined);
+  assert.equal(sent.payload.buttons[0][0].data, undefined);
+  assert.deepEqual(sent.payload.reply_markup.inline_keyboard[0][0], {
+    text: 'PLAY',
     style: 'danger',
     web_app: { url: 'https://royal.youplatform.org' }
   });
-  assert.equal(sent.payload.buttons[0][0].style, 'success');
-  assert.equal(sent.payload.buttons[0][1].style, 'danger');
+  assert.equal(sent.payload.buttons[1][0].style, 'success');
+  assert.equal(sent.payload.buttons[0][0].style, 'danger');
   assert.equal((await registrationStore.getAutomationState()).registration_info.active_bot_message_id, 1);
   globalThis.telegramBot = previousBot;
   globalThis.appbegStore = previousStore;
@@ -302,45 +304,35 @@ async function run() {
     contact: registeredContact(),
     action: 'menu:deposit'
   });
-  assert.equal(startDeposit.kind, 'deposit_ask_amount');
+  assert.equal(startDeposit.kind, 'deposit_choose_target');
   assert.doesNotMatch(startDeposit.replies[0].text, /What payment name/i);
-  assert.match(startDeposit.replies[0].text, /Amy Fei/);
-  console.log('ok registered Deposit callback reuses saved payment name');
+  assert.match(startDeposit.replies[0].text, /Who are you loading/);
+  console.log('ok registered Deposit callback asks who to load');
 
-  const invalidAmount = await decideBotReply({
-    store: createDepositStore({ currentFlow: 'registered_deposit', currentStep: 'deposit_amount' }),
+  const myAccount = await decideBotReply({
+    store: createDepositStore({ currentFlow: 'registered_deposit', currentStep: 'deposit_choose_target' }),
     contact: registeredContact(),
-    messageText: '10.999'
+    action: 'deposit:my_account'
   });
-  assert.equal(invalidAmount.kind, 'deposit_ask_amount');
-  console.log('ok deposit amount rejects inputs requiring rounding');
-
-  const validAmount = await decideBotReply({
-    store: createDepositStore({ currentFlow: 'registered_deposit', currentStep: 'deposit_amount' }),
-    contact: registeredContact(),
-    messageText: '10.37'
-  });
-  assert.equal(validAmount.kind, 'registration_send_payment_qr');
-  assert.equal(validAmount.sendPaymentQr.firstDepositAmount, 10.37);
-  assert.equal(validAmount.sendPaymentQr.paymentDisplayName, 'Amy Fei');
-  assert.equal(validAmount.sendPaymentQr.flowType, PAYMENT_WINDOW_FLOW.DEPOSIT);
-  console.log('ok registered Deposit asks amount and prepares deposit QR');
+  assert.equal(myAccount.kind, 'registration_send_payment_qr');
+  assert.equal(myAccount.sendPaymentQr.firstDepositAmount, null);
+  assert.equal(myAccount.sendPaymentQr.paymentDisplayName, null);
+  assert.equal(myAccount.sendPaymentQr.flowType, PAYMENT_WINDOW_FLOW.DEPOSIT);
+  console.log('ok My Account deposit sends amountless QR');
 
   const activeDepositGreetingStore = createDepositStore({
     currentFlow: 'registered_deposit',
-    currentStep: 'deposit_amount'
+    currentStep: 'deposit_choose_target'
   });
   const activeDepositGreeting = await decideBotReply({
     store: activeDepositGreetingStore,
     contact: registeredContact(),
     messageText: 'Hello!'
   });
-  assert.equal(activeDepositGreeting.kind, 'deposit_ask_amount');
+  assert.equal(activeDepositGreeting.kind, 'deposit_choose_target');
   assert.equal(activeDepositGreeting.sendPaymentQr, undefined);
-  assert.equal(activeDepositGreeting.statePatch.currentFlow, 'registered_deposit');
-  assert.equal(activeDepositGreeting.statePatch.currentStep, 'deposit_amount');
-  assert.match(activeDepositGreeting.replies[0].text, /valid deposit amount/);
-  console.log('ok greeting during active deposit validates as amount input without starting a second timer');
+  assert.match(activeDepositGreeting.replies[0].text, /Who are you loading/);
+  console.log('ok greeting during deposit target choice does not ask for an amount');
 
   const window = {
     id: 1,
@@ -378,7 +370,7 @@ async function run() {
     messageText: 'recharge'
   });
   assert.equal(keyword.kind, 'registered_deposit_discovery');
-  assert.deepEqual(keyword.replies[0].buttons.flat().map((button) => button.text), ['🟢 Deposit']);
+  assert.deepEqual(keyword.replies[0].buttons.flat().map((button) => button.text), ['DEPOSIT']);
   assert.equal(keyword.replies[0].buttons[0][0].data, 'menu:deposit');
   console.log('ok registered deposit keyword shows Deposit button');
 
@@ -403,23 +395,23 @@ async function run() {
     contact: registeredContact(),
     action: 'menu:deposit'
   });
-  assert.equal(depositAfterHelp.kind, 'deposit_ask_amount');
+  assert.equal(depositAfterHelp.kind, 'deposit_choose_target');
   assert.equal(depositAfterHelp.statePatch.currentFlow, 'registered_deposit');
-  assert.equal(depositAfterHelp.statePatch.currentStep, 'deposit_amount');
+  assert.equal(depositAfterHelp.statePatch.currentStep, 'deposit_choose_target');
   assert.equal(depositAfterHelp.statePatch.registrationInfo.deposit_in_progress, true);
   assert.ok(helpThenDepositStore.calls.resetBotState >= 1);
   assert.equal(helpThenDepositStore._botSession().workflow_key, 'deposit');
-  assert.equal(helpThenDepositStore._botSession().workflow_step, 'waiting_amount');
+  assert.equal(helpThenDepositStore._botSession().workflow_step, 'deposit_choose_target');
   await helpThenDepositStore.updateAutomationState(77, depositAfterHelp.statePatch);
   const amountAfterHelp = await decideBotReply({
     store: helpThenDepositStore,
     contact: registeredContact(),
-    messageText: '25'
+    action: 'deposit:my_account'
   });
   assert.equal(amountAfterHelp.kind, 'registration_send_payment_qr');
-  assert.equal(amountAfterHelp.sendPaymentQr.firstDepositAmount, 25);
+  assert.equal(amountAfterHelp.sendPaymentQr.firstDepositAmount, null);
   assert.equal(amountAfterHelp.sendPaymentQr.flowType, PAYMENT_WINDOW_FLOW.DEPOSIT);
-  console.log('ok Help → Deposit → amount starts deposit window');
+  console.log('ok Help → Deposit → My Account starts deposit window');
 
   // Account → Deposit → amount
   const accountThenDepositStore = createDepositStore();
@@ -434,16 +426,16 @@ async function run() {
     action: 'menu:deposit'
   });
   assert.equal(depositAfterAccount.statePatch.currentFlow, 'registered_deposit');
-  assert.equal(depositAfterAccount.statePatch.currentStep, 'deposit_amount');
+  assert.equal(depositAfterAccount.statePatch.currentStep, 'deposit_choose_target');
   await accountThenDepositStore.updateAutomationState(77, depositAfterAccount.statePatch);
   const amountAfterAccount = await decideBotReply({
     store: accountThenDepositStore,
     contact: registeredContact(),
-    messageText: '15'
+    action: 'deposit:my_account'
   });
   assert.equal(amountAfterAccount.kind, 'registration_send_payment_qr');
-  assert.equal(amountAfterAccount.sendPaymentQr.firstDepositAmount, 15);
-  console.log('ok Account → Deposit → amount starts deposit window');
+  assert.equal(amountAfterAccount.sendPaymentQr.firstDepositAmount, null);
+  console.log('ok Account → Deposit → My Account starts deposit window');
 
   // Cancel old flow → Deposit → amount
   const cancelThenDepositStore = createDepositStore({
@@ -467,11 +459,11 @@ async function run() {
   const amountAfterCancel = await decideBotReply({
     store: cancelThenDepositStore,
     contact: registeredContact(),
-    messageText: '20'
+    action: 'deposit:my_account'
   });
   assert.equal(amountAfterCancel.kind, 'registration_send_payment_qr');
-  assert.equal(amountAfterCancel.sendPaymentQr.firstDepositAmount, 20);
-  console.log('ok cancel → Deposit → amount starts deposit window');
+  assert.equal(amountAfterCancel.sendPaymentQr.firstDepositAmount, null);
+  console.log('ok cancel → Deposit → My Account starts deposit window');
 
   // Stale wiped flow/step with deposit_in_progress must still accept amount (not Support/menu).
   const wipedFlowStore = createDepositStore({
@@ -486,11 +478,11 @@ async function run() {
   const amountAfterWipe = await decideBotReply({
     store: wipedFlowStore,
     contact: registeredContact(),
-    messageText: '30'
+    action: 'deposit:my_account'
   });
   assert.equal(amountAfterWipe.kind, 'registration_send_payment_qr');
-  assert.equal(amountAfterWipe.sendPaymentQr.firstDepositAmount, 30);
-  console.log('ok amount after wiped deposit flow/step still hits deposit handler');
+  assert.equal(amountAfterWipe.sendPaymentQr.firstDepositAmount, null);
+  console.log('ok My Account after wiped deposit flow/step still hits deposit handler');
 
   // Stale bot_registration leftover + deposit bot session must still accept amount.
   const corruptedStore = createDepositStore({
@@ -510,11 +502,11 @@ async function run() {
   const amountAfterCorruption = await decideBotReply({
     store: corruptedStore,
     contact: registeredContact(),
-    messageText: '18'
+    action: 'deposit:my_account'
   });
   assert.equal(amountAfterCorruption.kind, 'registration_send_payment_qr');
-  assert.equal(amountAfterCorruption.sendPaymentQr.firstDepositAmount, 18);
-  console.log('ok amount after Help/Menu session corruption still hits deposit handler');
+  assert.equal(amountAfterCorruption.sendPaymentQr.firstDepositAmount, null);
+  console.log('ok My Account after Help/Menu session corruption still hits deposit handler');
 
   // Eligibility skip must not swallow deposit amount messages (silent "nothing happens").
   const { processBotJob, shouldUseRegistrationBot, isActiveDepositSession } = await import('../src/telegram/chatbotProcessor.js')
@@ -529,7 +521,7 @@ async function run() {
     });
   const eligibilityStore = createDepositStore({
     currentFlow: 'registered_deposit',
-    currentStep: 'deposit_amount',
+    currentStep: 'deposit_choose_target',
     registrationInfo: {
       deposit_in_progress: true,
       payment_display_name: 'Amy Fei',
@@ -538,7 +530,7 @@ async function run() {
   });
   await eligibilityStore.setBotScreen(77, 'Deposit', {
     workflowKey: 'deposit',
-    workflowStep: 'waiting_amount'
+    workflowStep: 'deposit_choose_target'
   });
   eligibilityStore.getUserProfile = async () => registeredContact();
   eligibilityStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
@@ -595,15 +587,15 @@ async function run() {
   const skippedAmount = await processBotJob(eligibilityStore, {
     id: 501,
     contact_id: 77,
-    job_type: 'inbound_message',
-    input_text: '10',
-    action: null,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:my_account',
     incoming_telegram_message_id: 555,
     created_at: new Date().toISOString()
   }, { bot: globalThis.telegramBot });
   assert.notEqual(skippedAmount.skipped, true);
   assert.equal(skippedAmount.decision?.kind, 'registration_send_payment_qr');
-  console.log('ok deposit amount is not silently skipped when eligibility fails');
+  console.log('ok deposit My Account is not silently skipped when eligibility fails');
 
   // Cancel Deposit after QR: delete QR message, clear cancel button, return to menu.
   const cancelCleanupStore = createDepositStore({
@@ -792,7 +784,7 @@ async function run() {
   ));
   const e2eStore = createDepositStore({
     currentFlow: 'registered_deposit',
-    currentStep: 'deposit_amount',
+    currentStep: 'deposit_choose_target',
     registrationInfo: {
       deposit_in_progress: true,
       payment_display_name: 'Amy Fei',
@@ -801,8 +793,8 @@ async function run() {
   });
   await e2eStore.setBotScreen(77, 'Deposit', {
     workflowKey: 'deposit',
-    workflowStep: 'waiting_amount',
-    context: { payment_name: 'Amy Fei' }
+    workflowStep: 'deposit_choose_target',
+    context: {}
   });
   e2eStore.getUserProfile = async () => registeredContact();
   e2eStore.getAutoRegistrationBotSettings = async () => ({ enabled: true, enabled_at: null });
@@ -850,9 +842,9 @@ async function run() {
   const amountJob = await processBotJob(e2eStore, {
     id: 505,
     contact_id: 77,
-    job_type: 'inbound_message',
-    input_text: '10',
-    action: null,
+    job_type: 'callback_action',
+    input_text: '',
+    action: 'deposit:my_account',
     incoming_telegram_message_id: 6001,
     created_at: new Date().toISOString()
   }, { bot: e2eBot });

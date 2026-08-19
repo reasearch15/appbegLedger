@@ -52,10 +52,10 @@ export const CONTACT_SUPPORT_OPTIONS = [
     answer: [
       'How to deposit:',
       '',
-      '1. Tap Deposit from the bot main menu.',
-      '2. Enter the exact amount you want to deposit.',
-      '3. Complete the payment using the instructions provided.',
-      '4. Once your payment is verified, your Royal VIP balance updates automatically.'
+      '1. Tap DEPOSIT from the bot main menu.',
+      '2. Choose My Account or Another Player.',
+      '3. Complete the payment using the QR / payment instructions. You do not enter an amount.',
+      '4. Once your payment is verified, the recipient is credited.'
     ].join('\n')
   },
   {

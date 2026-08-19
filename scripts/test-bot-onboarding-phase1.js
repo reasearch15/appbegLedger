@@ -52,11 +52,11 @@ async function run() {
 
   assert.equal(normalizeCallbackAction('menu:register'), 'bot:register');
   assert.equal(normalizeCallbackAction('register:confirm'), 'bot:confirm');
-  assert.deepEqual(guestMenuButtons().flat().map((button) => button.text), ['Register', 'Help', 'Contact']);
-  assert.ok(registeredMenuButtons().flat().some((b) => b.text === 'Deposit'));
+  assert.deepEqual(guestMenuButtons().flat().map((button) => button.text), ['REGISTER / PLAY', 'Help', 'Contact']);
+  assert.ok(registeredMenuButtons().flat().some((b) => b.text === 'DEPOSIT'));
   assert.ok(REVIEW_BUTTONS.flat().some((b) => b.data === 'register:confirm'));
   assert.equal(WELCOME_BUTTONS[0][0].data, 'menu:register');
-  assert.ok(REGISTERED_BUTTONS.flat().some((b) => b.text === 'Support'));
+  assert.ok(REGISTERED_BUTTONS.flat().some((b) => b.text === 'SUPPORT'));
 
   const staleRegistered = await resolveEffectiveRegistrationState({
     contact: { id: 5, registration_status: 'Registered' },
@@ -100,16 +100,16 @@ async function run() {
     messageText: '',
     action: 'bot:register'
   });
-  assert.equal(register.kind, 'registration_ask_payment_name');
-  assert.equal(register.statePatch.currentStep, 'payment_name');
+  assert.equal(register.kind, 'registration_ask_username');
+  assert.equal(register.statePatch.currentStep, 'username');
 
   const progress = computeBotRegistrationProgress(
     { registration_status: 'Collecting Info' },
-    { payment_display_name: 'John Smith', first_deposit_amount: 10, payment_confirmed: true, preferred_appbeg_username: 'JohnVIP01' },
+    { preferred_appbeg_username: 'JohnVIP01', appbeg_password: 'secret1' },
     { current_flow: 'bot_registration', current_step: 'password' }
   );
   assert.ok(progress.percent > 0);
-  assert.ok(progress.steps.some((s) => s.key === 'payment_name' && s.done));
+  assert.ok(progress.steps.some((s) => s.key === 'username' && s.done));
 
   const redacted = redactRegistrationInfoForApi({ appbeg_password: 'secret1', preferred_appbeg_username: 'JohnVIP01' });
   assert.equal(redacted.appbeg_password, '[redacted]');

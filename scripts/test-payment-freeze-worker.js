@@ -58,6 +58,19 @@ async function run() {
   const store = await createDataStore({ dialect: 'sqlite', databasePath: dbPath });
   const now = new Date('2026-07-12T15:00:00.000Z');
 
+  {
+    const received = new Date(now.getTime() - 20 * 60 * 1000).toISOString();
+    await insertPayment(store, { id: 99, routingStatus: 'searching', messageDate: received, freezeAt: computePaymentFreezeAt(received) });
+    delete process.env.PAYMENT_AUTO_FREEZE_ENABLED;
+    const result = await store.freezeOverdueSearchingPayments({ now });
+    assert.equal(result.retired, true);
+    assert.equal(result.count, 0);
+    const payment = await store.getPaymentEvent(99);
+    assert.equal(payment.routing_status, 'searching');
+    console.log('✓ automatic freeze is retired by default');
+  }
+  process.env.PAYMENT_AUTO_FREEZE_ENABLED = 'true';
+
   // New payment gets freeze_at = received + 15 minutes
   {
     const received = new Date('2026-07-12T14:55:00.000Z').toISOString();

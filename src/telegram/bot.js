@@ -4,6 +4,9 @@ import { enqueueChatbotJob } from './chatbotProcessor.js';
 import { tryEnqueueRegistrationBotJob } from './autoRegistrationBot.js';
 import { ensureBotApiPrivateContact } from './botPrivateEntry.js';
 import { EXPIRED_CALLBACK_MESSAGE, validateCallbackFreshness } from './callbackSafety.js';
+import { handleStaffCallbackQuery, handleStaffGroupMessage } from './staffGroupHandler.js';
+import { mirrorPlayerMessageToStaffTopic } from './staffOperations.js';
+import { isStaffGroupChat } from './operationalRoles.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -16,7 +19,12 @@ export function startTelegramListener({ token, store, io }) {
   const bot = new Telegraf(token);
 
   bot.on('callback_query', async (ctx) => {
-    if (ctx.chat?.type !== 'private' || !ctx.from) return;
+    if (ctx.chat?.type !== 'private' || !ctx.from) {
+      if (isStaffGroupChat(ctx.chat?.id)) {
+        await handleStaffCallbackQuery({ ctx, store });
+      }
+      return;
+    }
 
     try {
       logTelegramUpdate('callback_received', ctx, {
@@ -112,13 +120,28 @@ export function startTelegramListener({ token, store, io }) {
   });
 
   bot.on('message', async (ctx) => {
-    if (ctx.chat?.type !== 'private' || !ctx.message?.from) return;
+    if (ctx.chat?.type !== 'private' || !ctx.message?.from) {
+      if (isStaffGroupChat(ctx.chat?.id)) {
+        await handleStaffGroupMessage({ ctx, store, bot });
+      }
+      return;
+    }
 
     try {
       logTelegramUpdate('message_received', ctx, {
         text_length: String(ctx.message.text || ctx.message.caption || '').trim().length
       });
       const result = await store.storeIncomingTelegramMessage(ctx);
+      if (result.inserted && String(ctx.message.text || ctx.message.caption || '').trim()) {
+        await mirrorPlayerMessageToStaffTopic({
+          store,
+          bot,
+          contact: result.user,
+          text: ctx.message.text || ctx.message.caption || ''
+        }).catch((error) => {
+          console.warn('[staff-topic] mirror_failed', error.message);
+        });
+      }
       console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id} first=${Boolean(result.firstMessage)}`);
       await store.ensureBotSession(result.user.id);
       await store.ensureAutomationState(result.user.id);

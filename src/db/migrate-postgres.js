@@ -6,6 +6,7 @@ import {
   DEFAULT_QUICK_REPLIES,
   DEFAULT_TAGS
 } from './defaults.js';
+import { applyTelegramFirstPostgres } from './telegramFirstSchema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(__dirname, 'schema.postgres.sql');
@@ -612,6 +613,8 @@ export async function migratePostgres(driver) {
     CREATE INDEX IF NOT EXISTS idx_vendor_cashout_events_task
       ON vendor_cashout_events(task_id);
   `);
+
+  await applyTelegramFirstPostgres(driver);
 
   await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
 }

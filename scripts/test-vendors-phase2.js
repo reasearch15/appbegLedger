@@ -381,7 +381,7 @@ async function testReferralMetadataSurvivesRegistrationRestart() {
     },
     messageText: '/register'
   });
-  assert.equal(decision.kind, 'registration_ask_payment_name');
+  assert.equal(decision.kind, 'registration_ask_username');
   assert.equal(decision.replaceRegistrationInfo, true);
   assert.equal(decision.statePatch.registrationInfo.vendor_id, 1);
   assert.equal(decision.statePatch.registrationInfo.vendor_code, 'VND-000001');

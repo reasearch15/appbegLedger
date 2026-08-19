@@ -29,7 +29,7 @@ function registrationInfoForCreate(info = {}) {
   if (!passwordResult.ok) throw new Error(passwordResult.error);
 
   if (!info.payment_confirmed) {
-    throw new Error('Payment has not been confirmed for this registration.');
+    // Historical field retained; new registration does not require a payment.
   }
   if (info.appbeg_creation_complete) {
     throw new Error('RoyalVIP player has already been created for this contact.');
@@ -180,51 +180,38 @@ export async function createAppBegPlayerForContact(store, {
       telegramUserId: contact.telegram_id
     });
 
-    if (typeof store.creditRegisteredDeposit !== 'function') {
-      throw new Error('RoyalVIP deposit credit helper is not available.');
-    }
-
     const windowId = Number(nextInfo.registration_payment_window_id);
-    if (!Number.isInteger(windowId) || windowId <= 0) {
-      throw new Error('Matched registration payment window is required before creating the account.');
+    if (Number.isInteger(windowId) && windowId > 0 && typeof store.creditRegisteredDeposit === 'function') {
+      const window = await store.getRegistrationPaymentWindow(windowId);
+      if (window
+        && (window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION) === PAYMENT_WINDOW_FLOW.REGISTRATION
+        && Number(window.contact_id) === id
+        && (window.status === 'matched' || window.status_raw === 'completed')
+        && window.matched_payment_event_id
+      ) {
+        const creditCents = window.credited_deposit_cents != null
+          ? Number(window.credited_deposit_cents)
+          : registrationCreditCents(parseMoneyToCents(String(window.first_deposit_amount)));
+        const creditAmount = window.credited_deposit_amount != null
+          ? Number(window.credited_deposit_amount)
+          : Number(centsToDollars(creditCents));
+        if (Number.isFinite(creditAmount) && creditAmount > 0) {
+          console.log(
+            `[ledger] registration_credit_started contact=${id} payment=${window.matched_payment_event_id} ` +
+            `window=${windowId} player=${result.playerUid || 'n/a'} amount=${creditAmount}`
+          );
+          await store.creditRegisteredDeposit({
+            contactId: id,
+            amount: creditAmount,
+            paymentEventId: Number(window.matched_payment_event_id),
+            windowId,
+            actorName,
+            flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
+            playerUid: result.playerUid
+          });
+        }
+      }
     }
-    const window = await store.getRegistrationPaymentWindow(windowId);
-    if (!window) throw new Error('Matched registration payment window was not found.');
-    if ((window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION) !== PAYMENT_WINDOW_FLOW.REGISTRATION) {
-      throw new Error('Matched payment window is not a registration payment.');
-    }
-    if (Number(window.contact_id) !== id) {
-      throw new Error('Matched registration payment window belongs to a different contact.');
-    }
-    if (window.status !== 'matched' && window.status_raw !== 'completed') {
-      throw new Error('Registration payment window has not been matched.');
-    }
-    if (!window.matched_payment_event_id) {
-      throw new Error('Registration payment window does not have a matched payment event.');
-    }
-    const creditCents = window.credited_deposit_cents != null
-      ? Number(window.credited_deposit_cents)
-      : registrationCreditCents(parseMoneyToCents(String(window.first_deposit_amount)));
-    const creditAmount = window.credited_deposit_amount != null
-      ? Number(window.credited_deposit_amount)
-      : Number(centsToDollars(creditCents));
-    if (!Number.isFinite(creditAmount) || creditAmount <= 0) {
-      throw new Error('Matched registration payment amount must be positive.');
-    }
-
-    console.log(
-      `[ledger] registration_credit_started contact=${id} payment=${window.matched_payment_event_id} ` +
-      `window=${windowId} player=${result.playerUid || 'n/a'} amount=${creditAmount}`
-    );
-    await store.creditRegisteredDeposit({
-      contactId: id,
-      amount: creditAmount,
-      paymentEventId: Number(window.matched_payment_event_id),
-      windowId,
-      actorName,
-      flowType: PAYMENT_WINDOW_FLOW.REGISTRATION,
-      playerUid: result.playerUid
-    });
 
     const updatedContact = await store.markAppBegPlayerCreated({
       userId: id,

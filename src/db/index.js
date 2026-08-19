@@ -5,6 +5,8 @@ import crypto from 'node:crypto';
 import { resolveDatabaseConfig } from './config.js';
 import { createDriver } from './drivers/index.js';
 import { migratePostgres } from './migrate-postgres.js';
+import { applyTelegramFirstSqlite } from './telegramFirstSchema.js';
+import { attachTelegramFirstStore } from './telegramFirstStore.js';
 import {
   centsToDollars,
   normalizeAppBegUsername,
@@ -4206,7 +4208,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       freeze_at: patch.freeze_at === undefined ? current.freeze_at : normalizeOptionalTimestamp(patch.freeze_at),
       unmatched_reason: patch.unmatched_reason === undefined ? current.unmatched_reason : patch.unmatched_reason,
       frozen_at: patch.frozen_at === undefined ? current.frozen_at : normalizeOptionalTimestamp(patch.frozen_at),
-      matched_at: patch.matched_at === undefined ? current.matched_at : normalizeOptionalTimestamp(patch.matched_at)
+      matched_at: patch.matched_at === undefined ? current.matched_at : normalizeOptionalTimestamp(patch.matched_at),
+      payer_contact_id: patch.payer_contact_id === undefined ? current.payer_contact_id : patch.payer_contact_id,
+      recipient_contact_id: patch.recipient_contact_id === undefined ? current.recipient_contact_id : patch.recipient_contact_id,
+      payment_identity_id: patch.payment_identity_id === undefined ? current.payment_identity_id : patch.payment_identity_id,
+      confidence_classification: patch.confidence_classification === undefined ? current.confidence_classification : patch.confidence_classification,
+      credit_failed_at: patch.credit_failed_at === undefined ? current.credit_failed_at : normalizeOptionalTimestamp(patch.credit_failed_at),
+      credit_failed_error: patch.credit_failed_error === undefined ? current.credit_failed_error : patch.credit_failed_error
     };
     let processingStatus = current.processing_status;
     if (patch.processing_status) processingStatus = patch.processing_status;
@@ -4248,6 +4256,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         frozen_at = ?,
         matched_at = ?,
         processing_status = ?,
+        payer_contact_id = ?,
+        recipient_contact_id = ?,
+        payment_identity_id = ?,
+        confidence_classification = ?,
+        credit_failed_at = ?,
+        credit_failed_error = ?,
         updated_at = ?
       WHERE id = ?
     `).run(
@@ -4266,6 +4280,12 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       next.frozen_at ?? null,
       next.matched_at ?? null,
       processingStatus,
+      next.payer_contact_id ?? null,
+      next.recipient_contact_id ?? null,
+      next.payment_identity_id ?? null,
+      next.confidence_classification ?? null,
+      next.credit_failed_at ?? null,
+      next.credit_failed_error ?? null,
       nowIso(),
       paymentEventId
     );
@@ -4299,38 +4319,41 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
    * Backfills missing freeze_at from message_date first (never extends old payments).
    */
   async function freezeOverdueSearchingPayments({ now = new Date() } = {}) {
-    const { backfilled } = await backfillMissingPaymentFreezeAt();
-    const nowIsoStr = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
-    const overdue = await db.prepare(`
-      SELECT id, freeze_at, unmatched_reason, routing_status, registration_payment_window_id
-      FROM payment_events
-      WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
-        AND ${freezeAtPresentPredicate}
-        AND freeze_at <= ?
-        AND ${completedPaymentParsePredicate}
-        AND registration_payment_window_id IS NULL
-    `).all(nowIsoStr);
+    if (process.env.PAYMENT_AUTO_FREEZE_ENABLED === 'true') {
+      const { backfilled } = await backfillMissingPaymentFreezeAt();
+      const nowIsoStr = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+      const overdue = await db.prepare(`
+        SELECT id, freeze_at, unmatched_reason, routing_status, registration_payment_window_id
+        FROM payment_events
+        WHERE routing_status IN ('searching', 'unrouted', 'waiting', 'parsed')
+          AND ${freezeAtPresentPredicate}
+          AND freeze_at <= ?
+          AND ${completedPaymentParsePredicate}
+          AND registration_payment_window_id IS NULL
+      `).all(nowIsoStr);
 
-    const frozen = [];
-    for (const row of overdue) {
-      const updated = await updatePaymentRouting(row.id, {
-        routing_status: ROUTING_STATUS.FROZEN,
-        routing_owner: ROUTING_OWNER.APPBEG,
-        routing_reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
-        unmatched_reason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
-        routed_at: nowIsoStr,
-        frozen_at: nowIsoStr,
-        handled_by: null
-      });
-      await logPaymentRouting(row.id, 'payment_frozen', 'Search window expired with no active matching window.', {
-        unmatchedReason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
-        freezeAt: row.freeze_at,
-        frozenAt: nowIsoStr,
-        status: 'frozen'
-      });
-      frozen.push(updated);
+      const frozen = [];
+      for (const row of overdue) {
+        const updated = await updatePaymentRouting(row.id, {
+          routing_status: ROUTING_STATUS.FROZEN,
+          routing_owner: ROUTING_OWNER.APPBEG,
+          routing_reason: ROUTING_REASON.NO_ACTIVE_WINDOW,
+          unmatched_reason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+          routed_at: nowIsoStr,
+          frozen_at: nowIsoStr,
+          handled_by: null
+        });
+        await logPaymentRouting(row.id, 'payment_frozen', 'Search window expired with no active matching window.', {
+          unmatchedReason: row.unmatched_reason || UNMATCHED_REASON.NO_ACTIVE_WINDOW,
+          freezeAt: row.freeze_at,
+          frozenAt: nowIsoStr,
+          status: 'frozen'
+        });
+        frozen.push(updated);
+      }
+      return { frozen, count: frozen.length, backfilled };
     }
-    return { frozen, count: frozen.length, backfilled };
+    return { frozen: [], count: 0, backfilled: 0, retired: true };
   }
 
   async function ensurePaymentSearchDeadline(paymentEventId, { receivedAt = null } = {}) {
@@ -4703,20 +4726,23 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!Number.isInteger(eventId) || eventId <= 0) throw new Error('Valid paymentEventId is required for deposit credit.');
     if (!Number.isInteger(matchedWindowId) || matchedWindowId <= 0) throw new Error('Valid windowId is required for deposit credit.');
 
-    const contact = await getUserProfile(id);
-    if (!contact) throw new Error('Contact not found for deposit credit.');
-
     const window = await getRegistrationPaymentWindow(matchedWindowId);
     if (!window) throw new Error('Payment window not found for deposit credit.');
-    if (Number(window.contact_id) !== id) {
+    const creditContactId = Number(window.recipient_contact_id || window.contact_id);
+    if (creditContactId !== id && Number(window.contact_id) !== id && Number(window.requester_contact_id) !== id) {
       throw new Error('Payment window does not belong to this contact.');
     }
+    const contact = await getUserProfile(creditContactId);
+    if (!contact) throw new Error('Contact not found for deposit credit.');
     const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.REGISTRATION
       ? PAYMENT_WINDOW_FLOW.REGISTRATION
       : PAYMENT_WINDOW_FLOW.DEPOSIT;
-    const windowFlow = window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const rawWindowFlow = window.flow_type || PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const windowFlow = rawWindowFlow === PAYMENT_WINDOW_FLOW.STAFF_ASSIGNMENT
+      ? PAYMENT_WINDOW_FLOW.DEPOSIT
+      : rawWindowFlow;
     if (windowFlow !== normalizedFlow) {
-      throw new Error(`Payment window flow mismatch: expected ${normalizedFlow}, got ${windowFlow}.`);
+      throw new Error(`Payment window flow mismatch: expected ${normalizedFlow}, got ${rawWindowFlow}.`);
     }
     if (window.status !== 'matched' && window.status_raw !== 'completed') {
       throw new Error('Payment window has not been matched.');
@@ -4727,7 +4753,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
     const payment = await getPaymentEvent(eventId);
     if (!payment) throw new Error('Payment event not found for deposit credit.');
-    if (Number(payment.contact_id) !== id) {
+    const paymentContactOk = Number(payment.contact_id) === id
+      || Number(payment.contact_id) === creditContactId
+      || Number(payment.recipient_contact_id) === creditContactId
+      || Number(payment.payer_contact_id) === Number(window.requester_contact_id || window.contact_id);
+    if (!paymentContactOk && payment.contact_id != null) {
       throw new Error('Payment event does not belong to this contact.');
     }
     if (Number(payment.registration_payment_window_id) !== matchedWindowId) {
@@ -4744,12 +4774,13 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ? Number(window.received_payment_cents)
       : parseMoneyToCents(String(payment.parsed_amount));
     const requestedCents = amount == null
-      ? windowExpectedCents
+      ? (windowExpectedCents || receivedPaymentCents)
       : parseMoneyToCents(String(amount));
-    // Player coin credit (may be rounded up for registration, e.g. $5.50 → 6).
+    const amountlessDeposit = normalizedFlow === PAYMENT_WINDOW_FLOW.DEPOSIT
+      && (!Number.isSafeInteger(windowExpectedCents) || windowExpectedCents <= 0);
     const authoritativeCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
       ? registrationCreditCentsValue
-      : windowExpectedCents;
+      : (amountlessDeposit ? receivedPaymentCents : windowExpectedCents);
     const authoritativeAmount = centsToDollars(authoritativeCents);
     // Authoritative money actually received — never use the rounded coin credit.
     const paymentCents = receivedPaymentCents;
@@ -4760,24 +4791,30 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     if (!Number.isSafeInteger(paymentCents) || paymentCents <= 0 || paymentAmount == null) {
       throw new Error('Matched payment amount must be positive.');
     }
-    if (!Number.isSafeInteger(requestedCents) || requestedCents <= 0) {
+    if (!amountlessDeposit && (!Number.isSafeInteger(requestedCents) || requestedCents <= 0)) {
       throw new Error('Deposit credit amount must be positive.');
     }
     if (normalizedFlow === PAYMENT_WINDOW_FLOW.DEPOSIT) {
-      if (!Number.isSafeInteger(windowExpectedCents) || !Number.isSafeInteger(receivedPaymentCents)) {
+      if (!Number.isSafeInteger(receivedPaymentCents) || receivedPaymentCents <= 0) {
         throw new Error('Deposit payment amount could not be verified exactly.');
       }
-      if (windowExpectedCents !== requestedCents || windowExpectedCents !== receivedPaymentCents) {
-        throw new Error('Deposit credit amount does not exactly match the entered and received payment amount.');
+      if (!amountlessDeposit) {
+        if (!Number.isSafeInteger(windowExpectedCents)) {
+          throw new Error('Deposit payment amount could not be verified exactly.');
+        }
+        if (windowExpectedCents !== requestedCents || windowExpectedCents !== receivedPaymentCents) {
+          throw new Error('Deposit credit amount does not exactly match the entered and received payment amount.');
+        }
       }
     } else if (authoritativeCents !== requestedCents) {
       throw new Error('Deposit credit amount does not match the matched payment window amount.');
     }
 
-    const automation = await getAutomationState(id);
+    const automation = await getAutomationState(creditContactId);
     const info = automation?.registration_info || {};
     const resolvedPlayerUid = String(
       playerUid
+      || window.recipient_player_uid
       || info.appbeg_player_uid
       || contact.appbeg_account_id
       || ''
@@ -4791,7 +4828,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
       ? 'registration_initial_deposit'
       : 'registered_user_deposit';
     async function patchCreditMetadata(patch) {
-      const currentState = await ensureAutomationState(id);
+      const currentState = await ensureAutomationState(creditContactId);
       await updateAutomationState(id, {
         registrationInfo: {
           ...(currentState.registration_info || {}),
@@ -4832,7 +4869,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         amount: authoritativeAmount,
         externalReference: idempotencyKey,
         sourceFlow,
-        ledgerContactId: id,
+        ledgerContactId: creditContactId,
         paymentEventId: eventId,
         windowId: matchedWindowId,
         actorName,
@@ -5377,6 +5414,9 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         : Boolean(row.staff_ai_apprentice_mode_enabled),
       staff_ai_apprentice_mode_updated_at: row.staff_ai_apprentice_mode_updated_at || null,
       staff_ai_apprentice_mode_updated_by: row.staff_ai_apprentice_mode_updated_by || '',
+      confidence_mode_enabled: Boolean(row.confidence_mode_enabled),
+      confidence_mode_updated_at: row.confidence_mode_updated_at || null,
+      confidence_mode_updated_by: row.confidence_mode_updated_by || '',
       customer_support_prompt: row.customer_support_prompt || DEFAULT_CUSTOMER_SUPPORT_PROMPT,
       customer_support_prompt_updated_at: row.customer_support_prompt_updated_at || null,
       customer_support_prompt_updated_by: row.customer_support_prompt_updated_by || '',
@@ -6254,12 +6294,18 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     firstDepositAmount,
     creditedDepositAmount = null,
     flowType = 'registration',
-    windowMinutes = null
+    windowMinutes = null,
+    requesterContactId = null,
+    recipientContactId = null,
+    recipientPlayerUid = null,
+    recipientUsername = null
   }) {
     const minutes = windowMinutes == null ? paymentWindowMinutes() : Number(windowMinutes);
     const normalizedFlow = flowType === PAYMENT_WINDOW_FLOW.DEPOSIT
       ? PAYMENT_WINDOW_FLOW.DEPOSIT
       : PAYMENT_WINDOW_FLOW.REGISTRATION;
+    const requesterId = Number(requesterContactId || contactId);
+    const recipientId = Number(recipientContactId || contactId);
     if (normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION) {
       const cooldown = await getActiveRegistrationPaymentCooldown(contactId);
       if (cooldown?.active) {
@@ -6269,42 +6315,66 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         throw err;
       }
     }
-    const expectedPaymentCents = parseMoneyToCents(String(firstDepositAmount));
-    const creditedDepositCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
+    if (normalizedFlow === PAYMENT_WINDOW_FLOW.DEPOSIT) {
+      const existing = await getActiveRegistrationPaymentWindow(requesterId, { flowType: PAYMENT_WINDOW_FLOW.DEPOSIT });
+      if (existing) {
+        return existing;
+      }
+    }
+    let expectedPaymentCents = firstDepositAmount == null || firstDepositAmount === ''
+      ? null
+      : parseMoneyToCents(String(firstDepositAmount));
+    if (expectedPaymentCents === 0) expectedPaymentCents = null;
+    const creditedDepositCents = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION && expectedPaymentCents
       ? registrationCreditCents(expectedPaymentCents)
       : null;
     const resolvedCreditAmount = normalizedFlow === PAYMENT_WINDOW_FLOW.REGISTRATION
       ? (creditedDepositAmount ?? centsToDollars(creditedDepositCents))
       : null;
+    const storedAmount = expectedPaymentCents == null ? 0 : firstDepositAmount;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
     const nowText = nowIso();
-    const result = await db.prepare(`
-      INSERT INTO registration_payment_windows (
-        contact_id, telegram_user_id, payment_method_id, payment_qr_code_id,
-        payment_display_name, first_deposit_amount, expected_payment_cents,
-        credited_deposit_amount, credited_deposit_cents,
-        flow_type, status, expires_at, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-    `).run(
-      contactId,
-      String(telegramUserId),
-      paymentMethodId,
-      paymentQrCodeId,
-      paymentDisplayName || null,
-      firstDepositAmount,
-      expectedPaymentCents,
-      resolvedCreditAmount,
-      creditedDepositCents,
-      normalizedFlow,
-      expiresAt,
-      nowText,
-      nowText
-    );
-    return hydratePaymentWindow(
-      await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid)
-    );
+    try {
+      const result = await db.prepare(`
+        INSERT INTO registration_payment_windows (
+          contact_id, telegram_user_id, payment_method_id, payment_qr_code_id,
+          payment_display_name, first_deposit_amount, expected_payment_cents,
+          credited_deposit_amount, credited_deposit_cents,
+          flow_type, status, expires_at, created_at, updated_at,
+          requester_contact_id, recipient_contact_id, recipient_player_uid, recipient_username
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        requesterId,
+        String(telegramUserId),
+        paymentMethodId,
+        paymentQrCodeId,
+        paymentDisplayName || null,
+        storedAmount,
+        expectedPaymentCents,
+        resolvedCreditAmount,
+        creditedDepositCents,
+        normalizedFlow,
+        expiresAt,
+        nowText,
+        nowText,
+        requesterId,
+        recipientId,
+        recipientPlayerUid || null,
+        recipientUsername || null
+      );
+      return hydratePaymentWindow(
+        await db.prepare('SELECT * FROM registration_payment_windows WHERE id = ?').get(result.lastInsertRowid)
+      );
+    } catch (error) {
+      const message = String(error?.message || error || '');
+      if (normalizedFlow === PAYMENT_WINDOW_FLOW.DEPOSIT && /unique|idx_one_active_deposit/i.test(message)) {
+        const raced = await getActiveRegistrationPaymentWindow(requesterId, { flowType: PAYMENT_WINDOW_FLOW.DEPOSIT });
+        if (raced) return raced;
+      }
+      throw error;
+    }
   }
 
   async function getActiveRegistrationPaymentCooldown(contactId, nowText = nowIso()) {
@@ -6615,7 +6685,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
             'parse_failed', 'route_failed'
           )
       `).run(
-        currentWindow?.contact_id ?? null,
+        currentWindow?.recipient_contact_id ?? currentWindow?.contact_id ?? null,
         windowId,
         now,
         now,
@@ -6646,7 +6716,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
         WHERE id = ?
           AND status IN ('active', 'manual_review')
           AND (status = 'manual_review' OR expires_at > ?)
-          AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit')
+          AND COALESCE(flow_type, 'registration') IN ('registration', 'deposit', 'staff_assignment')
           AND (matched_payment_event_id IS NULL OR matched_payment_event_id = ?)
       `).run(
         paymentEventId,
@@ -8028,7 +8098,7 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
   // Ensure legacy Waiting rows get freeze_at and overdue ones freeze immediately on boot.
   await normalizePaymentDeadlinesOnBoot();
 
-  return {
+  const store = {
     db,
     logEvent,
     upsertTelegramUser,
@@ -8282,6 +8352,22 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     listAllVendorSettlements,
     createVendorSettlement
   };
+  attachTelegramFirstStore(store, {
+    db,
+    nowIso,
+    getUserProfile,
+    getPaymentEvent,
+    getRegistrationPaymentWindow,
+    getCoadminSettings,
+    listSettingsAuditLog
+  });
+  await store.bootstrapRootAdminFromEnv().catch((error) => {
+    console.warn('[ops] root_admin_bootstrap_skipped', error.message);
+  });
+  await store.backfillLegacyPaymentIdentityEvidence({ limit: 2000 }).catch((error) => {
+    console.warn('[payments] legacy_identity_backfill_skipped', error.message);
+  });
+  return store;
 }
 
 function hydrateUser(user) {
@@ -9250,6 +9336,8 @@ async function migrate(db) {
       }
     }
   }
+
+  await applyTelegramFirstSqlite(db);
 
   await db.exec('PRAGMA foreign_keys = ON');
 }

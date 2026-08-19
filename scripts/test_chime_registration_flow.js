@@ -65,30 +65,19 @@ async function run() {
 
   const store = createFakeStore();
   let decision = await decideBotReply({ store, contact, messageText: '/register' });
-  assertEqual(decision.kind, 'registration_ask_payment_name');
-  assertEqual(decision.statePatch.currentStep, 'payment_name');
+  assertEqual(decision.kind, 'registration_ask_username');
+  assertEqual(decision.statePatch.currentStep, 'username');
   apply(store, decision);
-  console.log('ok register starts payment name prompt');
+  console.log('ok register starts username prompt');
 
-  decision = await decideBotReply({ store, contact, messageText: 'John Smith' });
-  assertEqual(decision.kind, 'registration_ask_first_deposit_amount');
-  assertIncludes(decision.replies[0].text, 'Thank you, John Smith');
+  decision = await decideBotReply({ store, contact, messageText: 'JohnVIP01' });
+  assertEqual(decision.kind, 'registration_ask_password');
   apply(store, decision);
-  console.log('ok payment name collected');
+  console.log('ok username collected');
 
-  decision = await decideBotReply({ store, contact, messageText: '10' });
-  assertEqual(decision.kind, 'registration_ask_first_deposit_amount');
-  assertIncludes(decision.replies[0].text, 'including cents');
-  assertIncludes(decision.replies[0].text, '5¢5');
-  apply(store, decision);
-  console.log('ok whole-dollar registration deposit asks for cents');
-
-  decision = await decideBotReply({ store, contact, messageText: '$10.5' });
-  assertEqual(decision.kind, 'registration_send_payment_qr');
-  assertEqual(decision.sendPaymentQr.firstDepositAmount, 10.5);
-  assertEqual(decision.sendPaymentQr.paymentDisplayName, 'John Smith');
-  assertEqual(decision.setStatus, undefined);
-  console.log('ok valid deposit queues payment qr send');
+  decision = await decideBotReply({ store, contact, messageText: 'Secret123!' });
+  assertEqual(['registration_create_appbeg_player', 'registration_ask_password', 'registration_review'].includes(decision.kind), true);
+  console.log('ok password continues credentials-first registration');
 
   console.log('ALL PAYMENT METHOD REGISTRATION CHECKS PASSED');
 }

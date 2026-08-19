@@ -88,11 +88,13 @@ function createQrStore({
     },
     async createRegistrationPaymentWindow(payload) {
       windowsCreated += 1;
+      const minutes = Number(payload.windowMinutes || 15);
       window = {
         id: 100 + windowsCreated,
         status: 'active',
         flow_type: payload.flowType || 'registration',
-        expires_at: new Date(Date.now() + 7 * 60 * 1000).toISOString(),
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + minutes * 60 * 1000).toISOString(),
         ...payload
       };
       return window;
@@ -145,7 +147,7 @@ async function run() {
   assert.match(caption, /❌ \$5\.51 — Wrong/);
   assert.match(caption, /Payment Name: Amy fei/);
   assert.match(caption, /Amount: \$5\.50/);
-  assert.match(caption, /7 minutes/);
+  assert.match(caption, /15 minutes/);
   assert.doesNotMatch(caption, /non-zero cents|payment window|matching algorithm/i);
   console.log('ok caption warns to send the exact dynamic amount');
 
@@ -382,11 +384,10 @@ async function run() {
   assert.equal(cooldownMessage, REGISTRATION_PAYMENT_COOLDOWN_MESSAGE);
   console.log('ok registration cooldown sends pause message without creating a window');
 
-  // 7-minute expiry still set on created window
-  const expiresAt = new Date(ok.paymentWindow.expires_at).getTime();
-  const delta = expiresAt - Date.now();
-  assert.ok(delta > 6 * 60 * 1000 && delta <= 7 * 60 * 1000 + 2000);
-  console.log('ok 7-minute expiry still works');
+  // 15-minute expiry still set on created window
+  const lifetime = new Date(ok.paymentWindow.expires_at).getTime() - new Date(ok.paymentWindow.created_at || ok.paymentWindow.expires_at).getTime();
+  assert.ok(lifetime > 14 * 60 * 1000 && lifetime <= 15 * 60 * 1000 + 2000);
+  console.log('ok 15-minute expiry still works');
 
   console.log('ALL REGISTRATION QR CHECKS PASSED');
 }

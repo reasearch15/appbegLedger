@@ -10,11 +10,11 @@ export const BOT_REGISTRATION_FLOW = 'bot_registration';
 export const CUSTOMER_REGISTRATION_HELP_TEXT = [
   'How registration works:',
   '',
-  '1. Register your Royal VIP account.',
-  '2. Make your first deposit when prompted.',
-  '3. Your account is created automatically after payment verification.',
-  '4. Log in and start playing instantly.',
-  '5. Deposit and cash out online anytime through the Royal VIP website.',
+  '1. Choose a Royal VIP username.',
+  '2. Create a password.',
+  '3. Your account is created immediately.',
+  '4. Log in and start playing.',
+  '5. Deposit later from this chat when you are ready.',
   '',
   '💎 Royal VIP is a fast online casino platform with instant game loading, secure deposits, and convenient online cash outs.'
 ].join('\n');
@@ -35,9 +35,6 @@ export const PHASE1_REGISTRATION_STEPS = [
 
 /** Progress checklist for dashboard (bot_registration). */
 export const BOT_REGISTRATION_PROGRESS_STEPS = [
-  { key: 'payment_name', label: 'Payment name', field: 'payment_display_name', alt: 'payment_name' },
-  { key: 'deposit', label: 'First deposit', field: 'first_deposit_amount', alt: 'requested_deposit_amount' },
-  { key: 'payment_confirmed', label: 'Payment verified', field: 'payment_confirmed' },
   { key: 'username', label: 'Royal VIP username', field: 'preferred_appbeg_username' },
   { key: 'password', label: 'Password set', field: 'appbeg_password' },
   { key: 'submitted', label: 'Account created', statuses: ['Pending Verification', 'Registered'] }
@@ -248,7 +245,7 @@ export function redactRegistrationInfoForApi(info = {}) {
 
 export function guestMenuButtons() {
   return [
-    [{ label: '👑 Register', action: 'menu:register', text: 'Register', data: 'menu:register' }],
+    [{ label: '🔴 REGISTER / PLAY', action: 'menu:register', text: 'REGISTER / PLAY', data: 'menu:register' }],
     [
       { label: 'Help', action: 'menu:how_it_works', text: 'Help', data: 'menu:how_it_works' },
       { label: 'Contact', action: 'menu:support', text: 'Contact', data: 'menu:support' }
@@ -293,14 +290,13 @@ export function paymentQrRetryButtons() {
 
 export function registeredMenuButtons() {
   return [
-    [
-      { label: '🟢 Deposit', action: 'menu:deposit', text: '🟢 Deposit', data: 'menu:deposit', style: 'success' },
-      { label: '🔴 Royal VIP', text: '🔴 Royal VIP', web_app: { url: 'https://royal.youplatform.org' }, style: 'danger' }
-    ],
+    [{ label: '🎮 PLAY', text: 'PLAY', web_app: { url: 'https://royal.youplatform.org' }, style: 'danger' }],
+    [{ label: '💵 DEPOSIT', action: 'menu:deposit', text: 'DEPOSIT', data: 'menu:deposit', style: 'success' }],
+    [{ label: '🎁 FREEPLAY', action: 'bot:help:ask_freeplay', text: 'FREEPLAY', data: 'bot:help:ask_freeplay' }],
     [
       { label: '👤 My Account', action: 'menu:my_account', text: 'My Account', data: 'menu:my_account' },
       { label: '📖 Help', action: 'bot:how_it_works', text: 'Help', data: 'bot:how_it_works' },
-      { label: '💬 Support', action: 'menu:support', text: 'Support', data: 'menu:support' }
+      { label: '💬 SUPPORT', action: 'menu:support', text: 'SUPPORT', data: 'menu:support' }
     ]
   ];
 }

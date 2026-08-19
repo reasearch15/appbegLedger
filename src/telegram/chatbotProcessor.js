@@ -732,6 +732,17 @@ async function deliverSupportOwnerNotification({ store, contact, job, notify }) 
         sourceJobId: job?.id ?? null,
         fingerprint
       });
+      if (kind === 'freeplay' && supportRequest) {
+        import('./operationalAlerts.js').then(({ notifyOperationalStaffFreeplay }) => (
+          notifyOperationalStaffFreeplay(store, {
+            ...supportRequest,
+            username: notify.username,
+            contact_id: contact.id
+          }, { bot: globalThis.telegramBot || null })
+        )).catch((error) => {
+          console.warn('[freeplay] operational_staff_notify_failed', error.message);
+        });
+      }
     }
 
     const result = await sendSupportBotNotification({

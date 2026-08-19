@@ -6,13 +6,13 @@ import { emitOngoingChanged } from '../ongoing/emit.js';
 export const REGISTRATION_PAYMENT_EXPIRY_MESSAGE = [
   'Registration failed.',
   '',
-  'We did not receive your payment within the 7-minute payment window.',
+  'We did not receive your payment within the 15-minute payment window.',
   '',
   'Press Register to start again.'
 ].join('\n');
 
 export const DEPOSIT_PAYMENT_EXPIRY_MESSAGE = [
-  'Your deposit request expired because no matching payment was received within 7 minutes.',
+  'Your deposit request expired because no matching payment was received within 15 minutes.',
   '',
   'Press Deposit to try again.'
 ].join('\n');

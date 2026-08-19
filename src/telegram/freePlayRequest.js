@@ -9,7 +9,15 @@ import {
 export const ASK_FREEPLAY_ACTION = 'bot:help:ask_freeplay';
 export const FREEPLAY_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 export const FREEPLAY_INELIGIBLE_TEXT = 'You are not eligible for FreePlay at this time.';
-export const FREEPLAY_REQUEST_SENT_TEXT = 'Your FreePlay request has been sent.';
+export const FREEPLAY_REQUEST_SENT_TEXT = [
+  '🎁 Freeplay request sent.',
+  'Our team will review it shortly.'
+].join('\n');
+
+export const FREEPLAY_UNREGISTERED_TEXT = [
+  '❌ You are not registered with Royal VIP yet.',
+  'Please register first to request Freeplay.'
+].join('\n');
 
 export async function decideAskFreePlayRequest({ store, contact, info = {} }) {
   const resolved = resolveAppBegUsernameForSupport({ contact, info });

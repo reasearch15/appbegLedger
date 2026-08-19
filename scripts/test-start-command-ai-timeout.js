@@ -171,7 +171,7 @@ async function assertStartSendsMenu(contact, expectedButtons, expectedTextPatter
   assert.equal(store.calls.completedJobs.at(-1).status, 'completed');
 }
 
-await assertStartSendsMenu(guest, ['Register', 'Help', 'Contact'], /How registration works/);
+await assertStartSendsMenu(guest, ['REGISTER / PLAY', 'Help', 'Contact'], /How registration works/);
 console.log('ok guest /start sends deterministic menu without AI');
 
 const previousAppBegStore = globalThis.appbegStore;
@@ -188,10 +188,10 @@ await assertStartSendsMenu({
   registration_status: 'Registered',
   appbeg_account_id: 'playeruid123456',
   appbeg_link_status: 'linked'
-}, ['🟢 Deposit', '🔴 Royal VIP', 'My Account', 'Help', 'Support'], /Welcome back/, {
+}, ['PLAY', 'DEPOSIT', 'FREEPLAY', 'My Account', 'Help', 'SUPPORT'], /Welcome back/, {
   row: 0,
-  column: 1,
-  text: '🔴 Royal VIP',
+  column: 0,
+  text: 'PLAY',
   web_app: { url: 'https://royal.youplatform.org' }
 });
 globalThis.appbegStore = previousAppBegStore;

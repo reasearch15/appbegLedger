@@ -66,7 +66,8 @@ import {
 } from './royalVipHelpCenter.js';
 import {
   ASK_FREEPLAY_ACTION,
-  decideAskFreePlayRequest
+  decideAskFreePlayRequest,
+  FREEPLAY_UNREGISTERED_TEXT
 } from './freePlayRequest.js';
 import {
   CONTACT_SUPPORT_FLOW,
@@ -260,6 +261,10 @@ export function normalizeCallbackAction(action) {
     'register:retry_payment_qr': 'bot:retry_payment_qr',
     'deposit:cancel': 'deposit:cancel',
     'deposit:retry_qr': 'deposit:retry_qr',
+    'deposit:my_account': 'deposit:my_account',
+    'deposit:other': 'deposit:other',
+    'deposit:continue_other': 'deposit:continue_other',
+    'deposit:show_qr': 'deposit:show_qr',
     'menu:main': 'bot:main_menu',
     'menu:registration_status': 'bot:status',
     'menu:deposit': 'bot:deposit',
@@ -336,8 +341,42 @@ export async function decideBotReply({ store, contact, messageText = '', action 
   const command = !action ? parseBotCommand(text) : null;
   if (command) {
     if (command.command === 'start') {
-      if (command.args && typeof store.captureVendorReferralForContact === 'function') {
-        await store.captureVendorReferralForContact(contact.id, command.args, 'TelegramStart').catch((error) => {
+      const payload = String(command.args || '').trim();
+      const payloadToken = payload.split(/\s+/)[0] || '';
+      const deepLink = payloadToken.toLowerCase();
+      if (deepLink === 'play') {
+        if (contact.registration_status === 'Registered' || effective.is_registered) {
+          return await buildStateAwareEntryMenu({
+            store,
+            contact,
+            automationState,
+            paymentWindow,
+            forceFull: true
+          });
+        }
+        return await startRegistrationDecision(contact, clearedRegistrationInfo(contact, info), store);
+      }
+      if (deepLink === 'freeplay') {
+        if (contact.registration_status === 'Registered' || effective.is_registered) {
+          return await decideAskFreePlayRequest({ store, contact, info });
+        }
+        return {
+          kind: 'freeplay_unregistered',
+          replies: [{
+            text: FREEPLAY_UNREGISTERED_TEXT,
+            buttons: [[{ label: '🔴 REGISTER / PLAY', action: 'menu:register', text: 'REGISTER / PLAY', data: 'menu:register' }]]
+          }],
+          statePatch: null,
+          escalate: false
+        };
+      }
+      if (payload && typeof store.captureVendorReferralForContact === 'function' && /^VND-/i.test(payloadToken)) {
+        await store.captureVendorReferralForContact(contact.id, payload, 'TelegramStart').catch((error) => {
+          console.warn('[vendor] referral capture skipped:', error.message);
+        });
+        automationState = await store.ensureAutomationState(contact.id);
+      } else if (payload && typeof store.captureVendorReferralForContact === 'function' && deepLink !== 'play' && deepLink !== 'freeplay') {
+        await store.captureVendorReferralForContact(contact.id, payload, 'TelegramStart').catch((error) => {
           console.warn('[vendor] referral capture skipped:', error.message);
         });
         automationState = await store.ensureAutomationState(contact.id);
@@ -631,6 +670,10 @@ export async function decideBotReply({ store, contact, messageText = '', action 
       action === 'bot:deposit'
       || action === 'deposit:cancel'
       || action === 'deposit:retry_qr'
+      || action === 'deposit:my_account'
+      || action === 'deposit:other'
+      || action === 'deposit:continue_other'
+      || action === 'deposit:show_qr'
       || depositSessionActive
       || isRegisteredDepositFlow(flow, normalizedStep)
       || info.deposit_in_progress
@@ -860,7 +903,7 @@ function decideRegisteredSupport({ text, action, contact = null, effective = nul
       kind: 'registered_deposit_discovery',
       replies: [{
         text: 'To make a deposit, tap Deposit below and follow the payment instructions.',
-        buttons: [[registeredMenuButtons()[0][0]]]
+        buttons: [[registeredMenuButtons().flat().find((button) => button.data === 'menu:deposit')]]
       }],
       statePatch: null,
       escalate: false

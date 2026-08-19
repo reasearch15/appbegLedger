@@ -78,7 +78,7 @@ async function run() {
   assertEqual(queuedMessages.length, 1, 'one expiry message queued');
   assertEqual(queuedMessages[0].text, REGISTRATION_PAYMENT_EXPIRY_MESSAGE);
   assertIncludes(queuedMessages[0].text, 'Registration failed');
-  assertIncludes(queuedMessages[0].text, '7-minute payment window');
+  assertIncludes(queuedMessages[0].text, '15-minute payment window');
 
   const outbound = await store.db.prepare(`
     SELECT body
@@ -140,10 +140,10 @@ async function run() {
     contact: updatedContact,
     messageText: '/register'
   });
-  assertEqual(restarted.kind, 'registration_ask_payment_name');
-  assertEqual(restarted.statePatch.currentStep, 'payment_name');
+  assertEqual(restarted.kind, 'registration_ask_username');
+  assertEqual(restarted.statePatch.currentStep, 'username');
   assertEqual(restarted.statePatch.registrationInfo?.payment_display_name, undefined);
-  console.log('ok Register after expiry starts fresh payment name selection');
+  console.log('ok Register after expiry starts fresh username selection');
 
   const completedTelegramId = Date.now() + 1;
   const completedInsert = await store.db.prepare(`

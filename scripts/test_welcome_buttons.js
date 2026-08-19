@@ -34,7 +34,7 @@ async function run() {
   const normalized = normalizeButtonRows(WELCOME_BUTTONS);
   assert.equal(normalized[0][0].data, 'menu:register');
   assert.equal(normalizeCallbackAction(normalized[0][0].data), 'bot:register');
-  assert.deepEqual(normalized.flat().map((button) => button.text), ['Register', 'Help', 'Contact']);
+  assert.deepEqual(normalized.flat().map((button) => button.text), ['REGISTER / PLAY', 'Help', 'Contact']);
   console.log('ok welcome button normalization helpers');
 
   assert.equal(normalizeCallbackAction('register'), 'bot:register');
@@ -76,7 +76,7 @@ async function run() {
     },
     messageText: '/register'
   });
-  assert.equal(started.kind, 'registration_ask_payment_name');
+  assert.equal(started.kind, 'registration_ask_username');
   console.log('ok /register text starts flow');
 
   console.log('ALL BUTTON DELIVERY CHECKS PASSED');

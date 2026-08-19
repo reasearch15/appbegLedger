@@ -102,43 +102,20 @@ async function run() {
   console.log('ok flow: hello -> welcome');
 
   decision = await decideAndApply(flowStore, contact, '/register');
-  assertEqual(decision.kind, 'registration_ask_payment_name');
-  assertEqual(decision.statePatch.currentStep, 'payment_name');
+  assertEqual(decision.kind, 'registration_ask_username');
+  assertEqual(decision.statePatch.currentStep, 'username');
   assertEqual(decision.logEvent?.event, 'flow_started');
-  console.log('ok flow: register -> payment name');
+  console.log('ok flow: register -> username');
 
   decision = await decideAndApply(flowStore, contact, 'hello');
   assertEqual(decision.kind, 'registration_flow_reminder');
-  assertEqual(decision.statePatch.currentStep, 'payment_name');
-  console.log('ok flow: hello during payment_name -> reminder not welcome');
+  assertEqual(decision.statePatch.currentStep, 'username');
+  console.log('ok flow: hello during username -> reminder not welcome');
 
-  decision = await decideAndApply(flowStore, contact, 'John Smith');
-  assertEqual(decision.kind, 'registration_ask_first_deposit_amount');
-  assertEqual(decision.statePatch.currentStep, 'first_deposit_amount');
-  console.log('ok flow: John Smith -> deposit amount');
-
-  decision = await decideAndApply(flowStore, contact, 'hello');
-  assertEqual(decision.kind, 'registration_flow_reminder');
-  assertEqual(decision.statePatch.currentStep, 'first_deposit_amount');
-  console.log('ok flow: hello during deposit -> reminder');
-
-  decision = await decideAndApply(flowStore, contact, '25.50');
-  assertEqual(decision.kind, 'registration_send_payment_qr');
-  assertEqual(decision.sendPaymentQr?.firstDepositAmount, 25.5);
-  flowStore.state.current_step = 'await_payment';
-  console.log('ok flow: 25.50 -> QR send');
-
-  decision = await decideAndApply(flowStore, contact, 'hello');
-  assertEqual(decision.kind, 'registration_waiting_payment');
-  console.log('ok flow: hello during await_payment -> waiting');
-
-  flowStore.state.current_step = 'username';
-  flowStore.state.registration_info = { ...flowStore.state.registration_info, payment_confirmed: true };
-
-  decision = await decideAndApply(flowStore, contact, 'Rajex01');
+  decision = await decideAndApply(flowStore, contact, 'JohnVIP01');
   assertEqual(decision.kind, 'registration_ask_password');
   assertEqual(decision.statePatch.currentStep, 'password');
-  console.log('ok flow: Rajex01 -> password');
+  console.log('ok flow: username -> password');
 
   decision = await decideAndApply(flowStore, contact, 'hello');
   assertEqual(decision.kind, 'registration_flow_reminder');
@@ -151,7 +128,7 @@ async function run() {
 
   const cancelStore = createFakeStore({
     current_flow: 'bot_registration',
-    current_step: 'payment_name'
+    current_step: 'username'
   });
   const cancelAsk = await decideBotReply({ store: cancelStore, contact, messageText: 'cancel' });
   assertEqual(cancelAsk.kind, 'registration_cancel_confirm');

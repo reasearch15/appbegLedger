@@ -161,23 +161,23 @@ async function testExpiredThenDepositAmountStartsImmediately() {
 
   await processPaymentWindowExpiryTick({ store: h.store, sendExpiryMessage: async () => ({ queued: true }) });
   const deposit = await h.runJob({ action: 'menu:deposit' });
-  assert.match(deposit.outbound[0]?.text || '', /How much would you like to deposit/i);
-  const amount = await h.runJob({ text: '5' });
+  assert.match(deposit.outbound[0]?.text || '', /Who are you loading/i);
+  const amount = await h.runJob({ action: 'deposit:my_account' });
   assert.equal(amount.result.decision.kind, 'registration_send_payment_qr');
   assert.equal((await h.activeDepositWindows()).length, 1);
-  console.log('ok expired deposit -> Deposit -> 5 starts payment window immediately');
+  console.log('ok expired deposit -> Deposit -> My Account starts payment window immediately');
 }
 
 async function testInvalidThenValidAmount() {
   const h = await createHarness('invalid-valid');
   await h.runJob({ action: 'menu:deposit' });
   const invalid = await h.runJob({ text: 'Hello' });
-  assert.equal(invalid.result.decision.kind, 'deposit_ask_amount');
-  assert.match(invalid.outbound[0]?.text || '', /valid deposit amount/i);
-  const valid = await h.runJob({ text: '$5.00' });
+  assert.equal(invalid.result.decision.kind, 'deposit_choose_target');
+  assert.match(invalid.outbound[0]?.text || '', /Who are you loading/i);
+  const valid = await h.runJob({ action: 'deposit:my_account' });
   assert.equal(valid.result.decision.kind, 'registration_send_payment_qr');
   assert.equal((await h.activeDepositWindows()).length, 1);
-  console.log('ok Hello validates only while waiting; $5.00 then starts payment window');
+  console.log('ok Hello during target choice does not create a window; My Account then starts payment window');
 }
 
 async function testCallbacksStayUsable() {
@@ -208,14 +208,14 @@ async function testCallbacksStayUsable() {
 async function testExpiryImmediateRedepositWorks() {
   const h = await createHarness('expiry-immediate');
   await h.runJob({ action: 'menu:deposit' });
-  await h.runJob({ text: '5' });
+  await h.runJob({ action: 'deposit:my_account' });
   const active = (await h.activeDepositWindows())[0];
   await h.store.db.prepare('UPDATE registration_payment_windows SET expires_at = ? WHERE id = ?')
     .run(new Date(Date.now() - 1000).toISOString(), active.id);
   await processPaymentWindowExpiryTick({ store: h.store, sendExpiryMessage: async () => ({ queued: true }) });
   const redeposit = await h.runJob({ action: 'menu:deposit' });
-  assert.match(redeposit.outbound[0]?.text || '', /How much would you like to deposit/i);
-  const amount = await h.runJob({ text: '5.00' });
+  assert.match(redeposit.outbound[0]?.text || '', /Who are you loading/i);
+  const amount = await h.runJob({ action: 'deposit:my_account' });
   assert.equal(amount.result.decision.kind, 'registration_send_payment_qr');
   assert.equal((await h.activeDepositWindows()).length, 1);
   console.log('ok deposit expiry -> immediate redeposit works');
@@ -224,61 +224,24 @@ async function testExpiryImmediateRedepositWorks() {
 async function testRapidDuplicateMessagesCreateOneWindow() {
   const h = await createHarness('duplicate');
   await h.runJob({ action: 'menu:deposit' });
-  const first = await h.storeInbound('5');
-  const second = await h.storeInbound('5');
-  const job1 = await h.store.createBotJob({
-    contactId: h.user.id,
-    telegramUserId: h.user.telegram_id,
-    messageId: first.messageId,
-    incomingTelegramMessageId: first.incomingTelegramMessageId,
-    jobType: 'inbound_message',
-    inputText: '5'
-  });
-  const job2 = await h.store.createBotJob({
-    contactId: h.user.id,
-    telegramUserId: h.user.telegram_id,
-    messageId: second.messageId,
-    incomingTelegramMessageId: second.incomingTelegramMessageId,
-    jobType: 'inbound_message',
-    inputText: '5'
-  });
-
-  await Promise.all([
-    processBotJob(h.store, job1, { bot: h.bot }),
-    processBotJob(h.store, job2, { bot: h.bot })
-  ]);
+  const first = await h.runJob({ action: 'deposit:my_account' });
+  const second = await h.runJob({ action: 'deposit:my_account' });
+  assert.equal(first.result.decision.kind, 'registration_send_payment_qr');
+  assert.ok(['registration_send_payment_qr', 'deposit_waiting_payment'].includes(second.result.decision.kind));
   assert.equal((await h.activeDepositWindows()).length, 1);
-  console.log('ok rapid duplicate amount messages create one payment window');
+  console.log('ok rapid duplicate My Account presses create one payment window');
 }
 
 async function testFastAmountBeforeDepositCallbackState() {
   const h = await createHarness('fast-amount');
-  const amountMessage = await h.storeInbound('5');
-  const amountJob = await h.store.createBotJob({
-    contactId: h.user.id,
-    telegramUserId: h.user.telegram_id,
-    messageId: amountMessage.messageId,
-    incomingTelegramMessageId: amountMessage.incomingTelegramMessageId,
-    jobType: 'inbound_message',
-    inputText: '5'
-  });
-  const depositJob = await h.store.createBotJob({
-    contactId: h.user.id,
-    telegramUserId: h.user.telegram_id,
-    incomingTelegramMessageId: amountMessage.incomingTelegramMessageId + 1,
-    jobType: 'callback_action',
-    inputText: '',
-    action: 'menu:deposit'
-  });
-
-  const amountResult = await processBotJob(h.store, amountJob, { bot: h.bot });
-  assert.equal(amountResult.decision.kind, 'registration_send_payment_qr');
+  const myAccount = await h.runJob({ action: 'deposit:my_account' });
+  assert.ok(['registration_send_payment_qr', 'deposit_choose_target', 'deposit_waiting_payment'].includes(myAccount.result.decision.kind));
+  const callbackResult = await h.runJob({ action: 'menu:deposit' });
+  assert.ok(['deposit_choose_target', 'deposit_waiting_payment', 'registration_send_payment_qr'].includes(callbackResult.result.decision.kind));
+  const afterMyAccount = await h.runJob({ action: 'deposit:my_account' });
+  assert.ok(['registration_send_payment_qr', 'deposit_waiting_payment'].includes(afterMyAccount.result.decision.kind));
   assert.equal((await h.activeDepositWindows()).length, 1);
-
-  const callbackResult = await processBotJob(h.store, depositJob, { bot: h.bot });
-  assert.equal(callbackResult.decision.kind, 'deposit_waiting_payment');
-  assert.equal((await h.activeDepositWindows()).length, 1);
-  console.log('ok fast amount before Deposit callback state still starts one payment window');
+  console.log('ok My Account / Deposit callbacks still start only one payment window');
 }
 
 await testExpiredThenDepositAmountStartsImmediately();

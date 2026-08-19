@@ -1,6 +1,6 @@
 /**
  * Registered-user deposit wizard.
- * Deposit → payment name (if needed) → amount → QR → 7-minute deposit window.
+ * Deposit → My Account / Another Player → QR → 15-minute deposit window.
  */
 
 import {
@@ -20,6 +20,15 @@ export const DEPOSIT_BOT_SESSION_FLOW = 'deposit';
 export const DEPOSIT_BOT_SESSION_STEP_AMOUNT = 'waiting_amount';
 export const DEPOSIT_BOT_SESSION_STEP_NAME = 'waiting_payment_name';
 export const DEPOSIT_BOT_SESSION_STEP_AWAIT = 'await_payment';
+export const DEPOSIT_BOT_SESSION_STEP_RECIPIENT = 'waiting_recipient';
+
+export const DEPOSIT_LOAD_PROMPT = [
+  'Who are you loading?',
+].join('\n');
+
+export const DEPOSIT_OTHER_USERNAME_PROMPT = [
+  'Enter the other player\'s Royal VIP username.'
+].join('\n');
 
 export const DEPOSIT_NAME_PROMPT = [
   'What payment name should we match for this deposit?',
@@ -36,7 +45,22 @@ export const DEPOSIT_AMOUNT_PROMPT = [
 
 function depositCancelButtons() {
   return [
-    [{ label: '❌ Cancel Deposit', action: 'deposit:cancel', text: 'Cancel Deposit', data: 'deposit:cancel' }]
+    [{ label: '❌ CANCEL DEPOSIT', action: 'deposit:cancel', text: 'Cancel Deposit', data: 'deposit:cancel' }]
+  ];
+}
+
+function depositTargetButtons() {
+  return [
+    [{ label: '👤 MY ACCOUNT', action: 'deposit:my_account', text: 'MY ACCOUNT', data: 'deposit:my_account' }],
+    [{ label: '👥 ANOTHER PLAYER', action: 'deposit:other', text: 'ANOTHER PLAYER', data: 'deposit:other' }],
+    ...depositCancelButtons()
+  ];
+}
+
+function activeDepositReuseButtons() {
+  return [
+    [{ label: '📱 SHOW PAYMENT QR', action: 'deposit:show_qr', text: 'SHOW PAYMENT QR', data: 'deposit:show_qr' }],
+    [{ label: '❌ CANCEL DEPOSIT', action: 'deposit:cancel', text: 'Cancel Deposit', data: 'deposit:cancel' }]
   ];
 }
 
@@ -46,8 +70,12 @@ export function isRegisteredDepositFlow(flow, step) {
     'deposit_payment_name',
     'deposit_amount',
     'deposit_await_payment',
+    'deposit_choose_target',
+    'deposit_other_username',
+    'deposit_confirm_other',
     DEPOSIT_BOT_SESSION_STEP_AMOUNT,
-    DEPOSIT_BOT_SESSION_STEP_NAME
+    DEPOSIT_BOT_SESSION_STEP_NAME,
+    DEPOSIT_BOT_SESSION_STEP_RECIPIENT
   ].includes(String(step || ''));
 }
 
@@ -57,9 +85,10 @@ export function isDepositBotSessionActive(botSession = null) {
   if (flow !== DEPOSIT_BOT_SESSION_FLOW) return false;
   const step = String(botSession.workflow_step || botSession.workflowStep || '').trim();
   return [
-    DEPOSIT_BOT_SESSION_STEP_AMOUNT,
-    DEPOSIT_BOT_SESSION_STEP_NAME,
-    DEPOSIT_BOT_SESSION_STEP_AWAIT,
+    DEPOSIT_BOT_SESSION_STEP_RECIPIENT,
+    'deposit_choose_target',
+    'deposit_other_username',
+    'deposit_confirm_other',
     'deposit_amount',
     'deposit_payment_name',
     'deposit_await_payment'
@@ -87,7 +116,8 @@ export function depositStepFromBotSession(botSession = null) {
   const step = String(botSession?.workflow_step || botSession?.workflowStep || '').trim();
   if (step === DEPOSIT_BOT_SESSION_STEP_NAME || step === 'deposit_payment_name') return 'deposit_payment_name';
   if (step === DEPOSIT_BOT_SESSION_STEP_AWAIT || step === 'deposit_await_payment') return 'deposit_await_payment';
-  if (step === DEPOSIT_BOT_SESSION_STEP_AMOUNT || step === 'deposit_amount') return 'deposit_amount';
+  if (step === DEPOSIT_BOT_SESSION_STEP_RECIPIENT || step === 'deposit_other_username') return 'deposit_other_username';
+  if (step === 'deposit_choose_target') return 'deposit_choose_target';
   return null;
 }
 
@@ -126,15 +156,13 @@ export function resolveRegisteredDepositStep(step, info = {}) {
   if (raw === DEPOSIT_BOT_SESSION_STEP_AMOUNT) return 'deposit_amount';
   if (raw === DEPOSIT_BOT_SESSION_STEP_NAME) return 'deposit_payment_name';
   if (raw === DEPOSIT_BOT_SESSION_STEP_AWAIT) return 'deposit_await_payment';
-  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment'].includes(raw)) {
+  if (raw === DEPOSIT_BOT_SESSION_STEP_RECIPIENT || raw === 'deposit_other_username') return 'deposit_other_username';
+  if (['deposit_payment_name', 'deposit_amount', 'deposit_await_payment', 'deposit_choose_target', 'deposit_other_username', 'deposit_confirm_other'].includes(raw)) {
     return raw;
   }
   if (info.deposit_awaiting_payment) return 'deposit_await_payment';
-  const knownName = String(info.payment_display_name || info.payment_name || '').trim();
-  if (info.deposit_in_progress || knownName) {
-    return knownName ? 'deposit_amount' : 'deposit_payment_name';
-  }
-  return raw || 'deposit_payment_name';
+  if (info.deposit_in_progress) return 'deposit_choose_target';
+  return raw || 'deposit_choose_target';
 }
 
 /** Temporary wizard fields that must not block a fresh deposit after expiry/cancel. */
@@ -215,22 +243,18 @@ export async function normalizeRegisteredDepositAttempt(store, contactId, info =
 }
 
 function resumeActiveDepositDecision(activeWindow, info = {}) {
-  const amount = activeWindow.first_deposit_amount ?? info.deposit_requested_amount;
-  const money = formatExactPaymentAmount(amount) || `$${formatDepositAmount(amount)}`;
+  const recipient = activeWindow.recipient_username || info.deposit_recipient_username || 'your account';
   return {
     kind: 'deposit_waiting_payment',
     replies: [{
       text: [
-        'We are waiting to verify your deposit payment.',
+        '💵 You already have an active deposit.',
         '',
-        `💰 YOUR EXACT PAYMENT AMOUNT: ${money}`,
-        `Please send exactly ${money}.`,
-        'Do not round or change the amount.',
-        '',
-        'You have 7 minutes from when the QR was sent.',
-        'We will confirm automatically once payment is verified.'
+        `Loading: ${recipient}`,
+        'This window stays open for 15 minutes.',
+        'Send payment using the QR instructions. Do not enter an amount here.'
       ].join('\n'),
-      buttons: depositCancelButtons()
+      buttons: activeDepositReuseButtons()
     }],
     statePatch: {
       currentFlow: REGISTERED_DEPOSIT_FLOW,
@@ -239,12 +263,9 @@ function resumeActiveDepositDecision(activeWindow, info = {}) {
         ...info,
         deposit_in_progress: true,
         deposit_awaiting_payment: true,
-        deposit_requested_amount: amount,
         deposit_payment_window_id: activeWindow.id,
         payment_window_id: activeWindow.id,
-        payment_window_expires_at: activeWindow.expires_at,
-        payment_display_name: activeWindow.payment_display_name || info.payment_display_name || info.payment_name,
-        payment_name: activeWindow.payment_display_name || info.payment_name || info.payment_display_name
+        payment_window_expires_at: activeWindow.expires_at
       }
     },
     escalate: false,
@@ -262,10 +283,7 @@ export async function beginRegisteredDeposit(store, contact, info = {}) {
   if (normalized.activeWindow) {
     await writeDepositBotSession(store, contact.id, {
       step: DEPOSIT_BOT_SESSION_STEP_AWAIT,
-      context: {
-        payment_name: normalized.activeWindow.payment_display_name || normalized.info.payment_display_name || null,
-        window_id: normalized.activeWindow.id
-      }
+      context: { window_id: normalized.activeWindow.id }
     });
     const resumed = resumeActiveDepositDecision(normalized.activeWindow, normalized.info);
     console.log(
@@ -278,63 +296,24 @@ export async function beginRegisteredDeposit(store, contact, info = {}) {
   }
 
   const started = await startRegisteredDeposit(contact, normalized.info);
-  const sessionStep = started.statePatch?.currentStep === 'deposit_payment_name'
-    ? DEPOSIT_BOT_SESSION_STEP_NAME
-    : DEPOSIT_BOT_SESSION_STEP_AMOUNT;
   await writeDepositBotSession(store, contact.id, {
-    step: sessionStep,
-    context: {
-      payment_name: started.statePatch?.registrationInfo?.payment_display_name
-        || started.statePatch?.registrationInfo?.payment_name
-        || null
-    }
+    step: 'deposit_choose_target',
+    context: {}
   });
-  console.log(
-    `[chatbot] deposit_session_started contact=${contact.id} ` +
-    `flow=${DEPOSIT_BOT_SESSION_FLOW} step=${sessionStep} ` +
-    `automation_flow=${started.statePatch?.currentFlow || 'none'} ` +
-    `automation_step=${started.statePatch?.currentStep || 'none'}`
-  );
   return started;
 }
 
 export async function startRegisteredDeposit(contact, info = {}) {
   const cleaned = clearStaleDepositSessionFields(info);
-  const knownName = String(cleaned.payment_display_name || cleaned.payment_name || '').trim();
-  if (knownName) {
-    return {
-      kind: 'deposit_ask_amount',
-      replies: [{
-        text: [
-          `Deposit for payment name: ${knownName}`,
-          '',
-          DEPOSIT_AMOUNT_PROMPT
-        ].join('\n'),
-        buttons: depositCancelButtons()
-      }],
-      sendPaymentQr: null,
-      statePatch: {
-        currentFlow: REGISTERED_DEPOSIT_FLOW,
-        currentStep: 'deposit_amount',
-        registrationInfo: {
-          ...cleaned,
-          deposit_in_progress: true,
-          deposit_awaiting_payment: false,
-          payment_display_name: knownName,
-          payment_name: knownName
-        }
-      },
-      escalate: false,
-      logEvent: { event: 'deposit_flow_started', step: 'deposit_amount' }
-    };
-  }
-
   return {
-    kind: 'deposit_ask_payment_name',
-    replies: [{ text: DEPOSIT_NAME_PROMPT, buttons: depositCancelButtons() }],
+    kind: 'deposit_choose_target',
+    replies: [{
+      text: DEPOSIT_LOAD_PROMPT,
+      buttons: depositTargetButtons()
+    }],
     statePatch: {
       currentFlow: REGISTERED_DEPOSIT_FLOW,
-      currentStep: 'deposit_payment_name',
+      currentStep: 'deposit_choose_target',
       registrationInfo: {
         ...cleaned,
         deposit_in_progress: true,
@@ -342,7 +321,63 @@ export async function startRegisteredDeposit(contact, info = {}) {
       }
     },
     escalate: false,
-    logEvent: { event: 'deposit_flow_started', step: 'deposit_payment_name' }
+    logEvent: { event: 'deposit_flow_started', step: 'deposit_choose_target' }
+  };
+}
+
+async function sendAmountlessDepositQr(store, contact, info, {
+  recipientContactId,
+  recipientUsername,
+  recipientPlayerUid
+}) {
+  const qrSource = await resolveRegistrationDefaultQr(store);
+  if (!qrSource) {
+    return {
+      kind: 'deposit_qr_unavailable',
+      replies: [{
+        text: 'We could not load the payment QR right now. Please try again or contact support.',
+        buttons: [
+          [{ label: '🔄 Try Again', action: 'bot:deposit', text: 'Try Again', data: 'bot:deposit' }],
+          ...registeredMenuButtons()
+        ]
+      }],
+      statePatch: {
+        currentFlow: REGISTERED_DEPOSIT_FLOW,
+        currentStep: 'deposit_choose_target',
+        registrationInfo: info
+      },
+      escalate: false
+    };
+  }
+  return {
+    kind: 'registration_send_payment_qr',
+    replies: [],
+    sendPaymentQr: {
+      paymentMethodId: qrSource.paymentMethodId,
+      paymentMethodName: qrSource.paymentMethodName,
+      paymentDisplayName: null,
+      firstDepositAmount: null,
+      flowType: PAYMENT_WINDOW_FLOW.DEPOSIT,
+      requesterContactId: contact.id,
+      recipientContactId,
+      recipientUsername,
+      recipientPlayerUid
+    },
+    statePatch: {
+      currentFlow: REGISTERED_DEPOSIT_FLOW,
+      currentStep: 'deposit_await_payment',
+      registrationInfo: {
+        ...info,
+        payment_method_id: qrSource.paymentMethodId,
+        deposit_in_progress: true,
+        deposit_awaiting_payment: true,
+        deposit_recipient_contact_id: recipientContactId,
+        deposit_recipient_username: recipientUsername,
+        deposit_recipient_player_uid: recipientPlayerUid
+      }
+    },
+    escalate: false,
+    logEvent: { event: 'deposit_qr_requested', recipientContactId }
   };
 }
 
@@ -391,7 +426,12 @@ export async function continueRegisteredDeposit({
       qrMessageId = pressedMessageId;
     }
 
-    if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
+    if (info.deposit_payment_window_id && typeof store.cancelDepositWindow === 'function') {
+      await store.cancelDepositWindow({
+        contactId: contact.id,
+        windowId: info.deposit_payment_window_id
+      }).catch(() => null);
+    } else if (info.deposit_payment_window_id && store.expireRegistrationPaymentWindow) {
       await store.expireRegistrationPaymentWindow(info.deposit_payment_window_id, { suppressNotification: true }).catch(() => null);
     }
     await clearDepositBotSession(store, contact.id);
@@ -429,213 +469,124 @@ export async function continueRegisteredDeposit({
     return beginRegisteredDeposit(store, contact, info);
   }
 
-  if (action === 'deposit:retry_qr') {
-    const amount = info.deposit_requested_amount ?? info.first_deposit_amount;
-    const name = info.payment_display_name || info.payment_name;
-    if (amount == null || !name) {
-      return beginRegisteredDeposit(store, contact, info);
-    }
-    const qrSource = await resolveRegistrationDefaultQr(store);
-    if (!qrSource) {
-      return {
-        kind: 'deposit_qr_unavailable',
-        replies: [{
-          text: 'We could not load the payment QR right now. Please try again or contact support.',
-          buttons: [
-            [{ label: '🔄 Try Again', action: 'deposit:retry_qr', text: 'Try Again', data: 'deposit:retry_qr' }],
-            ...registeredMenuButtons()
-          ]
-        }],
-        statePatch: {
-          currentFlow: REGISTERED_DEPOSIT_FLOW,
-          currentStep: 'deposit_amount',
-          registrationInfo: info
-        },
-        escalate: false
-      };
-    }
+  if (action === 'deposit:show_qr') {
+    const normalized = await normalizeRegisteredDepositAttempt(store, contact.id, info);
+    if (!normalized.activeWindow) return beginRegisteredDeposit(store, contact, normalized.info);
+    return sendAmountlessDepositQr(store, contact, normalized.info, {
+      recipientContactId: normalized.activeWindow.recipient_contact_id || contact.id,
+      recipientUsername: normalized.activeWindow.recipient_username,
+      recipientPlayerUid: normalized.activeWindow.recipient_player_uid
+    });
+  }
+
+  if (action === 'deposit:my_account') {
+    const username = info.preferred_appbeg_username || contact.appbeg_account_id || 'your account';
+    return sendAmountlessDepositQr(store, contact, info, {
+      recipientContactId: contact.id,
+      recipientUsername: username,
+      recipientPlayerUid: info.appbeg_player_uid || contact.appbeg_account_id
+    });
+  }
+
+  if (action === 'deposit:other') {
+    await writeDepositBotSession(store, contact.id, {
+      step: DEPOSIT_BOT_SESSION_STEP_RECIPIENT,
+      reset: false,
+      context: {}
+    });
     return {
-      kind: 'registration_send_payment_qr',
-      replies: [],
-      sendPaymentQr: {
-        paymentMethodId: qrSource.paymentMethodId,
-        paymentMethodName: qrSource.paymentMethodName,
-        paymentDisplayName: name,
-        firstDepositAmount: amount,
-        flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
-      },
+      kind: 'deposit_ask_other_username',
+      replies: [{ text: DEPOSIT_OTHER_USERNAME_PROMPT, buttons: depositCancelButtons() }],
       statePatch: {
         currentFlow: REGISTERED_DEPOSIT_FLOW,
-        currentStep: 'deposit_amount',
-        registrationInfo: {
-          ...info,
-          payment_method_id: qrSource.paymentMethodId,
-          deposit_requested_amount: amount,
-          deposit_in_progress: true
-        }
+        currentStep: 'deposit_other_username',
+        registrationInfo: info
       },
       escalate: false
     };
   }
 
-  if (normalizedStep === 'deposit_payment_name') {
-    const name = String(text || '').trim().replace(/\s+/g, ' ');
-    if (!name || name.length < 2 || name.length > 80) {
+  if (action === 'deposit:continue_other' && info.deposit_pending_recipient_contact_id) {
+    return sendAmountlessDepositQr(store, contact, info, {
+      recipientContactId: info.deposit_pending_recipient_contact_id,
+      recipientUsername: info.deposit_pending_recipient_username,
+      recipientPlayerUid: info.deposit_pending_recipient_player_uid
+    });
+  }
+
+  if (action === 'deposit:retry_qr') {
+    return beginRegisteredDeposit(store, contact, info);
+  }
+
+  if (normalizedStep === 'deposit_other_username' || action === 'deposit:other') {
+    const username = String(text || '').trim();
+    if (!username) {
       return {
-        kind: 'deposit_ask_payment_name',
-        replies: [{
-          text: 'Please enter a valid payment name.\n\n' + DEPOSIT_NAME_PROMPT,
-          buttons: depositCancelButtons()
-        }],
+        kind: 'deposit_ask_other_username',
+        replies: [{ text: DEPOSIT_OTHER_USERNAME_PROMPT, buttons: depositCancelButtons() }],
         statePatch: {
           currentFlow: REGISTERED_DEPOSIT_FLOW,
-          currentStep: 'deposit_payment_name',
+          currentStep: 'deposit_other_username',
           registrationInfo: info
         },
         escalate: false
       };
     }
-    await writeDepositBotSession(store, contact.id, {
-      step: DEPOSIT_BOT_SESSION_STEP_AMOUNT,
-      reset: false,
-      context: { payment_name: name }
-    });
+    const settings = typeof store.getCoadminSettings === 'function'
+      ? await store.getCoadminSettings().catch(() => null)
+      : null;
+    const recipient = typeof store.findRegisteredRoyalVipPlayerByUsername === 'function'
+      ? await store.findRegisteredRoyalVipPlayerByUsername(username, {
+        coadminUid: info.appbeg_coadmin_uid || settings?.appbeg_coadmin_uid || null
+      })
+      : null;
+    if (!recipient || Number(recipient.id) === Number(contact.id)) {
+      return {
+        kind: 'deposit_other_not_found',
+        replies: [{
+          text: [
+            'That player is not a registered Royal VIP player.',
+            'You can only load another player who already registered through Royal VIP.'
+          ].join('\n'),
+          buttons: depositTargetButtons()
+        }],
+        statePatch: {
+          currentFlow: REGISTERED_DEPOSIT_FLOW,
+          currentStep: 'deposit_choose_target',
+          registrationInfo: info
+        },
+        escalate: false
+      };
+    }
+    const recipientUsername = recipient.royal_vip_username || username;
     return {
-      kind: 'deposit_ask_amount',
+      kind: 'deposit_confirm_other',
       replies: [{
         text: [
-          `Thank you, ${name}.`,
-          '',
-          DEPOSIT_AMOUNT_PROMPT
+          'You are loading:',
+          recipientUsername
         ].join('\n'),
-        buttons: depositCancelButtons()
+        buttons: [
+          [{ label: '✅ CONTINUE', action: 'deposit:continue_other', text: 'CONTINUE', data: 'deposit:continue_other' }],
+          [{ label: '❌ CANCEL', action: 'deposit:cancel', text: 'CANCEL', data: 'deposit:cancel' }]
+        ]
       }],
       statePatch: {
         currentFlow: REGISTERED_DEPOSIT_FLOW,
-        currentStep: 'deposit_amount',
+        currentStep: 'deposit_confirm_other',
         registrationInfo: {
-          ...clearStaleDepositSessionFields(info),
-          payment_name: name,
-          payment_display_name: name,
-          deposit_in_progress: true,
-          deposit_awaiting_payment: false
+          ...info,
+          deposit_pending_recipient_contact_id: recipient.id,
+          deposit_pending_recipient_username: recipientUsername,
+          deposit_pending_recipient_player_uid: recipient.registration_info?.appbeg_player_uid || recipient.appbeg_account_id
         }
       },
       escalate: false
     };
   }
 
-  if (normalizedStep === 'deposit_amount') {
-    console.log(
-      `[chatbot] deposit_amount_message contact=${contact.id} ` +
-      `text=${JSON.stringify(String(text || '').slice(0, 40))} ` +
-      `step=${normalizedStep} deposit_in_progress=${Boolean(info.deposit_in_progress)}`
-    );
-    const amountCents = parseMoneyToCents(text);
-    console.log(
-      `[chatbot] deposit_amount_parsed contact=${contact.id} ` +
-      `parsed_amount_cents=${amountCents ?? 'invalid'} min_cents=${MIN_REGISTRATION_DEPOSIT * 100}`
-    );
-    const minCents = MIN_REGISTRATION_DEPOSIT * 100;
-    if (!Number.isSafeInteger(amountCents) || amountCents < minCents) {
-      return {
-        kind: 'deposit_ask_amount',
-        replies: [{
-          text: [
-            `Please enter a valid deposit amount of at least $${MIN_REGISTRATION_DEPOSIT}.`,
-            '',
-            'Numbers only. Example: 10'
-          ].join('\n'),
-          buttons: depositCancelButtons()
-        }],
-        statePatch: {
-          currentFlow: REGISTERED_DEPOSIT_FLOW,
-          currentStep: 'deposit_amount',
-          registrationInfo: info
-        },
-        escalate: false
-      };
-    }
-    const amount = centsToDollars(amountCents);
-
-    // Normalize again so an expired attempt cannot be reused at QR time.
-    const normalized = await normalizeRegisteredDepositAttempt(store, contact.id, info);
-    if (normalized.activeWindow) {
-      const activeCents = parseMoneyToCents(String(normalized.activeWindow.first_deposit_amount));
-      if (activeCents === amountCents) {
-        return resumeActiveDepositDecision(normalized.activeWindow, {
-          ...normalized.info,
-          deposit_requested_amount: amount
-        });
-      }
-      if (store.expireRegistrationPaymentWindow) {
-        await store.expireRegistrationPaymentWindow(normalized.activeWindow.id, {
-          suppressNotification: true
-        }).catch(() => null);
-      }
-    }
-
-    const qrSource = await resolveRegistrationDefaultQr(store);
-    if (!qrSource) {
-      return {
-        kind: 'deposit_qr_unavailable',
-        replies: [{
-          text: 'We could not load the payment QR right now. Please try again or contact support.',
-          buttons: [
-            [{ label: '🔄 Try Again', action: 'deposit:retry_qr', text: 'Try Again', data: 'deposit:retry_qr' }],
-            ...registeredMenuButtons()
-          ]
-        }],
-        statePatch: {
-          currentFlow: REGISTERED_DEPOSIT_FLOW,
-          currentStep: 'deposit_amount',
-          registrationInfo: {
-            ...normalized.info,
-            deposit_requested_amount: amount,
-            deposit_in_progress: true
-          }
-        },
-        escalate: false,
-        logEvent: { event: 'registration_qr_missing', amount, flowType: PAYMENT_WINDOW_FLOW.DEPOSIT }
-      };
-    }
-
-    const paymentDisplayName = normalized.info.payment_display_name || normalized.info.payment_name;
-    await writeDepositBotSession(store, contact.id, {
-      step: DEPOSIT_BOT_SESSION_STEP_AWAIT,
-      reset: false,
-      context: { payment_name: paymentDisplayName, amount }
-    });
-    return {
-      kind: 'registration_send_payment_qr',
-      replies: [],
-      sendPaymentQr: {
-        paymentMethodId: qrSource.paymentMethodId,
-        paymentMethodName: qrSource.paymentMethodName,
-        paymentDisplayName,
-        firstDepositAmount: amount,
-        flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
-      },
-      statePatch: {
-        currentFlow: REGISTERED_DEPOSIT_FLOW,
-        currentStep: 'deposit_amount',
-        registrationInfo: {
-          ...normalized.info,
-          payment_method_id: qrSource.paymentMethodId,
-          payment_method_name: qrSource.paymentMethodName,
-          deposit_requested_amount: amount,
-          deposit_in_progress: true,
-          deposit_awaiting_payment: false
-        }
-      },
-      escalate: false,
-      logEvent: {
-        event: 'registration_amount_accepted',
-        amount,
-        paymentMethodId: qrSource.paymentMethodId,
-        flowType: PAYMENT_WINDOW_FLOW.DEPOSIT
-      }
-    };
+  if (normalizedStep === 'deposit_choose_target' || normalizedStep === 'deposit_payment_name' || normalizedStep === 'deposit_amount') {
+    return startRegisteredDeposit(contact, info);
   }
 
   if (normalizedStep === 'deposit_await_payment') {

@@ -1,15 +1,14 @@
 /**
- * Royal VIP BotFather registration wizard (payment-first).
+ * Royal VIP BotFather registration wizard (credentials-first).
  *
  * Flow:
- * payment_name → first_deposit_amount → QR / await payment
- * → username → password → review → create account
+ * username → password → create account
  */
 
 import {
-  parseRegistrationPaymentAmount,
   chatbotWelcomeCooldownMs,
-  isReferralSkipInput
+  isReferralSkipInput,
+  parseRegistrationPaymentAmount
 } from '../registration/utils.js';
 import {
   APPBEG_PASSWORD_HELP,
@@ -64,9 +63,7 @@ export const REGISTRATION_AMOUNT_INVALID_MESSAGE = [
 ].join('\n');
 
 export const USERNAME_PROMPT = [
-  'Payment received and verified!',
-  '',
-  'Now choose your Royal VIP username.',
+  'Choose your Royal VIP username.',
   '',
   'Example:',
   'JohnVIP01',
@@ -92,7 +89,6 @@ export const REFERRAL_CODE_PROMPT = [
 export const ACCOUNT_CREATE_PROGRESS = [
   'Creating your Royal VIP account...',
   '',
-  '✓ Verifying payment',
   '✓ Checking username',
   '✓ Creating account',
   '✓ Finalizing setup'
@@ -198,15 +194,8 @@ function validateReferralCodeInput(text = '') {
 }
 
 export function reviewDecision(info) {
-  const amount = info.first_deposit_amount ?? info.requested_deposit_amount;
   const text = [
     '━━━━━━━━━━━━━━',
-    'Payment Name:',
-    info.payment_display_name || info.payment_name || '—',
-    '',
-    'First Deposit:',
-    amount != null ? formatDepositAmount(amount) : '—',
-    '',
     'Royal VIP Username:',
     info.preferred_appbeg_username || '—',
     '',
@@ -235,39 +224,22 @@ export function reviewDecision(info) {
 }
 
 export async function startRoyalVipRegistration(contact, info, store, { resumed = false } = {}) {
-  const qrSource = await resolveRegistrationDefaultQr(store);
-  if (!qrSource) {
-    return {
-      kind: 'registration_no_payment_methods',
-      replies: [{
-        text: 'Registration payments are not available right now. Please contact staff.',
-        buttons: guestMenuButtons()
-      }],
-      statePatch: null,
-      escalate: false
-    };
-  }
-
   const existingInfo = info && typeof info === 'object' ? info : {};
   return {
-    kind: 'registration_ask_payment_name',
+    kind: 'registration_ask_username',
     replies: [{
-      text: PAYMENT_NAME_PROMPT,
+      text: USERNAME_PROMPT,
       buttons: registrationNavButtons()
     }],
     statePatch: {
       currentFlow: BOT_REGISTRATION_FLOW,
-      currentStep: 'payment_name',
+      currentStep: 'username',
       registrationInfo: {
         ...clearedBotRegistrationInfo(contact, existingInfo),
         telegram_display_name: contact.display_name,
         telegram_username: contact.username || null,
         telegram_user_id: contact.telegram_id,
-        registration_method: 'chatbot',
-        payment_method_id: qrSource.paymentMethodId,
-        payment_method_name: qrSource.paymentMethodName,
-        payment_method_key: qrSource.paymentMethodKey,
-        payment_app: qrSource.paymentMethodName
+        registration_method: 'chatbot'
       }
     },
     setStatus: 'Collecting Info',
@@ -275,7 +247,7 @@ export async function startRoyalVipRegistration(contact, info, store, { resumed 
     escalate: false,
     logEvent: {
       event: resumed ? 'flow_resumed' : 'flow_started',
-      step: 'payment_name'
+      step: 'username'
     }
   };
 }
@@ -320,17 +292,6 @@ export async function continueRoyalVipRegistration({
         logEvent: { event: 'create_account_duplicate_ignored' }
       };
     }
-    if (!info.payment_confirmed) {
-      return {
-        kind: 'registration_waiting_payment',
-        replies: [{
-          text: 'We are still waiting to verify your payment. Please complete the QR payment first.',
-          buttons: cancelButtons
-        }],
-        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
-        escalate: false
-      };
-    }
     if (!info.preferred_appbeg_username || !info.appbeg_password) {
       return reviewDecision(info);
     }
@@ -356,20 +317,18 @@ export async function continueRoyalVipRegistration({
 
   if (action === 'bot:edit' || action === 'bot:change_payment_details') {
     return {
-      kind: 'registration_ask_payment_name',
-      replies: [{ text: PAYMENT_NAME_PROMPT, buttons: registrationNavButtons() }],
+      kind: 'registration_ask_username',
+      replies: [{ text: USERNAME_PROMPT, buttons: registrationNavButtons() }],
       statePatch: {
         currentFlow: BOT_REGISTRATION_FLOW,
-        currentStep: 'payment_name',
+        currentStep: 'username',
         registrationInfo: {
           ...info,
-          preferred_appbeg_username: undefined,
-          appbeg_password: undefined,
           ready_to_create_player: false
         }
       },
       escalate: false,
-      logEvent: { event: 'flow_step', step: 'payment_name', reason: 'edit' }
+      logEvent: { event: 'flow_step', step: 'username', reason: 'edit' }
     };
   }
 
@@ -680,7 +639,7 @@ export async function continueRoyalVipRegistration({
             money ? `Please send exactly ${money}. Do not round or change the amount.` : null,
             money ? '' : null,
             'We will automatically verify your payment and continue your registration.',
-            'Please complete the QR payment within 7 minutes.'
+            'Please complete the QR payment within 15 minutes.'
           ].filter((line) => line != null).join('\n'),
           buttons: cancelButtons
         }],
@@ -691,18 +650,6 @@ export async function continueRoyalVipRegistration({
   }
 
   if (normalizedStep === 'username') {
-    if (!info.payment_confirmed) {
-      return {
-        kind: 'registration_waiting_payment',
-        replies: [{
-          text: 'We are still waiting to verify your payment before choosing a username.',
-          buttons: cancelButtons
-        }],
-        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
-        escalate: false
-      };
-    }
-
     const offTopic = offTopicGuard(text, USERNAME_PROMPT, info, 'username');
     if (offTopic) return offTopic;
 
@@ -748,6 +695,28 @@ export async function continueRoyalVipRegistration({
       };
     }
 
+    if (typeof store.checkRegistrationDuplicates === 'function') {
+      const duplicateError = await store.checkRegistrationDuplicates({
+        appbegUsername: usernameResult.username,
+        excludeUserId: contact.id
+      }).catch(() => null);
+      if (duplicateError) {
+        return {
+          kind: 'registration_ask_username',
+          replies: [{
+            text: [
+              'Username already exists.',
+              'Please choose another username.'
+            ].join('\n'),
+            buttons: registrationNavButtons()
+          }],
+          statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'username', registrationInfo: info },
+          escalate: false,
+          logEvent: { event: 'username_duplicate_ledger' }
+        };
+      }
+    }
+
     const nextInfo = { ...info, preferred_appbeg_username: usernameResult.username };
     return {
       kind: 'registration_ask_password',
@@ -763,18 +732,6 @@ export async function continueRoyalVipRegistration({
   }
 
   if (normalizedStep === 'password') {
-    if (!info.payment_confirmed) {
-      return {
-        kind: 'registration_waiting_payment',
-        replies: [{
-          text: 'We are still waiting to verify your payment.',
-          buttons: cancelButtons
-        }],
-        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
-        escalate: false
-      };
-    }
-
     const offTopic = offTopicGuard(text, PASSWORD_PROMPT, info, 'password');
     if (offTopic) return offTopic;
 
@@ -792,32 +749,30 @@ export async function continueRoyalVipRegistration({
       };
     }
 
-    const nextInfo = { ...info, appbeg_password: passwordResult.password };
+    const nextInfo = {
+      ...info,
+      appbeg_password: passwordResult.password,
+      create_account_in_progress: true,
+      registration_method: 'chatbot',
+      registration_confirmed: true,
+      ready_to_create_player: true
+    };
     return {
-      kind: 'registration_ask_referral_choice',
-      replies: [{ text: REFERRAL_CHOICE_PROMPT, buttons: referralChoiceButtons() }],
+      kind: 'registration_create_appbeg_player',
+      replies: [{ text: ACCOUNT_CREATE_PROGRESS }],
+      createAppBegPlayer: true,
       statePatch: {
         currentFlow: BOT_REGISTRATION_FLOW,
-        currentStep: 'referral_choice',
+        currentStep: 'creating_account',
         registrationInfo: nextInfo
       },
+      setStatus: 'Pending Verification',
       escalate: false,
-      logEvent: { event: 'flow_step', step: 'referral_choice' }
+      logEvent: { event: 'create_player_requested' }
     };
   }
 
   if (normalizedStep === 'referral_choice') {
-    if (!info.payment_confirmed) {
-      return {
-        kind: 'registration_waiting_payment',
-        replies: [{
-          text: 'We are still waiting to verify your payment.',
-          buttons: cancelButtons
-        }],
-        statePatch: { currentFlow: BOT_REGISTRATION_FLOW, currentStep: 'await_payment', registrationInfo: info },
-        escalate: false
-      };
-    }
     if (isReferralYesInput(text)) {
       console.log('[chatbot] referral_choice_recorded', JSON.stringify({ contactId: contact?.id, choice: 'yes' }));
       return {
@@ -867,10 +822,25 @@ export async function continueRoyalVipRegistration({
   }
 
   console.log(`[chatbot] invalid_registration_step contact=${contact?.id} step=${normalizedStep}`);
-  if (info.payment_confirmed && info.preferred_appbeg_username && info.appbeg_password) {
-    return reviewDecision(info);
+  if (info.preferred_appbeg_username && info.appbeg_password) {
+    return {
+      kind: 'registration_create_appbeg_player',
+      replies: [{ text: ACCOUNT_CREATE_PROGRESS }],
+      createAppBegPlayer: true,
+      statePatch: {
+        currentFlow: BOT_REGISTRATION_FLOW,
+        currentStep: 'creating_account',
+        registrationInfo: {
+          ...info,
+          create_account_in_progress: true,
+          registration_confirmed: true
+        }
+      },
+      setStatus: 'Pending Verification',
+      escalate: false
+    };
   }
-  if (info.payment_confirmed) {
+  if (info.preferred_appbeg_username) {
     return {
       kind: 'registration_ask_username',
       replies: [{ text: USERNAME_PROMPT, buttons: registrationNavButtons() }],

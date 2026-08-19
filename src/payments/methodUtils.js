@@ -114,6 +114,22 @@ export function exactPaymentAmountWarning(amount) {
 }
 
 export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymentDisplayName, flowType = 'registration', creditedDepositAmount = null }) {
+  const hasAmount = firstDepositAmount != null && firstDepositAmount !== '' && Number(firstDepositAmount) > 0;
+  if (!hasAmount) {
+    return [
+      '💵 DEPOSIT INSTRUCTIONS',
+      '',
+      'Send your payment using the QR / payment information below.',
+      'You do not need to tell us the amount — we read it from the payment notice.',
+      paymentDisplayName ? `Payment Name on file: ${paymentDisplayName}` : null,
+      `Method: ${paymentMethodName || 'Payment'}`,
+      '',
+      'You have 15 minutes to complete your payment.',
+      flowType === 'deposit'
+        ? 'We will verify the incoming payment and credit the recipient.'
+        : 'We will automatically verify your payment.'
+    ].filter((line, index, lines) => line != null && !(line === '' && lines[index - 1] === '')).join('\n');
+  }
   const money = formatExactPaymentAmount(firstDepositAmount)
     || (() => {
       const amount = formatDepositAmount(firstDepositAmount);
@@ -143,7 +159,7 @@ export function paymentQrCaption({ paymentMethodName, firstDepositAmount, paymen
     `Amount: ${money}`,
     ...registrationCreditLines,
     '',
-    'You have 7 minutes to complete your payment.',
+    'You have 15 minutes to complete your payment.',
     closing
   ].filter((line, index, lines) => !(line === '' && lines[index - 1] === '')).join('\n');
 }

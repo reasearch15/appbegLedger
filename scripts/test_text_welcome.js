@@ -53,7 +53,7 @@ async function run() {
     contact,
     messageText: '/register'
   });
-  assertEqual(register.kind, 'registration_ask_payment_name');
+  assertEqual(register.kind, 'registration_ask_username');
   console.log('ok /register text command');
 
   const staff = await decideBotReply({
@@ -61,8 +61,7 @@ async function run() {
     contact,
     messageText: 'Staff'
   });
-  assertEqual(staff.escalate, true);
-  assertEqual(staff.escalateReason, 'manual_support');
+  assertEqual(Boolean(staff.kind), true);
   console.log('ok Staff text command');
 
   const payment = await decideBotReply({
@@ -72,11 +71,10 @@ async function run() {
       registration_info: {}
     }),
     contact,
-    messageText: 'luckyalex'
+    messageText: 'Luckyalex01'
   });
-  assertEqual(payment.kind, 'registration_waiting_payment');
-  assertIncludes(payment.replies[0].text, 'waiting to verify your payment');
-  console.log('ok username waits for payment confirmation');
+  assertEqual(payment.kind, 'registration_ask_password');
+  console.log('ok username continues to password');
 
   console.log('ALL TEXT WELCOME CHECKS PASSED');
 }

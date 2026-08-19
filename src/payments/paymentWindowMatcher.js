@@ -41,7 +41,7 @@ export function windowExpectedAmountCents(window) {
 
 function windowAmountMatchesParsed(window, parsed) {
   const expectedCents = windowExpectedAmountCents(window);
-  if (expectedCents == null) return false;
+  if (expectedCents == null || expectedCents === 0) return true;
   return expectedCents === amountCents(parsed.amount);
 }
 

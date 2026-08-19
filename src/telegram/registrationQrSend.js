@@ -6,7 +6,6 @@ import {
 import {
   PAYMENT_WINDOW_FLOW, paymentWindowMinutes
 } from '../payments/constants.js';
-import { matchEligiblePaymentsForWindow } from '../payments/router.js';
 import { parseMoneyToCents } from '../registration/utils.js';
 import { paymentQrRetryButtons, registeredMenuButtons, waitingPaymentCancelButtons } from './botRegistrationState.js';
 import { queueBotPhotoReply, queueBotReply } from './chatbotProcessorDelivery.js';
@@ -54,7 +53,7 @@ async function recoverQrFailure({
 }
 
 /**
- * Send QR photo, then open the 7-minute payment window.
+ * Send QR photo, then open the 15-minute payment window.
  * Order is intentional: QR must succeed before waiting / timer start.
  */
 export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQr, bot }) {
@@ -214,7 +213,7 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     const stillOpen = Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
     const statusActive = String(paymentWindow.status || '').toLowerCase() === 'active';
     let amountMatches = true;
-    if (isDeposit) {
+    if (isDeposit && amount != null && Number(amount) > 0) {
       const existingCents = Number.isSafeInteger(Number(paymentWindow.expected_payment_cents))
         ? Number(paymentWindow.expected_payment_cents)
         : parseMoneyToCents(String(paymentWindow.first_deposit_amount));
@@ -241,7 +240,11 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       firstDepositAmount: amount,
       creditedDepositAmount: sendPaymentQr.creditedDepositAmount,
       flowType,
-      windowMinutes: paymentWindowMinutes()
+      windowMinutes: paymentWindowMinutes(),
+      requesterContactId: sendPaymentQr.requesterContactId || contactId,
+      recipientContactId: sendPaymentQr.recipientContactId || contactId,
+      recipientPlayerUid: sendPaymentQr.recipientPlayerUid || null,
+      recipientUsername: sendPaymentQr.recipientUsername || null
     });
     windowCreated = true;
     console.log(
@@ -286,13 +289,23 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
     `[chatbot] registration_payment_window_started contact=${contactId} ` +
     `window=${paymentWindow.id} expires_at=${paymentWindow.expires_at} created=${windowCreated} flow=${flowType}`
   );
-  if (isDeposit) {
-    await matchEligiblePaymentsForWindow(store, paymentWindow.id, { bot }).catch((error) => {
-      console.warn(
-        `[chatbot] deposit_window_reconcile_failed contact=${contactId} ` +
-        `window=${paymentWindow.id} error=${error.message}`
-      );
-    });
+  // Never silently attach an old unmatched payment to a newly opened window.
+  if (isDeposit && windowCreated && typeof store.listUnmatchedPaymentsForPayer === 'function') {
+    const candidates = await store.listUnmatchedPaymentsForPayer(
+      sendPaymentQr.requesterContactId || contactId,
+      { limit: 3 }
+    ).catch(() => []);
+    if (candidates.length) {
+      import('../telegram/operationalAlerts.js').then(({ notifyUnmatchedCandidates }) => (
+        notifyUnmatchedCandidates(store, {
+          bot,
+          requesterName: contact.display_name || contact.username || 'player',
+          payments: candidates
+        })
+      )).catch((error) => {
+        console.warn('[deposit] unmatched_candidate_notice_failed', error.message);
+      });
+    }
   }
 
   return {

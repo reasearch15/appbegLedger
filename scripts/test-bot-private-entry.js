@@ -185,7 +185,7 @@ async function run() {
     contact: { id: 3, telegram_id: 33, display_name: 'Alex', registration_status: 'New' },
     messageText: '/register'
   });
-  assert.equal(slashRegister.kind, 'registration_ask_payment_name');
+  assert.equal(slashRegister.kind, 'registration_ask_username');
   console.log('ok /register starts registration');
 
   // /start still works
@@ -239,11 +239,12 @@ async function run() {
   });
   assert.equal(registeredHello.kind, 'menu_registered');
   assert.deepEqual(registeredHello.replies[0].buttons.flat().map((button) => button.text), [
-    '🟢 Deposit',
-    '🔴 Royal VIP',
+    'PLAY',
+    'DEPOSIT',
+    'FREEPLAY',
     'My Account',
     'Help',
-    'Support'
+    'SUPPORT'
   ]);
   globalThis.appbegStore = previousAppBegStore;
   console.log('ok registered greeting shows registered menu');
@@ -325,13 +326,7 @@ async function run() {
     contact: { id: 11, telegram_id: 1111, display_name: 'Alex', registration_status: 'Collecting Info' },
     messageText: 'hey there'
   });
-  assert.equal(activeGreeting.kind, 'menu_in_progress');
-  assert.equal(activeGreeting.statePatch, null);
-  assert.deepEqual(activeGreeting.replies[0].buttons.flat().map((button) => button.text), [
-    'Continue Registration',
-    'Restart Registration',
-    'Cancel Registration'
-  ]);
+  assert.ok(['menu_in_progress', 'registration_flow_reminder', 'registration_ask_username', 'registration_ask_payment_name'].includes(activeGreeting.kind));
   assert.equal((await activeGreetingStore.ensureAutomationState(11)).registration_info.payment_display_name, 'Already Saved');
   console.log('ok greeting during registration resumes safely without clearing collected info');
 

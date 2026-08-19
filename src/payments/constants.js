@@ -16,7 +16,11 @@ export const ROUTING_STATUS = {
   DUPLICATE_IGNORED: 'duplicate_ignored',
   IGNORED: 'ignored',
   PARSE_FAILED: 'parse_failed',
-  ROUTE_FAILED: 'route_failed'
+  ROUTE_FAILED: 'route_failed',
+  UNMATCHED: 'unmatched',
+  NEEDS_CONFIRMATION: 'needs_confirmation',
+  AMBIGUOUS: 'ambiguous',
+  CREDIT_FAILED: 'credit_failed'
 };
 
 /** Staff-facing payment queue status (derived from routing_status). */
@@ -114,13 +118,14 @@ export const DEPOSIT_STATUS = {
 
 export const PAYMENT_WINDOW_FLOW = {
   REGISTRATION: 'registration',
-  DEPOSIT: 'deposit'
+  DEPOSIT: 'deposit',
+  STAFF_ASSIGNMENT: 'staff_assignment'
 };
 
 /** Canonical window duration for registration and registered deposits. */
-export const PAYMENT_WINDOW_MINUTES = 7;
+export const PAYMENT_WINDOW_MINUTES = 15;
 
-/** How long an unmatched payment keeps searching for an active window before freeze. */
+/** Historical search window. Automatic freeze by time is retired. */
 export const PAYMENT_SEARCH_MINUTES = 15;
 
 export const PAYMENT_WINDOW_STATUS = {
@@ -145,7 +150,7 @@ export function paymentSearchMinutes() {
   return Math.max(Number(process.env.PAYMENT_SEARCH_MINUTES || PAYMENT_SEARCH_MINUTES), 1);
 }
 
-/** @deprecated Use paymentWindowMinutes — all live payment windows are 7 minutes. */
+/** @deprecated Use paymentWindowMinutes — live payment windows default to 15 minutes. */
 export function depositWindowMinutes() {
   return paymentWindowMinutes();
 }
@@ -210,10 +215,13 @@ export function deriveMatchingStatus(payment = {}, now = new Date()) {
   }
 
   if (routing === ROUTING_STATUS.SEARCHING || routing === ROUTING_STATUS.UNROUTED) {
-    const remaining = remainingSecondsUntil(payment.freeze_at, now);
-    if (remaining === 0) return MATCHING_STATUS.FROZEN;
     return MATCHING_STATUS.SEARCHING;
   }
+
+  if (routing === ROUTING_STATUS.UNMATCHED) return MATCHING_STATUS.SEARCHING;
+  if (routing === ROUTING_STATUS.NEEDS_CONFIRMATION) return MATCHING_STATUS.MANUAL_REVIEW;
+  if (routing === ROUTING_STATUS.AMBIGUOUS) return MATCHING_STATUS.MANUAL_REVIEW;
+  if (routing === ROUTING_STATUS.CREDIT_FAILED) return MATCHING_STATUS.MANUAL_REVIEW;
 
   if (routing === ROUTING_STATUS.FROZEN) return MATCHING_STATUS.FROZEN;
 
@@ -299,7 +307,7 @@ export function matchingStatusEmoji(matchingStatus) {
 export function routingStatusesForMatchingFilter(matchingStatus) {
   switch (matchingStatus) {
     case MATCHING_STATUS.SEARCHING:
-      return [ROUTING_STATUS.SEARCHING, ROUTING_STATUS.UNROUTED];
+      return [ROUTING_STATUS.SEARCHING, ROUTING_STATUS.UNROUTED, ROUTING_STATUS.UNMATCHED];
     case MATCHING_STATUS.MATCHED:
       return [
         ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
@@ -323,7 +331,10 @@ export function routingStatusesForMatchingFilter(matchingStatus) {
         ROUTING_STATUS.PARSE_FAILED,
         ROUTING_STATUS.ROUTE_FAILED,
         ROUTING_STATUS.EXPIRED_DEPOSIT,
-        ROUTING_STATUS.IGNORED
+        ROUTING_STATUS.IGNORED,
+        ROUTING_STATUS.NEEDS_CONFIRMATION,
+        ROUTING_STATUS.AMBIGUOUS,
+        ROUTING_STATUS.CREDIT_FAILED
       ];
     default:
       return null;

@@ -40,7 +40,7 @@ export function startPaymentFreezeWorker({
   io = null,
   pollMs = Number(process.env.PAYMENT_FREEZE_POLL_MS || 5000)
 } = {}) {
-  const enabled = process.env.PAYMENT_FREEZE_WORKER_ENABLED !== 'false';
+  const enabled = process.env.PAYMENT_FREEZE_WORKER_ENABLED === 'true';
   if (!enabled) {
     console.log('[payment-freeze] payment freeze worker disabled (PAYMENT_FREEZE_WORKER_ENABLED=false)');
     return { stop: async () => {} };
