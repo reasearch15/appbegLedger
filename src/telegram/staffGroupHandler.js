@@ -488,6 +488,11 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
     await ctx.answerCbQuery();
     return true;
   } catch (error) {
+    if (error.code === 'FORBIDDEN') {
+      console.warn(
+        `[staff-cb] forbidden actor=${actorId || 'unknown'} chat=${ctx.chat?.id ?? 'unknown'} data=${data || ''}`
+      );
+    }
     await ctx.answerCbQuery(error.code === 'FORBIDDEN' ? 'Not authorized' : (error.message || 'Action failed').slice(0, 180)).catch(() => null);
     return true;
   }

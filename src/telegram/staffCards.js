@@ -47,6 +47,19 @@ export function asTelegramSendExtra(extra = undefined) {
   return extra;
 }
 
+export function sharedControlCenterText() {
+  return [
+    '👑 ROYAL VIP CONTROL CENTER',
+    'Manage Royal VIP operations securely.'
+  ].join('\n');
+}
+
+export function sharedControlCenterButtons() {
+  return {
+    inline_keyboard: [[{ text: 'OPEN CONTROL CENTER', callback_data: STAFF_CB.CTRL }]]
+  };
+}
+
 export function controlCenterText(modeOn, role) {
   return [
     '👑 ROYAL VIP CONTROL CENTER',

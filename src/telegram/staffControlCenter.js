@@ -3,12 +3,12 @@ import {
   canManageStaff,
   canToggleConfidenceMode,
   isRoyalVipHubChat,
-  OPERATIONAL_ROLES,
   staffGroupIdFromEnv
 } from './operationalRoles.js';
 import {
   controlCenterButtons,
-  controlCenterText
+  sharedControlCenterButtons,
+  sharedControlCenterText
 } from './staffCards.js';
 import {
   isAlreadyPinnedError,
@@ -17,14 +17,6 @@ import {
   isPermissionDeniedError,
   telegramErrorText
 } from './telegramApiErrors.js';
-
-function canonicalControlCenterMarkup() {
-  return controlCenterButtons(OPERATIONAL_ROLES.ROOT_ADMIN, {
-    canToggle: true,
-    canManage: true,
-    canManageHub: true
-  });
-}
 
 export function controlCenterMarkupForRole(role) {
   return controlCenterButtons(role, {
@@ -53,11 +45,8 @@ export async function ensureStaffControlCenter({
     return { ok: false, reason: 'bot_unconfigured', created: false };
   }
 
-  const mode = typeof store.getConfidenceMode === 'function'
-    ? await store.getConfidenceMode()
-    : { enabled: false };
-  const text = controlCenterText(Boolean(mode.enabled), 'root_admin');
-  const replyMarkup = canonicalControlCenterMarkup();
+  const text = sharedControlCenterText();
+  const replyMarkup = sharedControlCenterButtons();
   const current = typeof store.getControlCenterState === 'function'
     ? await store.getControlCenterState()
     : {};

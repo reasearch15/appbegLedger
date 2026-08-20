@@ -27,6 +27,7 @@
     "test:royal-vip-private-support": "node scripts/test-royal-vip-private-support.js",
     "test:royal-vip-hub-channel-dm": "node scripts/test-royal-vip-hub-channel-dm.js",
     "test:staff-payment-cards": "node scripts/test-staff-payment-card-delivery.js",
+    "test:staff-control-center-role-ux": "node scripts/test-staff-control-center-role-ux.js",
     "test:telegram-first-postgres-migration": "node scripts/test-telegram-first-postgres-migration.js",
     "test:my-account": "node scripts/test-my-account-credentials.js",
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",

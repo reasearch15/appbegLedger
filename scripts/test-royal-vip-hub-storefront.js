@@ -504,7 +504,11 @@ async function run() {
   assert.equal(firstCc.created, true);
   const secondCc = await ensureStaffControlCenter({ store, bot: ccBot });
   assert.equal(secondCc.created, false);
-  assert.equal(ccBot.calls.send.filter((call) => /CONTROL CENTER/.test(call.text)).length, 1);
+  const pinnedSends = ccBot.calls.send.filter((call) => /CONTROL CENTER/.test(call.text));
+  assert.equal(pinnedSends.length, 1);
+  assert.equal(pinnedSends[0].text.includes('Your role: root_admin'), false);
+  const pinnedLabels = (pinnedSends[0].extra?.reply_markup?.inline_keyboard || pinnedSends[0].extra?.inline_keyboard || []).flat().map((button) => button.text);
+  assert.deepEqual(pinnedLabels, ['OPEN CONTROL CENTER']);
   const rootButtons = controlCenterButtons(OPERATIONAL_ROLES.ROOT_ADMIN).inline_keyboard.flat().map((button) => button.text);
   const coadminButtons = controlCenterButtons(OPERATIONAL_ROLES.COADMIN).inline_keyboard.flat().map((button) => button.text);
   const staffButtons = controlCenterButtons(OPERATIONAL_ROLES.STAFF).inline_keyboard.flat().map((button) => button.text);
