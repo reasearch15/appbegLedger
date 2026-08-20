@@ -252,6 +252,18 @@ export async function handlePaymentRegistrationQr({ store, contact, sendPaymentQ
       `window=${paymentWindow.id} payment_method_id=${paymentMethodId} ` +
       `qr_id=${qr.id} amount=${amount ?? 'n/a'} flow=${flowType} expires_at=${paymentWindow.expires_at}`
     );
+    await import('./staffOperations.js').then(({ postPlayerTopicSystemEvent }) => (
+      postPlayerTopicSystemEvent({
+        store,
+        bot: bot || globalThis.telegramBot || null,
+        contact,
+        text: isDeposit
+          ? 'Deposit window opened. Waiting for payment.'
+          : 'Registration payment window opened. Waiting for payment.'
+      })
+    )).catch((error) => {
+      console.warn('[staff-topic] window_opened_note_failed', error.message);
+    });
   } else {
     console.log(
       `[chatbot] registration_payment_window_reused contact=${contactId} ` +

@@ -24,6 +24,7 @@
     "test:royal-vip-compliance": "node scripts/test-royal-vip-compliance-hardening.js",
     "test:royal-vip-hub": "node scripts/test-royal-vip-hub-storefront.js",
     "test:royal-vip-hub-startup": "node scripts/test-royal-vip-hub-startup.js",
+    "test:royal-vip-private-support": "node scripts/test-royal-vip-private-support.js",
     "test:telegram-first-postgres-migration": "node scripts/test-telegram-first-postgres-migration.js",
     "test:my-account": "node scripts/test-my-account-credentials.js",
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",

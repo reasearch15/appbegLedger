@@ -10,6 +10,11 @@ import { isStaffGroupChat } from './operationalRoles.js';
 import { isStaffCallback } from './staffCards.js';
 import { ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
 import { ensureStaffControlCenter } from './staffControlCenter.js';
+import {
+  extractSupportedInboundMedia,
+  shouldMirrorPlayerInboundToStaff,
+  unsupportedInboundMediaLabel
+} from './playerSupportMessaging.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -140,15 +145,29 @@ export function startTelegramListener({ token, store, io }) {
         text_length: String(ctx.message.text || ctx.message.caption || '').trim().length
       });
       const result = await store.storeIncomingTelegramMessage(ctx);
-      if (result.inserted && String(ctx.message.text || ctx.message.caption || '').trim()) {
-        await mirrorPlayerMessageToStaffTopic({
-          store,
-          bot,
-          contact: result.user,
-          text: ctx.message.text || ctx.message.caption || ''
-        }).catch((error) => {
-          console.warn('[staff-topic] mirror_failed', error.message);
-        });
+      const inputText = ctx.message.text || ctx.message.caption || '';
+      const media = extractSupportedInboundMedia(ctx.message);
+      const unsupportedMedia = unsupportedInboundMediaLabel(ctx.message);
+      if (result.inserted) {
+        const automationState = await store.getAutomationState(result.user.id).catch(() => null);
+        const botSession = await store.getBotSession(result.user.id).catch(() => null);
+        if (shouldMirrorPlayerInboundToStaff({
+          text: inputText,
+          automationState,
+          botSession,
+          hasSupportedMedia: Boolean(media),
+          hasUnsupportedMedia: Boolean(unsupportedMedia)
+        })) {
+          await mirrorPlayerMessageToStaffTopic({
+            store,
+            bot,
+            contact: result.user,
+            text: inputText,
+            message: ctx.message
+          }).catch((error) => {
+            console.warn('[staff-topic] mirror_failed', error.message);
+          });
+        }
       }
       console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id} first=${Boolean(result.firstMessage)}`);
       await store.ensureBotSession(result.user.id);
@@ -170,7 +189,6 @@ export function startTelegramListener({ token, store, io }) {
       const messageSentAt = ctx.message?.date
         ? new Date(ctx.message.date * 1000).toISOString()
         : null;
-      const inputText = ctx.message.text || ctx.message.caption || '';
       const sess = await store.getBotSession(result.user.id).catch(() => null);
       const auto = await store.getAutomationState(result.user.id).catch(() => null);
       console.log(

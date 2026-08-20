@@ -13,7 +13,9 @@ import {
   resolveFreeplayGive,
   resolveFreeplayDecline,
   controlCenterText,
-  controlCenterButtons
+  controlCenterButtons,
+  deliverStaffReplyToPlayer,
+  postPlayerTopicSystemEvent
 } from './staffOperations.js';
 import {
   canManageHub,
@@ -44,6 +46,7 @@ import {
 } from './staffCards.js';
 import { queueBotReply } from './chatbotProcessor.js';
 import { describeRoyalVipHubStatus, ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
+import { extractSupportedInboundMedia } from './playerSupportMessaging.js';
 
 const pendingPrompts = new Map();
 
@@ -349,7 +352,7 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
     }
     const askId = parseId(STAFF_CB.ASK, data);
     if (askId) {
-      await staffAskPlayer(store, askId, actorId);
+      await staffAskPlayer(store, askId, actorId, { bot: telegramBot });
       await ctx.answerCbQuery('Asked player');
       return true;
     }
@@ -368,6 +371,12 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
             text: 'Your Freeplay request was declined.',
             buttons: [],
             bot: globalThis.telegramBot || null
+          }).catch(() => null);
+          await postPlayerTopicSystemEvent({
+            store,
+            bot: globalThis.telegramBot || null,
+            contact,
+            text: 'Freeplay request declined.'
           }).catch(() => null);
         }
       }
@@ -413,6 +422,12 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
             buttons: [],
             bot: globalThis.telegramBot || null
           }).catch(() => null);
+          await postPlayerTopicSystemEvent({
+            store,
+            bot: globalThis.telegramBot || null,
+            contact,
+            text: `Freeplay approved and issued: ${pending.amount}`
+          }).catch(() => null);
         }
         return true;
       }
@@ -445,16 +460,22 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
 
 export async function handleStaffGroupMessage({ ctx, store, bot }) {
   if (!isStaffGroupChat(ctx.chat?.id)) return false;
+  if (ctx.from?.is_bot) return true;
   const actor = await currentOperationalActor(store, ctx.from?.id);
   if (!actor) {
     logUnauthorizedStaffGroupInbound(ctx, 'no_operational_role');
     return true;
   }
   const { actorId } = actor;
+  const media = extractSupportedInboundMedia(ctx.message);
   const text = String(ctx.message?.text || ctx.message?.caption || '').trim();
-  if (!text) return true;
+  if (!text && !media) return true;
 
   const pending = getPending(actorId);
+  if (pending && !text) {
+    await ctx.reply('Send a text reply for this staff action.');
+    return true;
+  }
   if (pending?.kind === 'add_staff') {
     try {
       await requireOperationalRole(store, actorId, canManageStaff);
@@ -507,6 +528,10 @@ export async function handleStaffGroupMessage({ ctx, store, bot }) {
     return true;
   }
   if (pending?.kind === 'message_player') {
+    if (!text) {
+      await ctx.reply('Type a text message to send this player privately.');
+      return true;
+    }
     try {
       const result = await staffMessagePlayer(store, pending.contactId, text, actorId);
       clearPending(actorId);
@@ -533,24 +558,17 @@ export async function handleStaffGroupMessage({ ctx, store, bot }) {
     logUnauthorizedStaffGroupInbound(ctx, 'revoked_before_forward');
     return true;
   }
-  await store.storeOutgoingMessage?.({
-    telegramUserId: contact.id,
-    userId: contact.id,
+  const delivery = await deliverStaffReplyToPlayer({
+    store,
+    bot: bot || globalThis.telegramBot || null,
+    contact,
     text,
-    senderType: 'staff',
-    staffName: ctx.from?.first_name || liveActor.actorId,
-    telegramMessageId: ctx.message.message_id
-  }).catch(() => null);
-  try {
-    await queueBotReply({
-      store,
-      user: contact,
-      text,
-      buttons: [],
-      bot: bot || globalThis.telegramBot || null
-    });
-  } catch (error) {
-    console.warn('[staff-topic] player_delivery_failed', error.message);
+    media,
+    actorName: ctx.from?.first_name || liveActor.actorId,
+    staffGroupMessageId: ctx.message?.message_id || null
+  });
+  if (!delivery.delivered && !delivery.duplicate) {
+    console.warn('[staff-topic] player_delivery_failed', delivery.error?.message || 'undelivered');
   }
   return true;
 }

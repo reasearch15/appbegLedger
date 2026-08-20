@@ -199,10 +199,15 @@ async function run() {
 
   const links = royalVipBotDeepLinks('RoyalVipBot');
   assert.equal(links.play, 'https://t.me/RoyalVipBot?start=play');
+  assert.equal(links.support, 'https://t.me/RoyalVipBot?start=support');
   assert.equal(links.freeplay, 'https://t.me/RoyalVipBot?start=freeplay');
   const markup = royalVipHubStorefrontMarkup('RoyalVipBot');
+  assert.equal(markup.inline_keyboard[0][0].text, '🔴 PLAY');
   assert.equal(markup.inline_keyboard[0][0].url, links.play);
-  assert.equal(markup.inline_keyboard[1][0].url, links.freeplay);
+  assert.equal(markup.inline_keyboard[1][0].text, '💬 MESSAGE US');
+  assert.equal(markup.inline_keyboard[1][0].url, links.support);
+  assert.equal(markup.inline_keyboard[2][0].text, '🎁 FREEPLAY');
+  assert.equal(markup.inline_keyboard[2][0].url, links.freeplay);
 
   // 1. no channel ID → no crash
   const unconfiguredBot = mockHubTelegram();

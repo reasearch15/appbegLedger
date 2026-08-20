@@ -81,6 +81,11 @@ import {
   isSupportInquiryStep
 } from './contactSupportFlow.js';
 import {
+  buildPrivateSupportInboundDecision,
+  buildPrivateSupportStartDecision,
+  isPrivateSupportFlow
+} from './playerSupportMessaging.js';
+import {
   ACCOUNT_DETAILS_HIDDEN_TEXT,
   ACCOUNT_PASSWORD_MASK,
   buildGameAccountDetailText,
@@ -370,12 +375,15 @@ export async function decideBotReply({ store, contact, messageText = '', action 
           escalate: false
         };
       }
+      if (deepLink === 'support') {
+        return buildPrivateSupportStartDecision();
+      }
       if (payload && typeof store.captureVendorReferralForContact === 'function' && /^VND-/i.test(payloadToken)) {
         await store.captureVendorReferralForContact(contact.id, payload, 'TelegramStart').catch((error) => {
           console.warn('[vendor] referral capture skipped:', error.message);
         });
         automationState = await store.ensureAutomationState(contact.id);
-      } else if (payload && typeof store.captureVendorReferralForContact === 'function' && deepLink !== 'play' && deepLink !== 'freeplay') {
+      } else if (payload && typeof store.captureVendorReferralForContact === 'function' && deepLink !== 'play' && deepLink !== 'freeplay' && deepLink !== 'support') {
         await store.captureVendorReferralForContact(contact.id, payload, 'TelegramStart').catch((error) => {
           console.warn('[vendor] referral capture skipped:', error.message);
         });
@@ -490,6 +498,10 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     return decideSupportInquiryMessage({ contact, info, text });
   }
 
+  if (!action && isPrivateSupportFlow(flow)) {
+    return buildPrivateSupportInboundDecision();
+  }
+
   if (!action && !registrationInProgress && !depositSessionActive && isGreetingEntryText(text)) {
     return await buildStateAwareEntryMenu({
       store,
@@ -507,7 +519,7 @@ export async function decideBotReply({ store, contact, messageText = '', action 
     text,
     action,
     forceEntryMenu: forceEntryMenu || isPlainRegisterText(text),
-    registrationInProgress: registrationInProgress || depositSessionActive
+    registrationInProgress: registrationInProgress || depositSessionActive || isPrivateSupportFlow(flow)
   })) {
     return await buildStateAwareEntryMenu({
       store,

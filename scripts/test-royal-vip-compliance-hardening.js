@@ -156,6 +156,14 @@ async function run() {
       async sendMessage(chatId, text) {
         playerDms.push({ chatId: String(chatId), text: String(text) });
         return { message_id: playerDms.length + 100 };
+      },
+      async sendPhoto(chatId, _fileId, extra = {}) {
+        playerDms.push({ chatId: String(chatId), text: String(extra.caption || ''), kind: 'photo' });
+        return { message_id: playerDms.length + 100 };
+      },
+      async sendDocument(chatId, _fileId, extra = {}) {
+        playerDms.push({ chatId: String(chatId), text: String(extra.caption || ''), kind: 'document' });
+        return { message_id: playerDms.length + 100 };
       }
     }
   };
@@ -322,7 +330,8 @@ async function run() {
   // --- STAFF TOPICS 13-20 ---
   async function countStaffPlayerMessages(text) {
     const rows = await store.listMessagesForUser(calvin.id);
-    return rows.filter((row) => row.sender_type === 'staff' && row.text === text).length;
+    const facing = `Royal Vip:\n${text}`;
+    return rows.filter((row) => row.sender_type === 'staff' && (row.text === facing || row.text === text)).length;
   }
 
   playerDms.length = 0;
@@ -332,7 +341,8 @@ async function run() {
     store,
     bot
   });
-  assert.equal(playerDms.some((item) => item.text === staffText && item.chatId === String(calvin.telegram_id)), true);
+  assert.equal(playerDms.some((item) => item.text.includes(staffText) && item.chatId === String(calvin.telegram_id)), true);
+  assert.equal(playerDms.some((item) => item.text.startsWith('Royal Vip:') && item.text.includes(staffText)), true);
   assert.equal(await countStaffPlayerMessages(staffText), 1);
   console.log('ok 13 authorized staff text reply is forwarded');
 
@@ -342,7 +352,7 @@ async function run() {
     store,
     bot
   });
-  assert.equal(playerDms.some((item) => item.text === coadminText), true);
+  assert.equal(playerDms.some((item) => item.text.includes(coadminText)), true);
   console.log('ok 14 authorized coadmin reply is forwarded');
 
   const rootText = 'Authorized root reply';
@@ -351,7 +361,7 @@ async function run() {
     store,
     bot
   });
-  assert.equal(playerDms.some((item) => item.text === rootText), true);
+  assert.equal(playerDms.some((item) => item.text.includes(rootText)), true);
   console.log('ok 15 authorized root reply is forwarded');
 
   await store.revokeOperationalRole({ telegramUserId: '8003', revokedByTelegramUserId: '8002' });
@@ -420,7 +430,7 @@ async function run() {
     store,
     bot
   });
-  assert.equal(playerDms.some((item) => item.text === liveText), true);
+  assert.equal(playerDms.some((item) => item.text.includes(liveText)), true);
   await store.revokeOperationalRole({ telegramUserId: '8005', revokedByTelegramUserId: '9001' });
   const afterLiveRevoke = 'Should not go out after revoke';
   await handleStaffGroupMessage({

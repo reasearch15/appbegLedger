@@ -3,7 +3,16 @@ import { CONFIDENCE } from '../payments/confidenceEngine.js';
 import { ROUTING_STATUS } from '../payments/constants.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
 import { isTopicClosedError } from './telegramApiErrors.js';
-import { notifyStaffDeliveryFailure } from './operationalAlerts.js';
+import { notifyStaffDeliveryFailure, notifyStaffNewSupportConversation } from './operationalAlerts.js';
+import {
+  extractSupportedInboundMedia,
+  formatPlayerFacingStaffReply,
+  formatPlayerInboundForStaff,
+  newSupportNeedsStaffPing,
+  staffTopicTitleForContact,
+  unsupportedInboundMediaLabel
+} from './playerSupportMessaging.js';
+import { queueBotReply } from './chatbotProcessorDelivery.js';
 import { FREEPLAY_ISSUANCE_BLOCKER, FREEPLAY_DECISION, FREEPLAY_ISSUANCE_STATUS, buildFreeplayIdempotencyKey, issueAppBegFreeplay } from '../appbeg/freeplayIssuanceClient.js';
 import {
   STAFF_CB,
@@ -84,6 +93,15 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
       actorTelegramUserId: String(actorTelegramUserId),
       appbegStatus: 'credited'
     });
+    const recipient = await store.getUserProfile(recipientId).catch(() => null);
+    if (recipient) {
+      await postPlayerTopicSystemEvent({
+        store,
+        bot: globalThis.telegramBot || null,
+        contact: recipient,
+        text: `Payment manually credited: $${Number(payment.parsed_amount).toFixed(2)}`
+      }).catch(() => null);
+    }
     return { ok: true, result };
   } catch (error) {
     if (/already_credited|already credited/i.test(String(error.message || error))) {
@@ -107,6 +125,15 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
       actorTelegramUserId: String(actorTelegramUserId),
       appbegStatus: 'failed'
     });
+    const recipient = await store.getUserProfile(recipientId).catch(() => null);
+    if (recipient) {
+      await postPlayerTopicSystemEvent({
+        store,
+        bot: globalThis.telegramBot || null,
+        contact: recipient,
+        text: 'Payment credit failed. Staff will retry.'
+      }).catch(() => null);
+    }
     return { ok: false, creditFailed: true, error };
   }
 }
@@ -201,7 +228,7 @@ export async function staffCreditSuggested(store, paymentId, actorTelegramUserId
   });
 }
 
-export async function staffAskPlayer(store, paymentId, actorTelegramUserId) {
+export async function staffAskPlayer(store, paymentId, actorTelegramUserId, { bot = null } = {}) {
   await requireOperationalRole(store, actorTelegramUserId);
   const payment = await store.getPaymentEvent(paymentId);
   if (!payment) throw new Error('Payment not found.');
@@ -214,41 +241,39 @@ export async function staffAskPlayer(store, paymentId, actorTelegramUserId) {
   const contact = await store.getUserProfile(targetId);
   if (!contact) throw new Error('Player not found.');
   const amount = payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : 'a payment';
+  const playerText = `Is this your payment?\n\nPayment Name: ${payment.parsed_sender_name || 'Unknown'}\nAmount: ${amount}`;
+  const telegramBot = bot || globalThis.telegramBot || null;
+  await ensureStaffTopicForContact({ store, bot: telegramBot, contact }).catch(() => null);
+  await postPlayerTopicSystemEvent({
+    store,
+    bot: telegramBot,
+    contact,
+    text: 'Staff asked the player: Is this your payment?'
+  }).catch(() => null);
   await queueBotReply({
     store,
     user: contact,
-    text: `Is this your payment?\n\nPayment Name: ${payment.parsed_sender_name || 'Unknown'}\nAmount: ${amount}`,
+    text: playerText,
     buttons: [],
-    bot: globalThis.telegramBot || null
+    bot: telegramBot
   });
+  await store.updateConversationStatus?.(contact.id, 'Waiting', String(actorTelegramUserId)).catch(() => null);
   return { ok: true, contactId: contact.id };
 }
 
-export async function staffMessagePlayer(store, contactId, text, actorTelegramUserId) {
+export async function staffMessagePlayer(store, contactId, text, actorTelegramUserId, { bot = null } = {}) {
   await requireOperationalRole(store, actorTelegramUserId);
   const contact = await store.getUserProfile(contactId);
   if (!contact) throw new Error('Player not found.');
   const body = String(text || '').trim();
   if (!body) throw new Error('Message is empty.');
-  await store.storeOutgoingMessage?.({
-    telegramUserId: contact.id,
-    userId: contact.id,
+  return deliverStaffReplyToPlayer({
+    store,
+    bot: bot || globalThis.telegramBot || null,
+    contact,
     text: body,
-    senderType: 'staff',
-    staffName: String(actorTelegramUserId)
-  }).catch(() => null);
-  try {
-    await queueBotReply({
-      store,
-      user: contact,
-      text: body,
-      buttons: [],
-      bot: globalThis.telegramBot || null
-    });
-  } catch (error) {
-    return { ok: true, delivered: false, error };
-  }
-  return { ok: true, delivered: true };
+    actorName: String(actorTelegramUserId)
+  });
 }
 
 export async function staffFreezePayment(store, paymentId, actorTelegramUserId) {
@@ -403,8 +428,238 @@ export async function resolveFreeplayDecline(store, requestId, actorTelegramUser
   });
 }
 
-export async function mirrorPlayerMessageToStaffTopic({ store, bot, contact, text }) {
+async function sendIntoStaffTopic({ telegram, groupId, threadId, body, media = null, sourceChatId = null, sourceMessageId = null }) {
+  await telegram.sendMessage(groupId, body, { message_thread_id: threadId });
+  if (!media?.fileId) return;
+  try {
+    if (sourceChatId && sourceMessageId && typeof telegram.copyMessage === 'function') {
+      await telegram.copyMessage(groupId, sourceChatId, sourceMessageId, { message_thread_id: threadId });
+      return;
+    }
+    if (media.kind === 'photo' && typeof telegram.sendPhoto === 'function') {
+      await telegram.sendPhoto(groupId, media.fileId, { message_thread_id: threadId });
+      return;
+    }
+    if (media.kind === 'document' && typeof telegram.sendDocument === 'function') {
+      await telegram.sendDocument(groupId, media.fileId, { message_thread_id: threadId });
+    }
+  } catch (error) {
+    console.warn('[staff-topic] media_forward_failed', error.message);
+  }
+}
+
+async function sendOrReopenStaffTopic({
+  store,
+  bot,
+  contact,
+  groupId,
+  topic,
+  body,
+  media = null,
+  sourceChatId = null,
+  sourceMessageId = null,
+  fallbackDetail = ''
+}) {
+  const telegram = bot.telegram;
+  try {
+    await sendIntoStaffTopic({
+      telegram,
+      groupId,
+      threadId: topic.message_thread_id,
+      body,
+      media,
+      sourceChatId,
+      sourceMessageId
+    });
+    return { ok: true, reopened: false, topic };
+  } catch (sendError) {
+    if (!isTopicClosedError(sendError)) throw sendError;
+    try {
+      await telegram.reopenForumTopic(groupId, topic.message_thread_id);
+    } catch (reopenError) {
+      await store.markStaffTopicError?.(contact.id, reopenError.message).catch(() => null);
+      await notifyStaffDeliveryFailure(store, {
+        bot,
+        context: `Closed staff topic could not be reopened for contact ${contact.id}`,
+        detail: String(fallbackDetail || body || '').slice(0, 400)
+      }).catch(() => null);
+      return {
+        ok: false,
+        reason: 'reopen_failed',
+        error: reopenError.message,
+        topic
+      };
+    }
+    await sendIntoStaffTopic({
+      telegram,
+      groupId,
+      threadId: topic.message_thread_id,
+      body,
+      media,
+      sourceChatId,
+      sourceMessageId
+    });
+    return { ok: true, reopened: true, topic };
+  }
+}
+
+export async function ensureStaffTopicForContact({ store, bot, contact }) {
+  const groupId = staffGroupIdFromEnv();
+  if (!groupId || !bot?.telegram) {
+    return { ok: false, reason: 'staff_group_unconfigured', created: false };
+  }
+  if (isRoyalVipHubChat(groupId)) {
+    console.warn('[staff-topic] refused_hub_target');
+    return { ok: false, reason: 'refused_hub_target', created: false };
+  }
+  let enriched = contact;
+  if (!contact?.registration_info && typeof store.getAutomationState === 'function') {
+    const state = await store.getAutomationState(contact.id).catch(() => null);
+    enriched = { ...contact, registration_info: state?.registration_info || {} };
+  }
+  const title = staffTopicTitleForContact(enriched);
+  let topic = await store.getStaffTopicForContact(contact.id);
+  let created = false;
+  if (!topic) {
+    const createdTopic = await bot.telegram.createForumTopic(groupId, title);
+    topic = await store.upsertStaffTopic({
+      contactId: contact.id,
+      telegramUserId: contact.telegram_id,
+      staffGroupId: groupId,
+      messageThreadId: createdTopic.message_thread_id,
+      topicName: createdTopic.name || title
+    });
+    created = true;
+  } else if (topic.topic_name !== title && typeof bot.telegram.editForumTopic === 'function') {
+    try {
+      await bot.telegram.editForumTopic(groupId, topic.message_thread_id, title);
+      topic = await store.upsertStaffTopic({
+        contactId: contact.id,
+        telegramUserId: contact.telegram_id,
+        staffGroupId: groupId,
+        messageThreadId: topic.message_thread_id,
+        topicName: title
+      });
+    } catch (error) {
+      console.warn('[staff-topic] title_update_failed', error.message);
+    }
+  }
+  return { ok: true, topic, created, groupId, title };
+}
+
+export async function postPlayerTopicSystemEvent({ store, bot, contact, text }) {
+  if (!contact?.id) return { posted: false, reason: 'no_contact' };
+  const topic = await store.getStaffTopicForContact(contact.id);
+  if (!topic) return { posted: false, reason: 'no_topic' };
+  const groupId = staffGroupIdFromEnv();
+  if (!groupId || !bot?.telegram) return { posted: false, reason: 'staff_group_unconfigured' };
+  if (isRoyalVipHubChat(groupId)) return { posted: false, reason: 'refused_hub_target' };
+  const body = `⚙️ System:\n${String(text || '').trim()}`.slice(0, 3500);
+  try {
+    const sent = await sendOrReopenStaffTopic({
+      store,
+      bot,
+      contact,
+      groupId,
+      topic,
+      body,
+      fallbackDetail: body
+    });
+    return { posted: Boolean(sent.ok), reopened: sent.reopened, reason: sent.reason || null, topic };
+  } catch (error) {
+    await store.markStaffTopicError?.(contact.id, error.message).catch(() => null);
+    return { posted: false, reason: error.message };
+  }
+}
+
+export async function deliverStaffReplyToPlayer({
+  store,
+  bot,
+  contact,
+  text,
+  media = null,
+  actorName = 'Staff',
+  staffGroupMessageId = null
+}) {
+  if (staffGroupMessageId && typeof store.findStaffForwardByGroupMessage === 'function') {
+    const existing = await store.findStaffForwardByGroupMessage(contact.id, staffGroupMessageId);
+    if (existing) {
+      return { ok: true, delivered: false, duplicate: true, messageId: existing.id };
+    }
+  }
+  const telegram = bot?.telegram;
+  const playerChatId = contact.telegram_id;
+  const facing = formatPlayerFacingStaffReply(text);
+  let delivered = false;
+  let deliveryError = null;
+  let telegramMessageId = null;
+  if (telegram && playerChatId) {
+    try {
+      if (media?.kind === 'photo' && typeof telegram.sendPhoto === 'function') {
+        const sent = await telegram.sendPhoto(playerChatId, media.fileId, { caption: facing });
+        telegramMessageId = sent?.message_id || null;
+        delivered = true;
+      } else if (media?.kind === 'document' && typeof telegram.sendDocument === 'function') {
+        const sent = await telegram.sendDocument(playerChatId, media.fileId, { caption: facing });
+        telegramMessageId = sent?.message_id || null;
+        delivered = true;
+      } else {
+        const sent = await telegram.sendMessage(playerChatId, facing);
+        telegramMessageId = sent?.message_id || null;
+        delivered = true;
+      }
+    } catch (error) {
+      deliveryError = error;
+      if (media?.fileId) {
+        try {
+          const sent = await telegram.sendMessage(playerChatId, facing);
+          telegramMessageId = sent?.message_id || null;
+          delivered = true;
+          deliveryError = error;
+        } catch (fallbackError) {
+          deliveryError = fallbackError;
+        }
+      }
+    }
+  }
+  await store.storeOutgoingMessage?.({
+    telegramUserId: contact.id,
+    userId: contact.id,
+    text: facing,
+    senderType: 'staff',
+    staffName: actorName,
+    telegramMessageId,
+    messageType: media?.kind || 'text',
+    payload: {
+      staffGroupMessageId: staffGroupMessageId || null,
+      mediaKind: media?.kind || null,
+      fileUniqueId: media?.fileUniqueId || null,
+      delivered,
+      deliveryError: deliveryError ? String(deliveryError.message || deliveryError).slice(0, 400) : null
+    }
+  }).catch(() => null);
+  if (!delivered) {
+    await notifyStaffDeliveryFailure(store, {
+      bot,
+      context: `Staff reply was not delivered to contact ${contact.id}`,
+      detail: String(text || '').slice(0, 400)
+    }).catch(() => null);
+  }
+  await store.updateConversationStatus?.(contact.id, 'Waiting', actorName).catch(() => null);
+  return { ok: true, delivered, error: deliveryError, telegramMessageId };
+}
+
+export async function mirrorPlayerMessageToStaffTopic({
+  store,
+  bot,
+  contact,
+  text,
+  message = null,
+  notify = true
+}) {
   const persisted = true;
+  const media = extractSupportedInboundMedia(message);
+  const unsupportedMedia = unsupportedInboundMediaLabel(message);
   const groupId = staffGroupIdFromEnv();
   if (!groupId || !bot?.telegram) {
     return { persisted, mirrored: false, reason: 'staff_group_unconfigured' };
@@ -413,48 +668,53 @@ export async function mirrorPlayerMessageToStaffTopic({ store, bot, contact, tex
     console.warn('[staff-topic] refused_hub_target');
     return { persisted, mirrored: false, reason: 'refused_hub_target' };
   }
+  const body = formatPlayerInboundForStaff({ contact, text, media, unsupportedMedia });
   try {
-    let topic = await store.getStaffTopicForContact(contact.id);
-    if (!topic) {
-      const created = await bot.telegram.createForumTopic(groupId, `👤 ${contact.display_name || contact.username || contact.id}`);
-      topic = await store.upsertStaffTopic({
-        contactId: contact.id,
-        telegramUserId: contact.telegram_id,
-        staffGroupId: groupId,
-        messageThreadId: created.message_thread_id,
-        topicName: created.name
-      });
+    const existingTopic = await store.getStaffTopicForContact(contact.id);
+    const profile = await store.getUserProfile?.(contact.id);
+    const ensured = await ensureStaffTopicForContact({ store, bot, contact });
+    if (!ensured.ok) {
+      return { persisted, mirrored: false, reason: ensured.reason, created: false };
     }
-    const body = `${contact.display_name || 'Player'}:\n${text}`;
-    try {
-      await bot.telegram.sendMessage(groupId, body, {
-        message_thread_id: topic.message_thread_id
-      });
-    } catch (sendError) {
-      if (!isTopicClosedError(sendError)) throw sendError;
-      try {
-        await bot.telegram.reopenForumTopic(groupId, topic.message_thread_id);
-      } catch (reopenError) {
-        await store.markStaffTopicError?.(contact.id, reopenError.message).catch(() => null);
-        await notifyStaffDeliveryFailure(store, {
-          bot,
-          context: `Closed staff topic could not be reopened for contact ${contact.id}`,
-          detail: String(text || '').slice(0, 400)
-        }).catch(() => null);
-        return {
-          persisted,
-          mirrored: false,
-          reusedTopic: true,
-          reason: 'reopen_failed',
-          error: reopenError.message
-        };
-      }
-      await bot.telegram.sendMessage(groupId, body, {
-        message_thread_id: topic.message_thread_id
-      });
-      return { persisted, mirrored: true, reopened: true, topic };
+    const sent = await sendOrReopenStaffTopic({
+      store,
+      bot,
+      contact,
+      groupId: ensured.groupId,
+      topic: ensured.topic,
+      body,
+      media,
+      sourceChatId: message?.chat?.id || null,
+      sourceMessageId: message?.message_id || null,
+      fallbackDetail: String(text || '').slice(0, 400)
+    });
+    if (!sent.ok) {
+      return {
+        persisted,
+        mirrored: false,
+        reusedTopic: !ensured.created,
+        reason: sent.reason,
+        error: sent.error
+      };
     }
-    return { persisted, mirrored: true, topic };
+    await store.updateConversationStatus?.(contact.id, 'Open', 'Player').catch(() => null);
+    if (notify && newSupportNeedsStaffPing({
+      existingTopic,
+      conversationStatus: profile?.conversation_status
+    })) {
+      await notifyStaffNewSupportConversation(store, {
+        bot,
+        contact,
+        threadId: ensured.topic.message_thread_id
+      }).catch(() => null);
+    }
+    return {
+      persisted,
+      mirrored: true,
+      created: ensured.created,
+      reopened: sent.reopened,
+      topic: ensured.topic
+    };
   } catch (error) {
     await store.markStaffTopicError?.(contact.id, error.message).catch(() => null);
     await notifyStaffDeliveryFailure(store, {

@@ -120,6 +120,17 @@ export async function continueRegisteredDepositAfterPayment(store, {
     });
   }
 
+  await import('../telegram/staffOperations.js').then(({ postPlayerTopicSystemEvent }) => (
+    postPlayerTopicSystemEvent({
+      store,
+      bot: bot || globalThis.telegramBot || null,
+      contact,
+      text: `Payment auto-credited: $${formatDepositAmount(window.first_deposit_amount)}`
+    })
+  )).catch((error) => {
+    console.warn('[staff-topic] deposit_credit_note_failed', error.message);
+  });
+
   console.log(`[payment-router] deposit_continued_after_payment_match contact=${contactId} window=${windowId}`);
 
   if (paymentEventId) {

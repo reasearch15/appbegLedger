@@ -64,7 +64,13 @@ export async function notifyOperationalStaffPayment(store, payment, {
   const buttons = extra.creditFailed
     ? paymentCardButtons(payment.id, { creditFailed: true })
     : paymentCardButtons(payment.id, { frozen: payment?.routing_status === 'frozen' });
-  if (!dmEveryone) {
+  const sent = !dmEveryone
+    ? await sendGroupOnly()
+    : await sendToStaffTargets(store, bot, text, buttons);
+  await postKnownPlayerPaymentNote(store, bot, payment, extra.title || 'Payment needs review');
+  return sent;
+
+  async function sendGroupOnly() {
     const telegram = resolveBot(bot)?.telegram;
     const groupId = staffGroupIdFromEnv();
     if (!telegram?.sendMessage || !groupId || isRoyalVipHubChat(groupId)) {
@@ -77,16 +83,52 @@ export async function notifyOperationalStaffPayment(store, payment, {
       return { group: false, dms: 0, failures: [{ target: 'group', error: error.message }] };
     }
   }
-  return sendToStaffTargets(store, bot, text, buttons);
+}
+
+async function postKnownPlayerPaymentNote(store, bot, payment, note) {
+  const contactId = Number(payment?.payer_contact_id || payment?.recipient_contact_id || payment?.contact_id);
+  if (!Number.isInteger(contactId) || contactId <= 0 || typeof store.getUserProfile !== 'function') return;
+  const contact = await store.getUserProfile(contactId).catch(() => null);
+  if (!contact) return;
+  try {
+    const { postPlayerTopicSystemEvent } = await import('./staffOperations.js');
+    const amount = payment?.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : 'a payment';
+    await postPlayerTopicSystemEvent({
+      store,
+      bot: resolveBot(bot),
+      contact,
+      text: `${note}: ${payment?.parsed_sender_name || 'Unknown'} · ${amount}`
+    });
+  } catch (error) {
+    console.warn('[staff-topic] payment_system_note_failed', error.message);
+  }
 }
 
 export async function notifyOperationalStaffFreeplay(store, request, { bot = null } = {}) {
-  return sendToStaffTargets(
+  const sent = await sendToStaffTargets(
     store,
     bot,
     freeplayCardText(request),
     freeplayCardButtons(request.id, request.contact_id)
   );
+  const contactId = Number(request?.contact_id);
+  if (Number.isInteger(contactId) && contactId > 0 && typeof store.getUserProfile === 'function') {
+    const contact = await store.getUserProfile(contactId).catch(() => null);
+    if (contact) {
+      try {
+        const { postPlayerTopicSystemEvent } = await import('./staffOperations.js');
+        await postPlayerTopicSystemEvent({
+          store,
+          bot: resolveBot(bot),
+          contact,
+          text: 'Freeplay requested.'
+        });
+      } catch (error) {
+        console.warn('[staff-topic] freeplay_system_note_failed', error.message);
+      }
+    }
+  }
+  return sent;
 }
 
 export async function notifyUnmatchedCandidates(store, {
@@ -121,4 +163,27 @@ export async function notifyStaffDeliveryFailure(store, {
     ['⚠️ TELEGRAM DELIVERY FAILED', context, detail].filter(Boolean).join('\n'),
     {}
   );
+}
+
+export async function notifyStaffNewSupportConversation(store, {
+  bot = null,
+  contact = null
+} = {}) {
+  const telegram = resolveBot(bot)?.telegram;
+  const groupId = staffGroupIdFromEnv();
+  if (!telegram?.sendMessage || !groupId || isRoyalVipHubChat(groupId)) {
+    return { group: false, dms: 0, reason: groupId && isRoyalVipHubChat(groupId) ? 'refused_hub_target' : 'unconfigured' };
+  }
+  const name = String(contact?.display_name || contact?.first_name || 'Player').trim() || 'Player';
+  const text = [
+    '💬 New customer message',
+    name,
+    'Open their staff topic to reply privately.'
+  ].join('\n');
+  try {
+    await telegram.sendMessage(groupId, text);
+    return { group: true, dms: 0 };
+  } catch (error) {
+    return { group: false, dms: 0, failures: [{ target: 'group', error: error.message }] };
+  }
 }

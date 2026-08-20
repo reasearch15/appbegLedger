@@ -501,6 +501,22 @@ export function attachTelegramFirstStore(store, {
     `).run(String(errorMessage || '').slice(0, 500), now, now, contactId);
   }
 
+  async function findStaffForwardByGroupMessage(contactId, staffGroupMessageId) {
+    const messageId = Number(staffGroupMessageId);
+    if (!Number.isInteger(messageId) || messageId <= 0) return null;
+    const needle = `%"staffGroupMessageId":${messageId}%`;
+    return await db.prepare(`
+      SELECT id, telegram_message_id, payload_json
+      FROM messages
+      WHERE telegram_user_id = ?
+        AND direction = 'outgoing'
+        AND sender_type = 'staff'
+        AND payload_json LIKE ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(contactId, needle);
+  }
+
   async function cancelDepositWindow({ contactId, windowId }) {
     const id = Number(windowId);
     const requesterId = Number(contactId);
@@ -875,6 +891,7 @@ export function attachTelegramFirstStore(store, {
     getStaffTopicByThread,
     upsertStaffTopic,
     markStaffTopicError,
+    findStaffForwardByGroupMessage,
     cancelDepositWindow,
     listUnmatchedPaymentsForIdentity,
     claimFreeplayDecision,
