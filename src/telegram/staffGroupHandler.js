@@ -33,6 +33,7 @@ import {
   staffHubAccessLine,
   paymentCardText,
   paymentCardButtons,
+  asTelegramSendExtra,
   assignConfirmText,
   assignConfirmButtons,
   ignoreConfirmText,
@@ -118,7 +119,7 @@ function logUnauthorizedStaffGroupInbound(ctx, reason) {
 }
 
 async function reply(ctx, text, extra = undefined) {
-  if (extra) return ctx.reply(text, extra);
+  if (extra) return ctx.reply(text, asTelegramSendExtra(extra));
   return ctx.reply(text);
 }
 

@@ -5,7 +5,8 @@ import {
   freeplayCardText,
   freeplayCardButtons,
   paymentStatusLabel,
-  STAFF_CB
+  STAFF_CB,
+  asTelegramSendExtra
 } from './staffCards.js';
 import { staffReviewReasonLines } from '../payments/confidenceEngine.js';
 
@@ -24,7 +25,7 @@ async function sendToStaffTargets(store, bot, text, extra = {}) {
     sent.failures.push({ target: 'group', error: 'refused_hub_target' });
   } else if (groupId) {
     try {
-      await telegram.sendMessage(groupId, text, extra);
+      await telegram.sendMessage(groupId, text, asTelegramSendExtra(extra));
       sent.group = true;
     } catch (error) {
       sent.failures.push({ target: 'group', error: error.message });
@@ -37,7 +38,7 @@ async function sendToStaffTargets(store, bot, text, extra = {}) {
     const chatId = role.telegram_user_id;
     if (!chatId || String(chatId) === String(groupId) || isRoyalVipHubChat(chatId)) continue;
     try {
-      await telegram.sendMessage(chatId, text, extra);
+      await telegram.sendMessage(chatId, text, asTelegramSendExtra(extra));
       sent.dms += 1;
     } catch (error) {
       sent.failures.push({ target: chatId, error: error.message });
@@ -77,7 +78,7 @@ export async function notifyOperationalStaffPayment(store, payment, {
       return { group: false, dms: 0, reason: groupId && isRoyalVipHubChat(groupId) ? 'refused_hub_target' : 'unconfigured' };
     }
     try {
-      await telegram.sendMessage(groupId, text, buttons);
+      await telegram.sendMessage(groupId, text, asTelegramSendExtra(buttons));
       return { group: true, dms: 0 };
     } catch (error) {
       return { group: false, dms: 0, failures: [{ target: 'group', error: error.message }] };

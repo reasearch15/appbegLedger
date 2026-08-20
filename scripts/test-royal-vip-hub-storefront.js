@@ -513,11 +513,11 @@ async function run() {
   assert.deepEqual(staffButtons, ['💰 PAYMENTS', '🎁 FREEPLAY']);
   const staffCc = makeCbCtx({ fromId: STAFF_ID, data: STAFF_CB.CTRL, firstName: 'Alice' });
   await handleStaffCallbackQuery({ ctx: staffCc, store, bot: ccBot });
-  const staffCcLabels = (staffCc.replies[0].extra?.inline_keyboard || []).flat().map((button) => button.text);
+  const staffCcLabels = (staffCc.replies[0].extra?.reply_markup?.inline_keyboard || staffCc.replies[0].extra?.inline_keyboard || []).flat().map((button) => button.text);
   assert.deepEqual(staffCcLabels, ['💰 PAYMENTS', '🎁 FREEPLAY']);
   const rootCc = makeCbCtx({ fromId: ROOT_ID, data: STAFF_CB.CTRL, firstName: 'Root' });
   await handleStaffCallbackQuery({ ctx: rootCc, store, bot: ccBot });
-  const rootCcLabels = (rootCc.replies[0].extra?.inline_keyboard || []).flat().map((button) => button.text);
+  const rootCcLabels = (rootCc.replies[0].extra?.reply_markup?.inline_keyboard || rootCc.replies[0].extra?.inline_keyboard || []).flat().map((button) => button.text);
   assert.ok(rootCcLabels.includes('👑 HUB MANAGEMENT'));
   console.log('ok control center 24-25: entry is reused and role buttons are correct');
 

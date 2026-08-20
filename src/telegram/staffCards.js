@@ -32,6 +32,21 @@ export function isStaffCallback(data = '') {
   return String(data || '').startsWith('op:');
 }
 
+/**
+ * Telegraf sendMessage/reply extra must use Bot API `reply_markup`.
+ * Staff card helpers return `{ inline_keyboard }`; wrap that shape here
+ * so auto-pushed payment cards actually render buttons.
+ */
+export function asTelegramSendExtra(extra = undefined) {
+  if (!extra || typeof extra !== 'object') return extra;
+  if (extra.reply_markup) return extra;
+  if (Array.isArray(extra.inline_keyboard)) {
+    const { inline_keyboard, ...rest } = extra;
+    return { ...rest, reply_markup: { inline_keyboard } };
+  }
+  return extra;
+}
+
 export function controlCenterText(modeOn, role) {
   return [
     '👑 ROYAL VIP CONTROL CENTER',
