@@ -253,7 +253,7 @@ function safeTelegramInboundText(value = '', automationState = null) {
   return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
-async function startPollingBot(bot, store) {
+export async function startPollingBot(bot, store) {
   try {
     const me = await bot.telegram.getMe();
     console.log(`[telegram] getMe ok id=${me.id} username=@${me.username || 'unknown'}`);
@@ -270,7 +270,19 @@ async function startPollingBot(bot, store) {
       console.log('[telegram] webhook deleted before polling start.');
     }
 
-    await bot.launch();
+    // Telegraf 4.16 launch() awaits polling.loop(), which does not resolve until
+    // bot.stop(). Hub/Control Center ensure must run without waiting for that.
+    let launchPromise;
+    try {
+      launchPromise = bot.launch();
+    } catch (error) {
+      console.error('Telegram listener failed to start:', error);
+      return;
+    }
+    Promise.resolve(launchPromise).catch((error) => {
+      console.error('Telegram listener failed to start:', error);
+    });
+    bot.botInfo = bot.botInfo || me;
     console.log('Telegram listener started.');
     try {
       const hub = await ensureRoyalVipHubStorefront({ store, bot });

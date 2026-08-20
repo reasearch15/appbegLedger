@@ -411,9 +411,7 @@ export async function migratePostgres(driver) {
   `);
 
   const applied = await driver.get('SELECT 1 AS ok FROM schema_migrations WHERE name = ?', ['base_schema_v1']);
-  if (applied?.ok) {
-    return;
-  }
+  if (!applied?.ok) {
 
   for (const tag of DEFAULT_TAGS) {
     await driver.run(
@@ -614,7 +612,8 @@ export async function migratePostgres(driver) {
       ON vendor_cashout_events(task_id);
   `);
 
-  await applyTelegramFirstPostgres(driver);
+    await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
+  }
 
-  await driver.run('INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING', ['base_schema_v1']);
+  await applyTelegramFirstPostgres(driver);
 }
