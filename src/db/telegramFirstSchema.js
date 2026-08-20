@@ -5,6 +5,7 @@
  */
 
 export const TELEGRAM_FIRST_MIGRATION_NAME = 'telegram_first_royal_vip_v1';
+export const ROYAL_VIP_HUB_CHANNEL_DM_MIGRATION_NAME = 'royal_vip_hub_channel_dm_v1';
 
 export const SQLITE_TELEGRAM_FIRST_SQL = `
 CREATE TABLE IF NOT EXISTS operational_roles (
@@ -229,6 +230,7 @@ export async function applyTelegramFirstSqlite(db) {
         recipient_contact_id = COALESCE(recipient_contact_id, contact_id)
     WHERE requester_contact_id IS NULL OR recipient_contact_id IS NULL
   `);
+  await applyRoyalVipHubChannelDmSqlite(db);
 }
 
 export async function applyTelegramFirstPostgres(driver) {
@@ -283,6 +285,7 @@ export async function applyTelegramFirstPostgres(driver) {
     'INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING',
     [TELEGRAM_FIRST_MIGRATION_NAME]
   );
+  await applyRoyalVipHubChannelDmPostgres(driver);
 }
 
 async function addColumnIfMissingSqlite(db, tableName, columnName, columnType) {
@@ -290,4 +293,61 @@ async function addColumnIfMissingSqlite(db, tableName, columnName, columnType) {
   if (!columns.includes(columnName)) {
     await db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`);
   }
+}
+
+const SQLITE_CHANNEL_DM_SQL = `
+CREATE TABLE IF NOT EXISTS telegram_channel_dm_topics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hub_channel_id TEXT NOT NULL,
+  direct_messages_chat_id TEXT NOT NULL,
+  direct_messages_topic_id TEXT NOT NULL,
+  telegram_user_id TEXT NOT NULL,
+  contact_id INTEGER,
+  created_at TEXT NOT NULL,
+  last_message_at TEXT NOT NULL,
+  FOREIGN KEY (contact_id) REFERENCES telegram_users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_channel_dm_topics_user
+  ON telegram_channel_dm_topics(hub_channel_id, telegram_user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_channel_dm_topics_topic
+  ON telegram_channel_dm_topics(direct_messages_chat_id, direct_messages_topic_id);
+`;
+
+const POSTGRES_CHANNEL_DM_SQL = `
+CREATE TABLE IF NOT EXISTS telegram_channel_dm_topics (
+  id BIGSERIAL PRIMARY KEY,
+  hub_channel_id TEXT NOT NULL,
+  direct_messages_chat_id TEXT NOT NULL,
+  direct_messages_topic_id TEXT NOT NULL,
+  telegram_user_id TEXT NOT NULL,
+  contact_id BIGINT REFERENCES telegram_users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  last_message_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_channel_dm_topics_user
+  ON telegram_channel_dm_topics(hub_channel_id, telegram_user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_channel_dm_topics_topic
+  ON telegram_channel_dm_topics(direct_messages_chat_id, direct_messages_topic_id);
+`;
+
+export async function applyRoyalVipHubChannelDmSqlite(db) {
+  await db.exec(SQLITE_CHANNEL_DM_SQL);
+  await addColumnIfMissingSqlite(db, 'operational_roles', 'telegram_channel_admin_synced_at', 'TEXT');
+  await addColumnIfMissingSqlite(db, 'operational_roles', 'telegram_channel_admin_status', 'TEXT');
+  await addColumnIfMissingSqlite(db, 'operational_roles', 'telegram_channel_admin_error', 'TEXT');
+  await addColumnIfMissingSqlite(db, 'coadmin_settings', 'royal_vip_hub_dm_chat_id', 'TEXT');
+}
+
+export async function applyRoyalVipHubChannelDmPostgres(driver) {
+  await driver.exec(POSTGRES_CHANNEL_DM_SQL);
+  await driver.exec(`
+    ALTER TABLE operational_roles ADD COLUMN IF NOT EXISTS telegram_channel_admin_synced_at TEXT;
+    ALTER TABLE operational_roles ADD COLUMN IF NOT EXISTS telegram_channel_admin_status TEXT;
+    ALTER TABLE operational_roles ADD COLUMN IF NOT EXISTS telegram_channel_admin_error TEXT;
+    ALTER TABLE coadmin_settings ADD COLUMN IF NOT EXISTS royal_vip_hub_dm_chat_id TEXT;
+  `);
+  await driver.run(
+    'INSERT INTO schema_migrations (name) VALUES (?) ON CONFLICT (name) DO NOTHING',
+    [ROYAL_VIP_HUB_CHANNEL_DM_MIGRATION_NAME]
+  );
 }

@@ -13,6 +13,7 @@ import {
   unsupportedInboundMediaLabel
 } from './playerSupportMessaging.js';
 import { queueBotReply } from './chatbotProcessorDelivery.js';
+import { deliverPlayerFacingHubNotice, HUB_CHANNEL_DM_SOURCE } from './hubDirectMessages.js';
 import { FREEPLAY_ISSUANCE_BLOCKER, FREEPLAY_DECISION, FREEPLAY_ISSUANCE_STATUS, buildFreeplayIdempotencyKey, issueAppBegFreeplay } from '../appbeg/freeplayIssuanceClient.js';
 import {
   STAFF_CB,
@@ -95,6 +96,16 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
     });
     const recipient = await store.getUserProfile(recipientId).catch(() => null);
     if (recipient) {
+      const username = recipient.royal_vip_username
+        || recipient.registration_info?.preferred_appbeg_username
+        || recipient.registration_info?.appbeg_username
+        || '';
+      await deliverPlayerNotice({
+        store,
+        bot: globalThis.telegramBot || null,
+        contact: recipient,
+        text: `✅ $${Number(payment.parsed_amount).toFixed(2)} has been credited${username ? ` to ${username}` : ''}.`
+      }).catch(() => null);
       await postPlayerTopicSystemEvent({
         store,
         bot: globalThis.telegramBot || null,
@@ -127,6 +138,12 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
     });
     const recipient = await store.getUserProfile(recipientId).catch(() => null);
     if (recipient) {
+      await deliverPlayerNotice({
+        store,
+        bot: globalThis.telegramBot || null,
+        contact: recipient,
+        text: 'Payment credit failed. Staff will retry.'
+      }).catch(() => null);
       await postPlayerTopicSystemEvent({
         store,
         bot: globalThis.telegramBot || null,
@@ -243,22 +260,24 @@ export async function staffAskPlayer(store, paymentId, actorTelegramUserId, { bo
   const amount = payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : 'a payment';
   const playerText = `Is this your payment?\n\nPayment Name: ${payment.parsed_sender_name || 'Unknown'}\nAmount: ${amount}`;
   const telegramBot = bot || globalThis.telegramBot || null;
-  await ensureStaffTopicForContact({ store, bot: telegramBot, contact }).catch(() => null);
-  await postPlayerTopicSystemEvent({
+  const nativeTopic = await store.getChannelDmTopicForContact?.(contact.id).catch(() => null);
+  if (!nativeTopic) {
+    await ensureStaffTopicForContact({ store, bot: telegramBot, contact }).catch(() => null);
+    await postPlayerTopicSystemEvent({
+      store,
+      bot: telegramBot,
+      contact,
+      text: 'Staff asked the player: Is this your payment?'
+    }).catch(() => null);
+  }
+  await deliverPlayerNotice({
     store,
     bot: telegramBot,
     contact,
-    text: 'Staff asked the player: Is this your payment?'
-  }).catch(() => null);
-  await queueBotReply({
-    store,
-    user: contact,
-    text: playerText,
-    buttons: [],
-    bot: telegramBot
+    text: playerText
   });
   await store.updateConversationStatus?.(contact.id, 'Waiting', String(actorTelegramUserId)).catch(() => null);
-  return { ok: true, contactId: contact.id };
+  return { ok: true, contactId: contact.id, via: nativeTopic ? 'native_hub_dm' : 'fallback' };
 }
 
 export async function staffMessagePlayer(store, contactId, text, actorTelegramUserId, { bot = null } = {}) {
@@ -572,6 +591,28 @@ export async function postPlayerTopicSystemEvent({ store, bot, contact, text }) 
   }
 }
 
+export async function deliverPlayerNotice({ store, bot, contact, text }) {
+  const body = String(text || '').trim();
+  if (!contact?.id || !body) return { ok: false, delivered: false, reason: 'empty' };
+  const native = await deliverPlayerFacingHubNotice({ store, bot, contact, text: body });
+  if (native.delivered) return native;
+  if (native.error && native.topic) {
+    await notifyStaffDeliveryFailure(store, {
+      bot,
+      context: `Native Hub DM delivery failed for contact ${contact.id}`,
+      detail: String(native.error.message || native.error).slice(0, 400)
+    }).catch(() => null);
+  }
+  await queueBotReply({
+    store,
+    user: contact,
+    text: body,
+    buttons: [],
+    bot
+  });
+  return { ok: true, delivered: true, via: 'private_bot', fallbackFrom: native.via || null };
+}
+
 export async function deliverStaffReplyToPlayer({
   store,
   bot,
@@ -593,7 +634,26 @@ export async function deliverStaffReplyToPlayer({
   let delivered = false;
   let deliveryError = null;
   let telegramMessageId = null;
-  if (telegram && playerChatId) {
+  let via = 'private_bot';
+  const nativeTopic = await store.getChannelDmTopicForContact?.(contact.id).catch(() => null);
+  if (telegram && nativeTopic) {
+    try {
+      const { sendToHubDirectMessageTopic } = await import('./hubDirectMessages.js');
+      const sent = await sendToHubDirectMessageTopic(telegram, {
+        dmChatId: nativeTopic.direct_messages_chat_id,
+        topicId: nativeTopic.direct_messages_topic_id,
+        text: facing,
+        media
+      });
+      telegramMessageId = sent?.message_id || null;
+      delivered = true;
+      via = 'native_hub_dm';
+    } catch (error) {
+      deliveryError = error;
+    }
+  }
+  if (!delivered && telegram && playerChatId) {
+    via = 'private_bot';
     try {
       if (media?.kind === 'photo' && typeof telegram.sendPhoto === 'function') {
         const sent = await telegram.sendPhoto(playerChatId, media.fileId, { caption: facing });
@@ -601,6 +661,10 @@ export async function deliverStaffReplyToPlayer({
         delivered = true;
       } else if (media?.kind === 'document' && typeof telegram.sendDocument === 'function') {
         const sent = await telegram.sendDocument(playerChatId, media.fileId, { caption: facing });
+        telegramMessageId = sent?.message_id || null;
+        delivered = true;
+      } else if (media?.kind === 'video' && typeof telegram.sendVideo === 'function') {
+        const sent = await telegram.sendVideo(playerChatId, media.fileId, { caption: facing });
         telegramMessageId = sent?.message_id || null;
         delivered = true;
       } else {
@@ -630,11 +694,13 @@ export async function deliverStaffReplyToPlayer({
     staffName: actorName,
     telegramMessageId,
     messageType: media?.kind || 'text',
+    source: via === 'native_hub_dm' ? HUB_CHANNEL_DM_SOURCE : 'bot_api',
     payload: {
       staffGroupMessageId: staffGroupMessageId || null,
       mediaKind: media?.kind || null,
       fileUniqueId: media?.fileUniqueId || null,
       delivered,
+      via,
       deliveryError: deliveryError ? String(deliveryError.message || deliveryError).slice(0, 400) : null
     }
   }).catch(() => null);
@@ -646,7 +712,7 @@ export async function deliverStaffReplyToPlayer({
     }).catch(() => null);
   }
   await store.updateConversationStatus?.(contact.id, 'Waiting', actorName).catch(() => null);
-  return { ok: true, delivered, error: deliveryError, telegramMessageId };
+  return { ok: true, delivered, error: deliveryError, telegramMessageId, via };
 }
 
 export async function mirrorPlayerMessageToStaffTopic({
@@ -658,6 +724,10 @@ export async function mirrorPlayerMessageToStaffTopic({
   notify = true
 }) {
   const persisted = true;
+  const nativeTopic = await store.getChannelDmTopicForContact?.(contact.id).catch(() => null);
+  if (nativeTopic) {
+    return { persisted, mirrored: false, reason: 'native_hub_dm_primary', topic: nativeTopic };
+  }
   const media = extractSupportedInboundMedia(message);
   const unsupportedMedia = unsupportedInboundMediaLabel(message);
   const groupId = staffGroupIdFromEnv();

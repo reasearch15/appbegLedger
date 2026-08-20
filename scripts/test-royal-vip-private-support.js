@@ -172,16 +172,17 @@ async function run() {
     telegramDisplayName: 'Alice'
   });
 
-  // 1. Hub storefront contains PLAY / MESSAGE US / FREEPLAY
+  // 1. Hub storefront contains PLAY / FREEPLAY; native Hub DMs are support
   const links = royalVipBotDeepLinks('Royal_Sweeps_bot');
   assert.equal(links.support, 'https://t.me/Royal_Sweeps_bot?start=support');
   const markup = royalVipHubStorefrontMarkup('Royal_Sweeps_bot');
-  assert.equal(markup.inline_keyboard.length, 3);
-  assert.equal(markup.inline_keyboard[1][0].text, '💬 MESSAGE US');
-  assert.equal(markup.inline_keyboard[1][0].url, links.support);
-  assert.match(ROYAL_VIP_HUB_STOREFRONT_TEXT, /contact our team privately/i);
+  assert.equal(markup.inline_keyboard.length, 2);
+  assert.equal(markup.inline_keyboard[0][0].text, '🔴 PLAY');
+  assert.equal(markup.inline_keyboard[1][0].text, '🎁 FREEPLAY');
+  assert.equal(markup.inline_keyboard.some((row) => row.some((btn) => /MESSAGE US/i.test(btn.text))), false);
+  assert.match(ROYAL_VIP_HUB_STOREFRONT_TEXT, /message royal vip hub directly/i);
   assert.doesNotMatch(ROYAL_VIP_HUB_STOREFRONT_TEXT, /telegram id|payment review|freeplay approved/i);
-  console.log('ok 1 hub storefront PLAY/MESSAGE US/FREEPLAY');
+  console.log('ok 1 hub storefront PLAY/FREEPLAY; support stays native Hub DM');
 
   const hubBot = mockTelegram();
   const created = await ensureRoyalVipHubStorefront({ store, bot: hubBot });

@@ -501,6 +501,113 @@ export function attachTelegramFirstStore(store, {
     `).run(String(errorMessage || '').slice(0, 500), now, now, contactId);
   }
 
+  async function getDiscoveredHubDmChatId() {
+    const row = await db.prepare('SELECT royal_vip_hub_dm_chat_id FROM coadmin_settings WHERE id = 1').get();
+    return row?.royal_vip_hub_dm_chat_id ? String(row.royal_vip_hub_dm_chat_id) : null;
+  }
+
+  async function saveDiscoveredHubDmChatId(chatId) {
+    const value = String(chatId || '').trim();
+    if (!value || !/^-?\d+$/.test(value)) return getDiscoveredHubDmChatId();
+    await ensureCoadminSettingsRow();
+    const existing = await getDiscoveredHubDmChatId();
+    if (existing === value) return existing;
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET royal_vip_hub_dm_chat_id = ?, updated_at = ?
+      WHERE id = 1
+    `).run(value, nowIso());
+    return value;
+  }
+
+  async function getChannelDmTopicForContact(contactId) {
+    return await db.prepare('SELECT * FROM telegram_channel_dm_topics WHERE contact_id = ?').get(contactId);
+  }
+
+  async function getChannelDmTopicByUser(hubChannelId, telegramUserId) {
+    return await db.prepare(`
+      SELECT * FROM telegram_channel_dm_topics
+      WHERE hub_channel_id = ? AND telegram_user_id = ?
+    `).get(String(hubChannelId), String(telegramUserId));
+  }
+
+  async function getChannelDmTopicByTopic(directMessagesChatId, topicId) {
+    return await db.prepare(`
+      SELECT * FROM telegram_channel_dm_topics
+      WHERE direct_messages_chat_id = ? AND direct_messages_topic_id = ?
+    `).get(String(directMessagesChatId), String(topicId));
+  }
+
+  async function upsertChannelDmTopic({
+    hubChannelId,
+    directMessagesChatId,
+    directMessagesTopicId,
+    telegramUserId,
+    contactId = null
+  }) {
+    const hubId = String(hubChannelId);
+    const dmChatId = String(directMessagesChatId);
+    const topicId = String(directMessagesTopicId);
+    const userId = String(telegramUserId);
+    const now = nowIso();
+    const existing = await getChannelDmTopicByUser(hubId, userId)
+      || await getChannelDmTopicByTopic(dmChatId, topicId);
+    if (existing) {
+      await db.prepare(`
+        UPDATE telegram_channel_dm_topics
+        SET hub_channel_id = ?,
+            direct_messages_chat_id = ?,
+            direct_messages_topic_id = ?,
+            telegram_user_id = ?,
+            contact_id = COALESCE(?, contact_id),
+            last_message_at = ?
+        WHERE id = ?
+      `).run(hubId, dmChatId, topicId, userId, contactId, now, existing.id);
+      return { ...(await db.prepare('SELECT * FROM telegram_channel_dm_topics WHERE id = ?').get(existing.id)), created: false };
+    }
+    try {
+      await db.prepare(`
+        INSERT INTO telegram_channel_dm_topics (
+          hub_channel_id, direct_messages_chat_id, direct_messages_topic_id,
+          telegram_user_id, contact_id, created_at, last_message_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(hubId, dmChatId, topicId, userId, contactId, now, now);
+    } catch (error) {
+      const raced = await getChannelDmTopicByUser(hubId, userId)
+        || await getChannelDmTopicByTopic(dmChatId, topicId);
+      if (raced) return { ...raced, created: false };
+      throw error;
+    }
+    const created = await getChannelDmTopicByUser(hubId, userId);
+    return { ...created, created: true };
+  }
+
+  async function setOperationalRoleHubAccess({
+    telegramUserId,
+    status,
+    error = null,
+    syncedAt = null
+  }) {
+    const userId = normalizeTelegramUserId(telegramUserId);
+    if (!userId) return null;
+    const now = syncedAt || nowIso();
+    await db.prepare(`
+      UPDATE operational_roles
+      SET telegram_channel_admin_status = ?,
+          telegram_channel_admin_error = ?,
+          telegram_channel_admin_synced_at = ?,
+          updated_at = ?
+      WHERE telegram_user_id = ? AND revoked_at IS NULL
+    `).run(
+      status || null,
+      error ? String(error).slice(0, 500) : null,
+      now,
+      now,
+      userId
+    );
+    return getActiveOperationalRole(userId);
+  }
+
   async function findStaffForwardByGroupMessage(contactId, staffGroupMessageId) {
     const messageId = Number(staffGroupMessageId);
     if (!Number.isInteger(messageId) || messageId <= 0) return null;
@@ -891,6 +998,13 @@ export function attachTelegramFirstStore(store, {
     getStaffTopicByThread,
     upsertStaffTopic,
     markStaffTopicError,
+    getDiscoveredHubDmChatId,
+    saveDiscoveredHubDmChatId,
+    getChannelDmTopicForContact,
+    getChannelDmTopicByUser,
+    getChannelDmTopicByTopic,
+    upsertChannelDmTopic,
+    setOperationalRoleHubAccess,
     findStaffForwardByGroupMessage,
     cancelDepositWindow,
     listUnmatchedPaymentsForIdentity,

@@ -1,12 +1,12 @@
 /**
- * Private Royal VIP subscriber messaging.
+ * Private Royal VIP subscriber messaging helpers.
  *
- * Hub is storefront only. Players contact Royal VIP through the private bot.
- * Staff read/reply in the private staff CRM forum. Nothing private is posted
- * to Royal Vip Hub.
+ * Native Royal Vip Hub Direct Messages are the primary player conversation.
+ * `/start support` remains a private-bot fallback. Staff-forum topics are
+ * fallback only when no native Hub DM topic exists. Nothing private is posted
+ * to the public Hub.
  *
- * Identity is always ctx.from.id / telegram_users.id. Deep-link payload
- * `support` only selects this flow.
+ * Identity is always numeric telegram_users.id / Telegram user id.
  */
 
 import { parseBotCommand } from './botRegistrationState.js';
@@ -169,6 +169,21 @@ export function formatPlayerInboundForStaff({ contact = {}, text = '', media = n
 export function formatPlayerFacingStaffReply(text = '') {
   const body = String(text || '').trim();
   return body ? `Royal Vip:\n${body}` : 'Royal Vip:';
+}
+
+export function formatHubDmIdentityCard(contact = {}) {
+  const name = String(contact.display_name || contact.first_name || 'Unknown').trim() || 'Unknown';
+  if (isRegisteredRoyalVipContact(contact)) {
+    return [
+      `👤 ${name}`,
+      `🎮 ${appBegUsernameForContact(contact) || '—'}`,
+      'Status: Registered'
+    ].join('\n');
+  }
+  return [
+    `👤 ${name}`,
+    'Royal VIP: NOT REGISTERED'
+  ].join('\n');
 }
 
 export function newSupportNeedsStaffPing({ existingTopic = null, conversationStatus = null } = {}) {

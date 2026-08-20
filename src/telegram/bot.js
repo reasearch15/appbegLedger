@@ -10,6 +10,7 @@ import { isStaffGroupChat } from './operationalRoles.js';
 import { isStaffCallback } from './staffCards.js';
 import { ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
 import { ensureStaffControlCenter } from './staffControlCenter.js';
+import { handleRoyalVipHubDirectMessage } from './hubDirectMessages.js';
 import {
   extractSupportedInboundMedia,
   shouldMirrorPlayerInboundToStaff,
@@ -134,6 +135,11 @@ export function startTelegramListener({ token, store, io }) {
 
   bot.on('message', async (ctx) => {
     if (ctx.chat?.type !== 'private' || !ctx.message?.from) {
+      const hubDm = await handleRoyalVipHubDirectMessage({ ctx, store, bot, io }).catch((error) => {
+        console.warn('[hub-dm] inbound_failed', error.message);
+        return { handled: false };
+      });
+      if (hubDm?.handled) return;
       if (isStaffGroupChat(ctx.chat?.id)) {
         await handleStaffGroupMessage({ ctx, store, bot });
       }
@@ -158,15 +164,20 @@ export function startTelegramListener({ token, store, io }) {
           hasSupportedMedia: Boolean(media),
           hasUnsupportedMedia: Boolean(unsupportedMedia)
         })) {
-          await mirrorPlayerMessageToStaffTopic({
-            store,
-            bot,
-            contact: result.user,
-            text: inputText,
-            message: ctx.message
-          }).catch((error) => {
-            console.warn('[staff-topic] mirror_failed', error.message);
-          });
+          const nativeTopic = await store.getChannelDmTopicForContact?.(result.user.id).catch(() => null);
+          if (nativeTopic) {
+            console.log('[staff-topic] skipped_native_hub_dm', result.user.id);
+          } else {
+            await mirrorPlayerMessageToStaffTopic({
+              store,
+              bot,
+              contact: result.user,
+              text: inputText,
+              message: ctx.message
+            }).catch((error) => {
+              console.warn('[staff-topic] mirror_failed', error.message);
+            });
+          }
         }
       }
       console.log(`[chatbot] inbound message saved contact=${result.user.id} inserted=${result.inserted} telegram_message_id=${ctx.message.message_id} first=${Boolean(result.firstMessage)}`);

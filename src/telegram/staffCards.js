@@ -18,6 +18,7 @@ export const STAFF_CB = {
   STAFF_ADD: 'op:sa',
   STAFF_LIST: 'op:sl',
   STAFF_REVOKE: 'op:sx:',
+  STAFF_RETRY: 'op:st:',
   CTRL: 'op:cc',
   HUB: 'op:hm',
   HUB_REFRESH: 'op:hr',
@@ -85,6 +86,14 @@ export function staffManagementButtons() {
       [{ text: '👥 CURRENT STAFF', callback_data: STAFF_CB.STAFF_LIST }]
     ]
   };
+}
+
+export function staffHubAccessLine(role) {
+  const status = String(role?.telegram_channel_admin_status || '').trim();
+  if (role?.role === 'root_admin') return 'Hub DM Access: ✅';
+  if (status === 'active') return 'Hub DM Access: ✅';
+  if (status === 'skipped_root' || status === 'skipped_creator') return 'Hub DM Access: ✅';
+  return 'Hub DM Access: ⚠️ Pending';
 }
 
 export function paymentStatusLabel(status) {

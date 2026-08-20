@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { migratePostgres } from '../src/db/migrate-postgres.js';
-import { TELEGRAM_FIRST_MIGRATION_NAME } from '../src/db/telegramFirstSchema.js';
+import { ROYAL_VIP_HUB_CHANNEL_DM_MIGRATION_NAME, TELEGRAM_FIRST_MIGRATION_NAME } from '../src/db/telegramFirstSchema.js';
 
 function createFakeDriver({ baseSchemaApplied = false } = {}) {
   const calls = [];
@@ -42,12 +42,22 @@ function assertTelegramFirstApplied(driver) {
   assert.match(sql, /staff_control_center_pinned/);
   assert.match(sql, /idx_one_active_deposit_window_per_requester/);
   assert.match(sql, /idx_operational_roles_active_user/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS telegram_channel_dm_topics/i);
+  assert.match(sql, /direct_messages_topic_id TEXT NOT NULL/i);
+  assert.match(sql, /telegram_channel_admin_status/i);
+  assert.match(sql, /royal_vip_hub_dm_chat_id/i);
   const telegramFirstInsert = driver.calls.find((call) => (
     call.type === 'run'
     && /INSERT INTO schema_migrations/i.test(call.sql)
     && call.params?.[0] === TELEGRAM_FIRST_MIGRATION_NAME
   ));
   assert.ok(telegramFirstInsert, 'telegram_first_royal_vip_v1 must be recorded');
+  const channelDmInsert = driver.calls.find((call) => (
+    call.type === 'run'
+    && /INSERT INTO schema_migrations/i.test(call.sql)
+    && call.params?.[0] === ROYAL_VIP_HUB_CHANNEL_DM_MIGRATION_NAME
+  ));
+  assert.ok(channelDmInsert, 'royal_vip_hub_channel_dm_v1 must be recorded');
 }
 
 function assertNoDestructiveSql(driver) {

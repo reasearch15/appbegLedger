@@ -59,6 +59,12 @@ export function royalVipHubChannelIdFromEnv(env = process.env) {
   return raw;
 }
 
+export function royalVipHubDmChatIdFromEnv(env = process.env) {
+  const raw = String(env.ROYAL_VIP_HUB_DM_CHAT_ID || '').trim();
+  if (!raw || !/^-?\d+$/.test(raw)) return null;
+  return raw;
+}
+
 export function rootAdminTelegramUserIdFromEnv(env = process.env) {
   return normalizeTelegramUserId(env.ROOT_ADMIN_TELEGRAM_USER_ID);
 }

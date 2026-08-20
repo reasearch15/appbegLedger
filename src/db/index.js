@@ -257,9 +257,10 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
     return Number(row?.count || 0);
   }
 
-  async function storeIncomingTelegramMessage(ctx) {
+  async function storeIncomingTelegramMessage(ctx, options = {}) {
     const message = ctx.message;
-    const from = message.from;
+    const from = options.fromUser || message.from;
+    const source = String(options.source || 'bot_api');
     const sentAt = message.date ? new Date(message.date * 1000).toISOString() : nowIso();
     const user = await upsertTelegramUser(from, sentAt);
     const existingMessageCount = (await db.prepare('SELECT COUNT(*) AS count FROM messages WHERE telegram_user_id = ?').get(user.id)).count;
@@ -269,11 +270,11 @@ export async function createDataStore(config = resolveDatabaseConfig()) {
 
     const result = await db.prepare(sql.insertOrIgnore(`
       INSERT OR IGNORE INTO messages (
-        conversation_id, telegram_user_id, telegram_message_id, direction, sender_type,
+        conversation_id, telegram_user_id, telegram_message_id, source, direction, sender_type,
         message_type, text, payload_json, sent_at
       )
-      VALUES (?, ?, ?, 'incoming', 'telegram_user', ?, ?, ?, ?)
-    `) + sql.messageUpsertSuffix()).run(conversation.id, user.id, message.message_id, messageType, text, JSON.stringify(message), sentAt);
+      VALUES (?, ?, ?, ?, 'incoming', 'telegram_user', ?, ?, ?, ?)
+    `) + sql.messageUpsertSuffix()).run(conversation.id, user.id, message.message_id, source, messageType, text, JSON.stringify(message), sentAt);
 
     await db.prepare('UPDATE conversations SET last_message_at = ?, updated_at = ? WHERE id = ?').run(sentAt, nowIso(), conversation.id);
 

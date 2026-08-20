@@ -15,6 +15,7 @@ import {
   controlCenterText,
   controlCenterButtons,
   deliverStaffReplyToPlayer,
+  deliverPlayerNotice,
   postPlayerTopicSystemEvent
 } from './staffOperations.js';
 import {
@@ -29,6 +30,7 @@ import { OPERATIONAL_ROLES } from './operationalRoles.js';
 import {
   confidenceToggleButtons,
   staffManagementButtons,
+  staffHubAccessLine,
   paymentCardText,
   paymentCardButtons,
   assignConfirmText,
@@ -44,9 +46,16 @@ import {
   freeplayIssuedPlayerText,
   freeplayNotLoadedStaffText
 } from './staffCards.js';
-import { queueBotReply } from './chatbotProcessor.js';
 import { describeRoyalVipHubStatus, ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
 import { extractSupportedInboundMedia } from './playerSupportMessaging.js';
+import {
+  formatStaffGrantResultText,
+  formatStaffRevokeResultText,
+  grantOperationalRoleWithHubAccess,
+  needsHubTelegramRetry,
+  revokeOperationalRoleWithHubAccess,
+  syncHubChannelAdminAccess
+} from './hubDirectMessages.js';
 
 const pendingPrompts = new Map();
 
@@ -222,15 +231,27 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
       await requireOperationalRole(store, actorId, canManageStaff);
       const roles = await store.listActiveOperationalRoles();
       await ctx.answerCbQuery();
-      const lines = ['👑 STAFF MANAGEMENT', ''];
+      const lines = ['👥 STAFF', ''];
       const keyboard = staffManagementButtons().inline_keyboard.slice();
       for (const item of roles) {
-        lines.push(`${item.role}: ${item.telegram_user_id}${item.telegram_display_name ? ` (${item.telegram_display_name})` : ''}`);
+        const name = item.telegram_display_name || item.telegram_user_id;
+        lines.push(String(name));
+        lines.push(`Role: ${String(item.role || '').toUpperCase()}`);
+        lines.push(staffHubAccessLine(item));
+        if (item.telegram_channel_admin_error && needsHubTelegramRetry(item)) {
+          lines.push(String(item.telegram_channel_admin_error).slice(0, 180));
+        }
+        lines.push('');
         if (item.role !== OPERATIONAL_ROLES.ROOT_ADMIN) {
-          keyboard.push([{ text: `❌ REMOVE ${item.telegram_user_id}`, callback_data: `${STAFF_CB.STAFF_REVOKE}${item.telegram_user_id}` }]);
+          const row = [];
+          if (needsHubTelegramRetry(item)) {
+            row.push({ text: 'RETRY TELEGRAM ACCESS', callback_data: `${STAFF_CB.STAFF_RETRY}${item.telegram_user_id}` });
+          }
+          row.push({ text: '❌ REMOVE STAFF', callback_data: `${STAFF_CB.STAFF_REVOKE}${item.telegram_user_id}` });
+          keyboard.push(row);
         }
       }
-      await reply(ctx, lines.join('\n'), { inline_keyboard: keyboard });
+      await reply(ctx, lines.join('\n').trim(), { inline_keyboard: keyboard });
       return true;
     }
 
@@ -242,15 +263,30 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
       return true;
     }
 
+    const telegramRetryId = data.startsWith(STAFF_CB.STAFF_RETRY) ? data.slice(STAFF_CB.STAFF_RETRY.length) : null;
+    if (telegramRetryId) {
+      await requireOperationalRole(store, actorId, canManageStaff);
+      const sync = await syncHubChannelAdminAccess({
+        store,
+        bot: telegramBot,
+        telegramUserId: telegramRetryId
+      });
+      await ctx.answerCbQuery(sync.ok ? 'Hub DM access updated' : 'Still pending');
+      await reply(ctx, sync.ok
+        ? `Hub DM Access: ✅ for ${telegramRetryId}`
+        : `Hub DM Access: ⚠️ Pending\n${sync.error || 'Telegram access is not ready.'}`);
+      return true;
+    }
+
     const revokeId = data.startsWith(STAFF_CB.STAFF_REVOKE) ? data.slice(STAFF_CB.STAFF_REVOKE.length) : null;
     if (revokeId) {
       await requireOperationalRole(store, actorId, canManageStaff);
-      await store.revokeOperationalRole({
+      const result = await revokeOperationalRoleWithHubAccess(store, {
         telegramUserId: revokeId,
         revokedByTelegramUserId: actorId
-      });
+      }, { bot: telegramBot });
       await ctx.answerCbQuery('Staff removed');
-      await reply(ctx, `Removed operational access for ${revokeId}. Authority ends immediately.`);
+      await reply(ctx, formatStaffRevokeResultText(revokeId, result.telegramAccess));
       return true;
     }
 
@@ -365,12 +401,11 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
           ? await store.getUserProfile(result.request.contact_id)
           : null;
         if (contact) {
-          await queueBotReply({
+          await deliverPlayerNotice({
             store,
-            user: contact,
-            text: 'Your Freeplay request was declined.',
-            buttons: [],
-            bot: globalThis.telegramBot || null
+            bot: globalThis.telegramBot || null,
+            contact,
+            text: 'Your Freeplay request was declined.'
           }).catch(() => null);
           await postPlayerTopicSystemEvent({
             store,
@@ -415,12 +450,11 @@ export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
           ? await store.getUserProfile(result.request.contact_id)
           : null;
         if (contact) {
-          await queueBotReply({
+          await deliverPlayerNotice({
             store,
-            user: contact,
-            text: freeplayIssuedPlayerText(pending.amount),
-            buttons: [],
-            bot: globalThis.telegramBot || null
+            bot: globalThis.telegramBot || null,
+            contact,
+            text: freeplayIssuedPlayerText(pending.amount)
           }).catch(() => null);
           await postPlayerTopicSystemEvent({
             store,
@@ -479,14 +513,14 @@ export async function handleStaffGroupMessage({ ctx, store, bot }) {
   if (pending?.kind === 'add_staff') {
     try {
       await requireOperationalRole(store, actorId, canManageStaff);
-      await store.grantOperationalRole({
+      const granted = await grantOperationalRoleWithHubAccess(store, {
         telegramUserId: text,
         role: OPERATIONAL_ROLES.STAFF,
         grantedByTelegramUserId: actorId,
         telegramDisplayName: ctx.from?.first_name || null
-      });
+      }, { bot: bot || globalThis.telegramBot || null });
       clearPending(actorId);
-      await ctx.reply(`Staff access granted to Telegram user ${text}.`);
+      await ctx.reply(formatStaffGrantResultText(text, granted.telegramAccess));
     } catch (error) {
       await ctx.reply(error.message || 'Could not add Staff.');
     }

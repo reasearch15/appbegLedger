@@ -91,13 +91,18 @@ async function postKnownPlayerPaymentNote(store, bot, payment, note) {
   const contact = await store.getUserProfile(contactId).catch(() => null);
   if (!contact) return;
   try {
-    const { postPlayerTopicSystemEvent } = await import('./staffOperations.js');
-    const amount = payment?.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : 'a payment';
+    const { deliverPlayerNotice, postPlayerTopicSystemEvent } = await import('./staffOperations.js');
+    await deliverPlayerNotice({
+      store,
+      bot: resolveBot(bot),
+      contact,
+      text: '💰 We received your payment.\nOur team is reviewing it.'
+    }).catch(() => null);
     await postPlayerTopicSystemEvent({
       store,
       bot: resolveBot(bot),
       contact,
-      text: `${note}: ${payment?.parsed_sender_name || 'Unknown'} · ${amount}`
+      text: `${note}: ${payment?.parsed_sender_name || 'Unknown'} · ${payment?.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : 'a payment'}`
     });
   } catch (error) {
     console.warn('[staff-topic] payment_system_note_failed', error.message);
@@ -167,7 +172,8 @@ export async function notifyStaffDeliveryFailure(store, {
 
 export async function notifyStaffNewSupportConversation(store, {
   bot = null,
-  contact = null
+  contact = null,
+  nativeHubDm = false
 } = {}) {
   const telegram = resolveBot(bot)?.telegram;
   const groupId = staffGroupIdFromEnv();
@@ -175,11 +181,17 @@ export async function notifyStaffNewSupportConversation(store, {
     return { group: false, dms: 0, reason: groupId && isRoyalVipHubChat(groupId) ? 'refused_hub_target' : 'unconfigured' };
   }
   const name = String(contact?.display_name || contact?.first_name || 'Player').trim() || 'Player';
-  const text = [
-    '💬 New customer message',
-    name,
-    'Open their staff topic to reply privately.'
-  ].join('\n');
+  const text = nativeHubDm
+    ? [
+      '💬 New Royal Vip Hub Direct Message',
+      name,
+      'Open Royal Vip Hub → Direct Messages to reply. Do not post this on the public Hub.'
+    ].join('\n')
+    : [
+      '💬 New customer message',
+      name,
+      'Open their staff topic to reply privately.'
+    ].join('\n');
   try {
     await telegram.sendMessage(groupId, text);
     return { group: true, dms: 0 };
