@@ -14,6 +14,97 @@ function resolveBot(bot) {
   return bot || globalThis.telegramBot || null;
 }
 
+function resolvePaymentReviewStaffGroup(env = process.env) {
+  const groupId = staffGroupIdFromEnv(env);
+  if (!groupId) return { ok: false, groupId: null, reason: 'unconfigured' };
+  if (!/^-?\d+$/.test(groupId)) return { ok: false, groupId, reason: 'invalid' };
+  if (isRoyalVipHubChat(groupId, env)) return { ok: false, groupId, reason: 'refused_hub_target' };
+  return { ok: true, groupId, reason: null };
+}
+
+function logPaymentReviewDelivery({
+  paymentId = null,
+  chatId = null,
+  ok = false,
+  reason = null,
+  error = null
+} = {}) {
+  const line = JSON.stringify({
+    paymentId: paymentId ?? null,
+    chatId: chatId ?? null,
+    ok: Boolean(ok),
+    reason: reason || null,
+    error: error || null
+  });
+  if (ok) {
+    console.log('[payment-review] delivered', line);
+    return;
+  }
+  console.warn('[payment-review] delivery_failed', line);
+}
+
+/**
+ * Internal payment-review cards go only to STAFF_TELEGRAM_GROUP_ID.
+ * Never DM operational_roles or any private/player chat.
+ */
+async function sendPaymentReviewToStaffGroup(bot, text, extra, { paymentId = null } = {}) {
+  const telegram = resolveBot(bot)?.telegram;
+  const resolved = resolvePaymentReviewStaffGroup();
+  if (!telegram?.sendMessage) {
+    logPaymentReviewDelivery({
+      paymentId,
+      chatId: resolved.groupId,
+      ok: false,
+      reason: 'bot_unconfigured'
+    });
+    return {
+      group: false,
+      dms: 0,
+      reason: 'bot_unconfigured',
+      failures: [{ target: 'group', error: 'bot_unconfigured' }]
+    };
+  }
+  if (!resolved.ok) {
+    logPaymentReviewDelivery({
+      paymentId,
+      chatId: resolved.groupId,
+      ok: false,
+      reason: resolved.reason
+    });
+    return {
+      group: false,
+      dms: 0,
+      reason: resolved.reason,
+      failures: [{ target: 'group', error: resolved.reason }]
+    };
+  }
+  try {
+    await telegram.sendMessage(resolved.groupId, text, asTelegramSendExtra(extra));
+    logPaymentReviewDelivery({
+      paymentId,
+      chatId: resolved.groupId,
+      ok: true,
+      reason: 'staff_group'
+    });
+    return { group: true, dms: 0, chatId: resolved.groupId };
+  } catch (error) {
+    const message = error.message || String(error);
+    logPaymentReviewDelivery({
+      paymentId,
+      chatId: resolved.groupId,
+      ok: false,
+      reason: 'send_failed',
+      error: message
+    });
+    return {
+      group: false,
+      dms: 0,
+      reason: 'send_failed',
+      failures: [{ target: 'group', error: message }]
+    };
+  }
+}
+
 async function sendToStaffTargets(store, bot, text, extra = {}) {
   const telegram = resolveBot(bot)?.telegram;
   const sent = { group: false, dms: 0, failures: [] };
@@ -50,7 +141,6 @@ async function sendToStaffTargets(store, bot, text, extra = {}) {
 export async function notifyOperationalStaffPayment(store, payment, {
   bot = null,
   evaluation = null,
-  dmEveryone = true,
   extra = {}
 } = {}) {
   const reasons = extra.reasons
@@ -65,25 +155,11 @@ export async function notifyOperationalStaffPayment(store, payment, {
   const buttons = extra.creditFailed
     ? paymentCardButtons(payment.id, { creditFailed: true })
     : paymentCardButtons(payment.id, { frozen: payment?.routing_status === 'frozen' });
-  const sent = !dmEveryone
-    ? await sendGroupOnly()
-    : await sendToStaffTargets(store, bot, text, buttons);
+  const sent = await sendPaymentReviewToStaffGroup(bot, text, buttons, {
+    paymentId: payment?.id ?? null
+  });
   await postKnownPlayerPaymentNote(store, bot, payment, extra.title || 'Payment needs review');
   return sent;
-
-  async function sendGroupOnly() {
-    const telegram = resolveBot(bot)?.telegram;
-    const groupId = staffGroupIdFromEnv();
-    if (!telegram?.sendMessage || !groupId || isRoyalVipHubChat(groupId)) {
-      return { group: false, dms: 0, reason: groupId && isRoyalVipHubChat(groupId) ? 'refused_hub_target' : 'unconfigured' };
-    }
-    try {
-      await telegram.sendMessage(groupId, text, asTelegramSendExtra(buttons));
-      return { group: true, dms: 0 };
-    } catch (error) {
-      return { group: false, dms: 0, failures: [{ target: 'group', error: error.message }] };
-    }
-  }
 }
 
 async function postKnownPlayerPaymentNote(store, bot, payment, note) {
@@ -153,9 +229,14 @@ export async function notifyUnmatchedCandidates(store, {
     })
   ];
   const first = payments[0];
-  return sendToStaffTargets(store, bot, lines.join('\n'), {
-    inline_keyboard: [[{ text: '🔎 REVIEW PAYMENT', callback_data: `${STAFF_CB.REVIEW}${first.id}` }]]
-  });
+  return sendPaymentReviewToStaffGroup(
+    bot,
+    lines.join('\n'),
+    {
+      inline_keyboard: [[{ text: '🔎 REVIEW PAYMENT', callback_data: `${STAFF_CB.REVIEW}${first.id}` }]]
+    },
+    { paymentId: first?.id ?? null }
+  );
 }
 
 export async function notifyStaffDeliveryFailure(store, {

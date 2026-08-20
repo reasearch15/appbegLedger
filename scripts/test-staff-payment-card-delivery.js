@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { createDataStore } from '../src/db/index.js';
 import { OPERATIONAL_ROLES } from '../src/telegram/operationalRoles.js';
-import { notifyOperationalStaffPayment } from '../src/telegram/operationalAlerts.js';
+import { notifyOperationalStaffPayment, notifyUnmatchedCandidates } from '../src/telegram/operationalAlerts.js';
 import { routeParsedPaymentWithConfidence } from '../src/payments/confidenceRouter.js';
 import {
   STAFF_CB,
   asTelegramSendExtra,
-  paymentCardButtons
+  paymentCardButtons,
+  isPaymentReviewCallback
 } from '../src/telegram/staffCards.js';
 import {
   handleStaffCallbackQuery,
@@ -24,7 +25,9 @@ const HUB_CHANNEL_ID = '-1004300917295';
 const ROOT_ID = '9001';
 const COADMIN_ID = '8002';
 const STAFF_ID = '8003';
+const PLAYER_ID = '7001';
 const CALLBACK_DATA_LIMIT = 64;
+const PRIVATE_PAYMENT_REJECTION = 'This action is only available in the staff review group.';
 
 function telegramError(description) {
   const error = new Error(description);
@@ -56,21 +59,36 @@ function mockTelegram({ sendBehavior = null } = {}) {
   };
 }
 
-function makeCbCtx({ fromId, data }) {
+function makeCbCtx({ fromId, data, chatId = STAFF_GROUP_ID, chatType = 'supergroup' }) {
   const replies = [];
   let answered = null;
+  const numericChatId = Number(chatId);
   return {
     replies,
     get answered() { return answered; },
-    chat: { id: Number(STAFF_GROUP_ID), type: 'supergroup' },
+    chat: { id: numericChatId, type: chatType },
     from: { id: Number(fromId), first_name: 'Actor', username: `user${fromId}` },
-    callbackQuery: { data, message: { message_id: 1 } },
+    callbackQuery: {
+      data,
+      message: { message_id: 1, chat: { id: numericChatId, type: chatType } }
+    },
     async answerCbQuery(text) { answered = text || ''; },
     async reply(body, extra) {
       replies.push({ body, extra });
       return { message_id: replies.length };
     }
   };
+}
+
+function assertStaffGroupOnly(bot, { textPattern = /REVIEW REQUIRED/, labels = reviewLabels() } = {}) {
+  assert.equal(bot.calls.send.length, 1, `expected exactly one send, got ${bot.calls.send.map((c) => c.chatId).join(',')}`);
+  assert.equal(bot.calls.send[0].chatId, STAFF_GROUP_ID);
+  assert.match(bot.calls.send[0].text, textPattern);
+  assertValidReplyMarkup(bot.calls.send[0].extra, labels);
+  const forbidden = new Set([ROOT_ID, COADMIN_ID, STAFF_ID, PLAYER_ID, HUB_CHANNEL_ID]);
+  for (const call of bot.calls.send) {
+    assert.equal(forbidden.has(call.chatId), false, `unexpected private/hub send to ${call.chatId}`);
+  }
 }
 
 function assertValidReplyMarkup(extra, expectedLabels) {
@@ -161,11 +179,29 @@ async function run() {
     grantedByTelegramUserId: ROOT_ID,
     telegramDisplayName: 'Alice'
   });
+  await store.upsertTelegramUser({
+    id: Number(ROOT_ID),
+    first_name: 'Picasso',
+    username: 'rootadmin',
+    is_bot: false
+  });
+  const ordinaryPlayer = await store.upsertTelegramUser({
+    id: Number(PLAYER_ID),
+    first_name: 'Player',
+    username: 'normalplayer',
+    is_bot: false
+  });
+
+  assert.equal(isPaymentReviewCallback(`${STAFF_CB.CREDIT}12`), true);
+  assert.equal(isPaymentReviewCallback(`${STAFF_CB.FREEZE}12`), true);
+  assert.equal(isPaymentReviewCallback(STAFF_CB.PENDING_PAYMENTS), true);
+  assert.equal(isPaymentReviewCallback(STAFF_CB.CTRL), false);
+  assert.equal(isPaymentReviewCallback(STAFF_CB.FP_GIVE), false);
 
   const cases = [
-    { status: 'unmatched', title: undefined, labels: reviewLabels() },
-    { status: 'needs_confirmation', title: undefined, labels: reviewLabels() },
-    { status: 'ambiguous', title: undefined, labels: reviewLabels() }
+    { status: 'unmatched', labels: reviewLabels() },
+    { status: 'needs_confirmation', labels: reviewLabels() },
+    { status: 'ambiguous', labels: reviewLabels() }
   ];
   let telegramMessageId = 1;
   for (const item of cases) {
@@ -174,18 +210,11 @@ async function run() {
       status: item.status
     });
     const bot = mockTelegram();
-    await notifyOperationalStaffPayment(store, payment, { bot, extra: item.title ? { title: item.title } : {} });
-    const groupSend = bot.calls.send.find((call) => call.chatId === STAFF_GROUP_ID);
-    assert.ok(groupSend, `${item.status} missing group send`);
-    assert.match(groupSend.text, /REVIEW REQUIRED/);
-    assertValidReplyMarkup(groupSend.extra, item.labels);
-    const dmChats = bot.calls.send.filter((call) => call.chatId !== STAFF_GROUP_ID).map((call) => call.chatId).sort();
-    assert.deepEqual(dmChats, [COADMIN_ID, ROOT_ID, STAFF_ID].sort());
-    for (const dm of bot.calls.send.filter((call) => call.chatId !== STAFF_GROUP_ID)) {
-      assertValidReplyMarkup(dm.extra, item.labels);
-      assert.equal(dm.chatId === HUB_CHANNEL_ID, false);
-    }
-    console.log(`ok card: ${item.status} uses reply_markup and staff group + role DMs`);
+    const sent = await notifyOperationalStaffPayment(store, payment, { bot });
+    assert.equal(sent.group, true);
+    assert.equal(sent.dms, 0);
+    assertStaffGroupOnly(bot, { labels: item.labels });
+    console.log(`ok card: ${item.status} staff-group only with reply_markup`);
   }
 
   const autoPayment = await insertPayment(store, {
@@ -195,14 +224,10 @@ async function run() {
   const autoBot = mockTelegram();
   await notifyOperationalStaffPayment(store, autoPayment, {
     bot: autoBot,
-    dmEveryone: false,
     extra: { title: '🟢 AUTO-CREDITED' }
   });
-  assert.equal(autoBot.calls.send.length, 1);
-  assert.equal(autoBot.calls.send[0].chatId, STAFF_GROUP_ID);
-  assert.match(autoBot.calls.send[0].text, /AUTO-CREDITED/);
-  assertValidReplyMarkup(autoBot.calls.send[0].extra, reviewLabels());
-  console.log('ok card: auto-credit is group-only with reply_markup');
+  assertStaffGroupOnly(autoBot, { textPattern: /AUTO-CREDITED/, labels: reviewLabels() });
+  console.log('ok card: auto-credit is staff-group only with reply_markup');
 
   const failedPayment = await insertPayment(store, {
     telegramMessageId: telegramMessageId++,
@@ -211,16 +236,11 @@ async function run() {
   const failBot = mockTelegram();
   await notifyOperationalStaffPayment(store, failedPayment, {
     bot: failBot,
-    dmEveryone: true,
     extra: { title: '🔴 CREDIT FAILED', creditFailed: true }
   });
-  const failedGroup = failBot.calls.send.find((call) => call.chatId === STAFF_GROUP_ID);
-  assert.ok(failedGroup);
-  assert.match(failedGroup.text, /CREDIT FAILED/);
-  assertValidReplyMarkup(failedGroup.extra, ['🔄 RETRY CREDIT']);
-  assert.equal(failedGroup.extra.reply_markup.inline_keyboard.flat().length, 1);
-  assert.equal(failBot.calls.send.filter((call) => call.chatId !== STAFF_GROUP_ID).length, 3);
-  console.log('ok card: credit-failed Retry uses reply_markup');
+  assertStaffGroupOnly(failBot, { textPattern: /CREDIT FAILED/, labels: ['🔄 RETRY CREDIT'] });
+  assert.equal(failBot.calls.send[0].extra.reply_markup.inline_keyboard.flat().length, 1);
+  console.log('ok card: credit-failed Retry is staff-group only');
 
   const hugeId = 9007199254740991;
   const hugeButtons = asTelegramSendExtra(paymentCardButtons(hugeId, { creditFailed: true }));
@@ -237,6 +257,11 @@ async function run() {
   await handleStaffCallbackQuery({ ctx: forgedRetry, store, bot: mockTelegram() });
   assert.equal(forgedRetry.answered, 'Not authorized');
   console.log('ok callbacks fresh-check operational role');
+
+  const warnings = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+  try {
 
   const groupFailBot = mockTelegram({
     sendBehavior: ({ chatId }) => (
@@ -259,25 +284,39 @@ async function run() {
   const afterRoute = await store.getPaymentEvent(routedPayment.id);
   assert.equal(afterRoute.routing_status, 'unmatched');
   assert.equal(groupFailBot.calls.send.some((call) => call.chatId === STAFF_GROUP_ID), true);
-  assert.equal(groupFailBot.calls.send.filter((call) => call.chatId !== STAFF_GROUP_ID).length >= 1, true);
-  console.log('ok routing: group send failure does not crash payment routing');
+  assert.equal(groupFailBot.calls.send.filter((call) => call.chatId !== STAFF_GROUP_ID).length, 0);
+  assert.equal(warnings.some((line) => line.includes('[payment-review] delivery_failed') && line.includes('send_failed')), true);
+  console.log('ok routing: group send failure does not crash or fall back to DMs');
 
-  const dmFailBot = mockTelegram({
-    sendBehavior: ({ chatId }) => (
-      String(chatId) === ROOT_ID ? telegramError('Forbidden: bot was blocked by the user') : null
-    )
-  });
-  const dmPayment = await insertPayment(store, {
+  const playerBot = mockTelegram();
+  const playerPayment = await insertPayment(store, {
     telegramMessageId: telegramMessageId++,
     status: 'unmatched'
   });
-  const dmSent = await notifyOperationalStaffPayment(store, dmPayment, { bot: dmFailBot });
-  assert.equal(dmSent.group, true);
-  assert.equal(dmSent.dms, 2);
-  assert.equal(dmSent.failures.some((item) => String(item.target) === ROOT_ID), true);
-  const remaining = dmFailBot.calls.send.filter((call) => call.chatId === COADMIN_ID || call.chatId === STAFF_ID);
-  assert.equal(remaining.length, 2);
-  console.log('ok delivery: one failing staff DM does not stop other recipients');
+  await notifyOperationalStaffPayment(store, playerPayment, { bot: playerBot });
+  assert.equal(playerBot.calls.send.some((call) => call.chatId === String(ordinaryPlayer.telegram_id || PLAYER_ID)), false);
+  assert.equal(playerBot.calls.send.some((call) => /REVIEW REQUIRED/.test(call.text) && call.chatId !== STAFF_GROUP_ID), false);
+  console.log('ok privacy: ordinary player never receives review card');
+
+  delete process.env.STAFF_TELEGRAM_GROUP_ID;
+  const missingBot = mockTelegram();
+  const missingPayment = await insertPayment(store, {
+    telegramMessageId: telegramMessageId++,
+    status: 'unmatched'
+  });
+  const missingSent = await notifyOperationalStaffPayment(store, missingPayment, { bot: missingBot });
+  assert.equal(missingBot.calls.send.length, 0);
+  assert.equal(missingSent.group, false);
+  assert.equal(missingSent.dms, 0);
+  assert.equal(missingSent.reason, 'unconfigured');
+  assert.equal(warnings.some((line) => line.includes('[payment-review] delivery_failed') && line.includes('unconfigured')), true);
+  process.env.STAFF_TELEGRAM_GROUP_ID = 'not-a-chat-id';
+  const invalidBot = mockTelegram();
+  const invalidSent = await notifyOperationalStaffPayment(store, missingPayment, { bot: invalidBot });
+  assert.equal(invalidBot.calls.send.length, 0);
+  assert.equal(invalidSent.reason, 'invalid');
+  process.env.STAFF_TELEGRAM_GROUP_ID = STAFF_GROUP_ID;
+  console.log('ok fail-closed: missing/invalid staff group does not DM anyone');
 
   process.env.STAFF_TELEGRAM_GROUP_ID = HUB_CHANNEL_ID;
   const hubBot = mockTelegram();
@@ -286,10 +325,91 @@ async function run() {
     status: 'unmatched'
   });
   const refused = await notifyOperationalStaffPayment(store, hubPayment, { bot: hubBot });
-  assert.equal(hubBot.calls.send.some((call) => call.chatId === HUB_CHANNEL_ID && /REVIEW REQUIRED|Calvin/.test(call.text)), false);
+  assert.equal(hubBot.calls.send.length, 0);
   assert.equal(refused.failures.some((item) => item.error === 'refused_hub_target'), true);
   process.env.STAFF_TELEGRAM_GROUP_ID = STAFF_GROUP_ID;
+  } finally {
+    console.warn = origWarn;
+  }
   console.log('ok privacy: Hub cannot be used as staff payment target');
+
+  const freezePayment = await insertPayment(store, {
+    telegramMessageId: telegramMessageId++,
+    status: 'unmatched'
+  });
+  const privateFreeze = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.FREEZE}${freezePayment.id}`,
+    chatId: ROOT_ID,
+    chatType: 'private'
+  });
+  await handleStaffCallbackQuery({ ctx: privateFreeze, store, bot: mockTelegram() });
+  assert.equal(privateFreeze.answered, PRIVATE_PAYMENT_REJECTION);
+  assert.equal(privateFreeze.replies.length, 0);
+  assert.equal((await store.getPaymentEvent(freezePayment.id)).routing_status, 'unmatched');
+
+  const creditPayment = await insertPayment(store, {
+    telegramMessageId: telegramMessageId++,
+    status: 'unmatched'
+  });
+  const privateCredit = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.CREDIT}${creditPayment.id}`,
+    chatId: ROOT_ID,
+    chatType: 'private'
+  });
+  await handleStaffCallbackQuery({ ctx: privateCredit, store, bot: mockTelegram() });
+  assert.equal(privateCredit.answered, PRIVATE_PAYMENT_REJECTION);
+  assert.equal((await store.getPaymentEvent(creditPayment.id)).routing_status, 'unmatched');
+
+  const privateAsk = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.ASK}${creditPayment.id}`,
+    chatId: ROOT_ID,
+    chatType: 'private'
+  });
+  await handleStaffCallbackQuery({ ctx: privateAsk, store, bot: mockTelegram() });
+  assert.equal(privateAsk.answered, PRIVATE_PAYMENT_REJECTION);
+  const privateIgnore = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.IGNORE}${creditPayment.id}`,
+    chatId: ROOT_ID,
+    chatType: 'private'
+  });
+  await handleStaffCallbackQuery({ ctx: privateIgnore, store, bot: mockTelegram() });
+  assert.equal(privateIgnore.answered, PRIVATE_PAYMENT_REJECTION);
+  console.log('ok private payment callbacks refuse without mutating');
+
+  const groupFreeze = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.FREEZE}${freezePayment.id}`
+  });
+  await handleStaffCallbackQuery({ ctx: groupFreeze, store, bot: mockTelegram() });
+  assert.equal(groupFreeze.answered, 'Frozen');
+  assert.equal((await store.getPaymentEvent(freezePayment.id)).routing_status, 'frozen');
+
+  const groupCredit = makeCbCtx({
+    fromId: ROOT_ID,
+    data: `${STAFF_CB.CREDIT}${creditPayment.id}`
+  });
+  await handleStaffCallbackQuery({ ctx: groupCredit, store, bot: mockTelegram() });
+  assert.notEqual(groupCredit.answered, PRIVATE_PAYMENT_REJECTION);
+  assert.equal((await store.getPaymentEvent(creditPayment.id)).routing_status, 'unmatched');
+  console.log('ok staff-group payment callbacks still operate');
+
+  const candidateBot = mockTelegram();
+  const candidatePayment = await insertPayment(store, {
+    telegramMessageId: telegramMessageId++,
+    status: 'unmatched'
+  });
+  await notifyUnmatchedCandidates(store, {
+    bot: candidateBot,
+    requesterName: 'Player',
+    payments: [candidatePayment]
+  });
+  assert.equal(candidateBot.calls.send.length, 1);
+  assert.equal(candidateBot.calls.send[0].chatId, STAFF_GROUP_ID);
+  console.log('ok unmatched-candidate alert is staff-group only');
 
   const ccBot = mockTelegram();
   const cc = await ensureStaffControlCenter({ store, bot: ccBot, pin: false });

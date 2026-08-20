@@ -34,6 +34,7 @@ import {
   paymentCardText,
   paymentCardButtons,
   asTelegramSendExtra,
+  isPaymentReviewCallback,
   assignConfirmText,
   assignConfirmButtons,
   ignoreConfirmText,
@@ -118,6 +119,14 @@ function logUnauthorizedStaffGroupInbound(ctx, reason) {
   }));
 }
 
+function callbackChatId(ctx) {
+  return ctx.chat?.id
+    ?? ctx.callbackQuery?.message?.chat?.id
+    ?? null;
+}
+
+const PAYMENT_REVIEW_PRIVATE_REJECTION = 'This action is only available in the staff review group.';
+
 async function reply(ctx, text, extra = undefined) {
   if (extra) return ctx.reply(text, asTelegramSendExtra(extra));
   return ctx.reply(text);
@@ -125,11 +134,22 @@ async function reply(ctx, text, extra = undefined) {
 
 export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
   const data = ctx.callbackQuery?.data || '';
-  if (!isStaffCallback(data) && !isStaffGroupChat(ctx.chat?.id)) return false;
+  const chatId = callbackChatId(ctx);
+  if (!isStaffCallback(data) && !isStaffGroupChat(chatId)) return false;
   const actorId = normalizeTelegramUserId(ctx.from?.id);
   const telegramBot = bot || globalThis.telegramBot || null;
   try {
     const role = await requireOperationalRole(store, actorId);
+
+    if (isPaymentReviewCallback(data) && !isStaffGroupChat(chatId)) {
+      console.warn('[staff-cb] payment_review_refused_private', JSON.stringify({
+        actor: actorId || 'unknown',
+        chat: chatId ?? null,
+        data
+      }));
+      await ctx.answerCbQuery(PAYMENT_REVIEW_PRIVATE_REJECTION);
+      return true;
+    }
 
     if (data === STAFF_CB.CTRL || data === 'op:cc') {
       const mode = await store.getConfidenceMode();

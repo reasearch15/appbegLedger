@@ -32,6 +32,26 @@ export function isStaffCallback(data = '') {
   return String(data || '').startsWith('op:');
 }
 
+const PAYMENT_REVIEW_CALLBACK_PREFIXES = [
+  STAFF_CB.CREDIT,
+  STAFF_CB.ASSIGN,
+  STAFF_CB.ASSIGN_CONFIRM,
+  STAFF_CB.ASK,
+  STAFF_CB.FREEZE,
+  STAFF_CB.UNFREEZE,
+  STAFF_CB.IGNORE,
+  STAFF_CB.IGNORE_CONFIRM,
+  STAFF_CB.RETRY,
+  STAFF_CB.REVIEW,
+  STAFF_CB.PENDING_PAYMENTS
+];
+
+export function isPaymentReviewCallback(data = '') {
+  const raw = String(data || '');
+  if (!raw) return false;
+  return PAYMENT_REVIEW_CALLBACK_PREFIXES.some((prefix) => raw === prefix || raw.startsWith(prefix));
+}
+
 /**
  * Telegraf sendMessage/reply extra must use Bot API `reply_markup`.
  * Staff card helpers return `{ inline_keyboard }`; wrap that shape here
