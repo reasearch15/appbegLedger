@@ -1,8 +1,9 @@
-import { OPERATIONAL_ROLES, canManageStaff, canOperatePayments, canToggleConfidenceMode, normalizeTelegramUserId } from './operationalRoles.js';
+import { OPERATIONAL_ROLES, canManageHub, canManageStaff, canOperatePayments, canToggleConfidenceMode, normalizeTelegramUserId, staffGroupIdFromEnv, isRoyalVipHubChat } from './operationalRoles.js';
 import { CONFIDENCE } from '../payments/confidenceEngine.js';
 import { ROUTING_STATUS } from '../payments/constants.js';
 import { PAYMENT_WINDOW_FLOW } from '../payments/constants.js';
-import { queueBotReply } from './chatbotProcessor.js';
+import { isTopicClosedError } from './telegramApiErrors.js';
+import { notifyStaffDeliveryFailure } from './operationalAlerts.js';
 import { FREEPLAY_ISSUANCE_BLOCKER, FREEPLAY_DECISION, FREEPLAY_ISSUANCE_STATUS, buildFreeplayIdempotencyKey, issueAppBegFreeplay } from '../appbeg/freeplayIssuanceClient.js';
 import {
   STAFF_CB,
@@ -28,7 +29,8 @@ export {
 export function controlCenterButtons(role) {
   return buildControlCenterButtons(role, {
     canToggle: canToggleConfidenceMode(role),
-    canManage: canManageStaff(role)
+    canManage: canManageStaff(role),
+    canManageHub: canManageHub(role)
   });
 }
 
@@ -38,6 +40,11 @@ const CREDITED_STATUSES = new Set([
   ROUTING_STATUS.REGISTRATION_PAYMENT_MATCHED,
   ROUTING_STATUS.APPBEG_OWNED
 ]);
+
+function knownContactId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
 
 export async function requireOperationalRole(store, telegramUserId, predicate = canOperatePayments) {
   const userId = normalizeTelegramUserId(telegramUserId);
@@ -67,7 +74,7 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
     await store.recordPaymentDecision?.({
       paymentEventId: payment.id,
       paymentIdentityId: payment.payment_identity_id || null,
-      payerContactId: window.requester_contact_id || window.contact_id,
+      payerContactId: knownContactId(window.requester_contact_id),
       recipientContactId: recipientId,
       windowId: window.id,
       classification: payment.confidence_classification || 'staff_manual',
@@ -90,7 +97,7 @@ async function creditAssignedPayment(store, payment, window, actorTelegramUserId
     });
     await store.recordPaymentDecision?.({
       paymentEventId: payment.id,
-      payerContactId: window.requester_contact_id || window.contact_id,
+      payerContactId: knownContactId(window.requester_contact_id),
       recipientContactId: recipientId,
       windowId: window.id,
       classification: payment.confidence_classification || 'staff_manual',
@@ -125,7 +132,7 @@ export async function staffAssignAndCredit(store, {
     error.code = 'INVALID_RECIPIENT';
     throw error;
   }
-  const payerId = Number(payerContactId || payment.payer_contact_id || recipientId);
+  const payerId = knownContactId(payerContactId) || knownContactId(payment.payer_contact_id);
   let window = null;
   if (payment.registration_payment_window_id) {
     window = await store.getRegistrationPaymentWindow(payment.registration_payment_window_id);
@@ -153,7 +160,7 @@ export async function staffAssignAndCredit(store, {
   const identity = payment.parsed_sender_name
     ? await store.ensurePaymentIdentity(payment.parsed_sender_name)
     : null;
-  if (identity) {
+  if (identity && payerId) {
     await store.recordPaymentIdentityEvidence?.({
       paymentIdentityId: identity.id,
       contactId: payerId,
@@ -250,6 +257,25 @@ export async function staffFreezePayment(store, paymentId, actorTelegramUserId) 
     staffName: String(actorTelegramUserId),
     unmatchedReason: 'staff_hold'
   });
+}
+
+export async function staffIgnorePayment(store, paymentId, actorTelegramUserId) {
+  await requireOperationalRole(store, actorTelegramUserId);
+  const payment = await store.getPaymentEvent(paymentId);
+  if (!payment) throw new Error('Payment not found.');
+  if (CREDITED_STATUSES.has(payment.routing_status)) {
+    const error = new Error('Payment has already been credited.');
+    error.code = 'ALREADY_CREDITED';
+    throw error;
+  }
+  if (payment.routing_status === 'ignored' || payment.routing_status === 'duplicate_ignored') {
+    return { ok: true, alreadyIgnored: true, payment };
+  }
+  const updated = await store.markPaymentIgnored(paymentId, {
+    staffName: String(actorTelegramUserId),
+    unmatchedReason: 'not_a_deposit_credit_event'
+  });
+  return { ok: true, alreadyIgnored: false, payment: updated };
 }
 
 export async function staffUnfreezePayment(store, paymentId, actorTelegramUserId) {
@@ -379,9 +405,13 @@ export async function resolveFreeplayDecline(store, requestId, actorTelegramUser
 
 export async function mirrorPlayerMessageToStaffTopic({ store, bot, contact, text }) {
   const persisted = true;
-  const groupId = process.env.STAFF_TELEGRAM_GROUP_ID;
+  const groupId = staffGroupIdFromEnv();
   if (!groupId || !bot?.telegram) {
     return { persisted, mirrored: false, reason: 'staff_group_unconfigured' };
+  }
+  if (isRoyalVipHubChat(groupId)) {
+    console.warn('[staff-topic] refused_hub_target');
+    return { persisted, mirrored: false, reason: 'refused_hub_target' };
   }
   try {
     let topic = await store.getStaffTopicForContact(contact.id);
@@ -395,19 +425,43 @@ export async function mirrorPlayerMessageToStaffTopic({ store, bot, contact, tex
         topicName: created.name
       });
     }
-    await bot.telegram.sendMessage(groupId, `${contact.display_name || 'Player'}:\n${text}`, {
-      message_thread_id: topic.message_thread_id
-    });
+    const body = `${contact.display_name || 'Player'}:\n${text}`;
+    try {
+      await bot.telegram.sendMessage(groupId, body, {
+        message_thread_id: topic.message_thread_id
+      });
+    } catch (sendError) {
+      if (!isTopicClosedError(sendError)) throw sendError;
+      try {
+        await bot.telegram.reopenForumTopic(groupId, topic.message_thread_id);
+      } catch (reopenError) {
+        await store.markStaffTopicError?.(contact.id, reopenError.message).catch(() => null);
+        await notifyStaffDeliveryFailure(store, {
+          bot,
+          context: `Closed staff topic could not be reopened for contact ${contact.id}`,
+          detail: String(text || '').slice(0, 400)
+        }).catch(() => null);
+        return {
+          persisted,
+          mirrored: false,
+          reusedTopic: true,
+          reason: 'reopen_failed',
+          error: reopenError.message
+        };
+      }
+      await bot.telegram.sendMessage(groupId, body, {
+        message_thread_id: topic.message_thread_id
+      });
+      return { persisted, mirrored: true, reopened: true, topic };
+    }
     return { persisted, mirrored: true, topic };
   } catch (error) {
     await store.markStaffTopicError?.(contact.id, error.message).catch(() => null);
-    import('./operationalAlerts.js').then(({ notifyStaffDeliveryFailure }) => (
-      notifyStaffDeliveryFailure(store, {
-        bot,
-        context: `Staff topic mirror failed for contact ${contact.id}`,
-        detail: error.message
-      })
-    )).catch(() => null);
+    await notifyStaffDeliveryFailure(store, {
+      bot,
+      context: `Staff topic mirror failed for contact ${contact.id}`,
+      detail: `${error.message}\n${String(text || '').slice(0, 400)}`
+    }).catch(() => null);
     return { persisted, mirrored: false, reason: error.message };
   }
 }

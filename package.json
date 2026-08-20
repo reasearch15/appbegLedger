@@ -22,6 +22,7 @@
     "test:bot-onboarding": "node scripts/test-bot-onboarding-phase1.js",
     "test:royal-vip-telegram-first": "node scripts/test-royal-vip-telegram-first.js",
     "test:royal-vip-compliance": "node scripts/test-royal-vip-compliance-hardening.js",
+    "test:royal-vip-hub": "node scripts/test-royal-vip-hub-storefront.js",
     "test:my-account": "node scripts/test-my-account-credentials.js",
     "test:registration-qr": "node scripts/test-registration-qr-delivery.js",
     "test:payment-windows": "node scripts/test-unified-payment-windows.js",

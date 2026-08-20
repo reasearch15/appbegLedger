@@ -231,6 +231,87 @@ export function attachTelegramFirstStore(store, {
     return { enabled: next, updated_at: now, updated_by: actorId, changed: true, previous: current.enabled };
   }
 
+  async function ensureCoadminSettingsRow() {
+    const existing = await db.prepare('SELECT id FROM coadmin_settings WHERE id = 1').get();
+    if (!existing) {
+      await db.prepare('INSERT INTO coadmin_settings (id, updated_at) VALUES (1, ?)').run(nowIso());
+    }
+  }
+
+  async function getHubStorefrontState() {
+    const row = await db.prepare('SELECT * FROM coadmin_settings WHERE id = 1').get();
+    return {
+      storefrontMessageId: row?.royal_vip_hub_storefront_message_id || null,
+      syncedAt: row?.royal_vip_hub_storefront_synced_at || null,
+      lastError: row?.royal_vip_hub_storefront_error || null,
+      pinned: Boolean(row?.royal_vip_hub_storefront_pinned)
+    };
+  }
+
+  async function saveHubStorefrontState({
+    storefrontMessageId = null,
+    syncedAt = null,
+    lastError = null,
+    pinned = false
+  } = {}) {
+    await ensureCoadminSettingsRow();
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET royal_vip_hub_storefront_message_id = ?,
+          royal_vip_hub_storefront_synced_at = ?,
+          royal_vip_hub_storefront_error = ?,
+          royal_vip_hub_storefront_pinned = ?,
+          updated_at = ?
+      WHERE id = 1
+    `).run(
+      storefrontMessageId || null,
+      syncedAt || null,
+      lastError || null,
+      pinned ? 1 : 0,
+      nowIso()
+    );
+    return getHubStorefrontState();
+  }
+
+  async function getControlCenterState() {
+    const row = await db.prepare('SELECT * FROM coadmin_settings WHERE id = 1').get();
+    return {
+      messageId: row?.staff_control_center_message_id || null,
+      threadId: row?.staff_control_center_thread_id || null,
+      syncedAt: row?.staff_control_center_synced_at || null,
+      lastError: row?.staff_control_center_error || null,
+      pinned: Boolean(row?.staff_control_center_pinned)
+    };
+  }
+
+  async function saveControlCenterState({
+    messageId = null,
+    threadId = null,
+    syncedAt = null,
+    lastError = null,
+    pinned = false
+  } = {}) {
+    await ensureCoadminSettingsRow();
+    await db.prepare(`
+      UPDATE coadmin_settings
+      SET staff_control_center_message_id = ?,
+          staff_control_center_thread_id = ?,
+          staff_control_center_synced_at = ?,
+          staff_control_center_error = ?,
+          staff_control_center_pinned = ?,
+          updated_at = ?
+      WHERE id = 1
+    `).run(
+      messageId || null,
+      threadId || null,
+      syncedAt || null,
+      lastError || null,
+      pinned ? 1 : 0,
+      nowIso()
+    );
+    return getControlCenterState();
+  }
+
   async function ensurePaymentIdentity(displayName) {
     const display = String(displayName || '').trim();
     if (!display) return null;
@@ -705,13 +786,15 @@ export function attachTelegramFirstStore(store, {
     actorTelegramUserId = null
   }) {
     const recipientId = Number(recipientContactId);
-    const payerId = Number(payerContactId || recipientContactId);
+    const payerId = Number(payerContactId);
+    const knownPayerId = Number.isInteger(payerId) && payerId > 0 ? payerId : null;
     if (!Number.isInteger(recipientId) || recipientId <= 0) {
       throw new Error('Recipient is required for staff assignment.');
     }
     const recipient = await getUserProfile(recipientId);
     if (!recipient) throw new Error('Recipient contact not found.');
-    const payer = payerId ? await getUserProfile(payerId) : recipient;
+    const payer = knownPayerId ? await getUserProfile(knownPayerId) : null;
+    if (knownPayerId && !payer) throw new Error('Payer contact not found.');
     const now = nowIso();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const result = await db.prepare(`
@@ -722,13 +805,13 @@ export function attachTelegramFirstStore(store, {
         requester_contact_id, recipient_contact_id, recipient_player_uid, recipient_username
       ) VALUES (?, ?, NULL, NULL, NULL, 0, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      payerId || recipientId,
-      String(payer?.telegram_id || recipient.telegram_id || actorTelegramUserId || ''),
+      recipientId,
+      String(recipient.telegram_id || actorTelegramUserId || ''),
       PAYMENT_WINDOW_FLOW.STAFF_ASSIGNMENT,
       expiresAt,
       now,
       now,
-      payerId || recipientId,
+      knownPayerId,
       recipientId,
       recipient.appbeg_account_id || null,
       recipient.username || null
@@ -778,6 +861,10 @@ export function attachTelegramFirstStore(store, {
     revokeOperationalRole,
     getConfidenceMode,
     setConfidenceMode,
+    getHubStorefrontState,
+    saveHubStorefrontState,
+    getControlCenterState,
+    saveControlCenterState,
     ensurePaymentIdentity,
     listPaymentIdentityEvidence,
     recordPaymentIdentityEvidence,

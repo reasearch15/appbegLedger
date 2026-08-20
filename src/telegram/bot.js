@@ -7,6 +7,9 @@ import { EXPIRED_CALLBACK_MESSAGE, validateCallbackFreshness } from './callbackS
 import { handleStaffCallbackQuery, handleStaffGroupMessage } from './staffGroupHandler.js';
 import { mirrorPlayerMessageToStaffTopic } from './staffOperations.js';
 import { isStaffGroupChat } from './operationalRoles.js';
+import { isStaffCallback } from './staffCards.js';
+import { ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
+import { ensureStaffControlCenter } from './staffControlCenter.js';
 
 const CHATBOT_ENABLED = process.env.CHATBOT_ENABLED !== 'false';
 
@@ -21,9 +24,14 @@ export function startTelegramListener({ token, store, io }) {
   bot.on('callback_query', async (ctx) => {
     if (ctx.chat?.type !== 'private' || !ctx.from) {
       if (isStaffGroupChat(ctx.chat?.id)) {
-        await handleStaffCallbackQuery({ ctx, store });
+        await handleStaffCallbackQuery({ ctx, store, bot });
       }
       return;
+    }
+
+    if (isStaffCallback(ctx.callbackQuery?.data)) {
+      const handled = await handleStaffCallbackQuery({ ctx, store, bot });
+      if (handled) return;
     }
 
     try {
@@ -214,7 +222,7 @@ export function startTelegramListener({ token, store, io }) {
     }
   });
 
-  startPollingBot(bot);
+  startPollingBot(bot, store);
 
   const stop = (signal) => {
     console.log(`Stopping Telegram listener after ${signal}.`);
@@ -245,7 +253,7 @@ function safeTelegramInboundText(value = '', automationState = null) {
   return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
-async function startPollingBot(bot) {
+async function startPollingBot(bot, store) {
   try {
     const me = await bot.telegram.getMe();
     console.log(`[telegram] getMe ok id=${me.id} username=@${me.username || 'unknown'}`);
@@ -264,6 +272,24 @@ async function startPollingBot(bot) {
 
     await bot.launch();
     console.log('Telegram listener started.');
+    try {
+      const hub = await ensureRoyalVipHubStorefront({ store, bot });
+      if (hub?.reason === 'not_configured') {
+        // Logged inside the manager. Player bot and CRM continue.
+      } else if (hub && !hub.ok) {
+        console.warn('[hub] startup_sync_failed', hub.error || hub.reason);
+      }
+    } catch (error) {
+      console.warn('[hub] startup_sync_failed', error.message);
+    }
+    try {
+      const control = await ensureStaffControlCenter({ store, bot });
+      if (control && !control.ok && control.reason !== 'staff_group_unconfigured') {
+        console.warn('[control-center] startup_ensure_failed', control.error || control.reason);
+      }
+    } catch (error) {
+      console.warn('[control-center] startup_ensure_failed', error.message);
+    }
   } catch (error) {
     console.error('Telegram listener failed to start:', error);
   }

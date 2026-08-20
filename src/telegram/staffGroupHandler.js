@@ -4,6 +4,7 @@ import {
   requireOperationalRole,
   staffFreezePayment,
   staffUnfreezePayment,
+  staffIgnorePayment,
   staffRetryCredit,
   staffCreditSuggested,
   staffAssignAndCredit,
@@ -15,6 +16,7 @@ import {
   controlCenterButtons
 } from './staffOperations.js';
 import {
+  canManageHub,
   canManageStaff,
   canOperatePayments,
   canToggleConfidenceMode,
@@ -29,6 +31,10 @@ import {
   paymentCardButtons,
   assignConfirmText,
   assignConfirmButtons,
+  ignoreConfirmText,
+  ignoreConfirmButtons,
+  hubManagementText,
+  hubManagementButtons,
   freeplayCardText,
   freeplayCardButtons,
   freeplayConfirmText,
@@ -37,6 +43,7 @@ import {
   freeplayNotLoadedStaffText
 } from './staffCards.js';
 import { queueBotReply } from './chatbotProcessor.js';
+import { describeRoyalVipHubStatus, ensureRoyalVipHubStorefront } from './royalVipHubManager.js';
 
 const pendingPrompts = new Map();
 
@@ -103,21 +110,62 @@ async function reply(ctx, text, extra = undefined) {
   return ctx.reply(text);
 }
 
-export async function handleStaffCallbackQuery({ ctx, store }) {
+export async function handleStaffCallbackQuery({ ctx, store, bot = null }) {
   const data = ctx.callbackQuery?.data || '';
   if (!isStaffCallback(data) && !isStaffGroupChat(ctx.chat?.id)) return false;
   const actorId = normalizeTelegramUserId(ctx.from?.id);
+  const telegramBot = bot || globalThis.telegramBot || null;
   try {
     const role = await requireOperationalRole(store, actorId);
 
     if (data === STAFF_CB.CTRL || data === 'op:cc') {
       const mode = await store.getConfidenceMode();
       await ctx.answerCbQuery();
-      if (canToggleConfidenceMode(role.role) && data === STAFF_CB.CTRL) {
-        await reply(ctx, `⚡ Confidence Mode: ${mode.enabled ? 'ON 🟢' : 'OFF 🔴'}`, confidenceToggleButtons());
+      await reply(ctx, controlCenterText(mode.enabled, role.role), controlCenterButtons(role.role));
+      return true;
+    }
+
+    if (data === STAFF_CB.CONFIDENCE) {
+      await requireOperationalRole(store, actorId, canToggleConfidenceMode);
+      const mode = await store.getConfidenceMode();
+      await ctx.answerCbQuery();
+      await reply(ctx, `⚡ Confidence Mode: ${mode.enabled ? 'ON 🟢' : 'OFF 🔴'}`, confidenceToggleButtons());
+      return true;
+    }
+
+    if (data === STAFF_CB.HUB) {
+      await requireOperationalRole(store, actorId, canManageHub);
+      await ctx.answerCbQuery();
+      await reply(ctx, hubManagementText(), hubManagementButtons());
+      return true;
+    }
+
+    if (data === STAFF_CB.HUB_REFRESH) {
+      await requireOperationalRole(store, actorId, canManageHub);
+      const result = await ensureRoyalVipHubStorefront({ store, bot: telegramBot });
+      await ctx.answerCbQuery(result.ok ? 'Hub refreshed' : 'Hub refresh failed');
+      if (!result.ok && result.reason === 'not_configured') {
+        await reply(ctx, '⚠️ Royal Vip Hub is not configured.');
         return true;
       }
-      await reply(ctx, controlCenterText(mode.enabled, role.role), controlCenterButtons(role.role));
+      if (!result.ok) {
+        await reply(ctx, [
+          '❌ Hub sync failed:',
+          result.error || 'Bot cannot post/edit messages in Royal Vip Hub.'
+        ].join('\n'));
+        return true;
+      }
+      await reply(ctx, result.created
+        ? 'Hub storefront created.'
+        : (result.edited ? 'Hub storefront updated.' : 'Hub storefront is already current.'));
+      return true;
+    }
+
+    if (data === STAFF_CB.HUB_STATUS) {
+      await requireOperationalRole(store, actorId, canManageHub);
+      const state = await store.getHubStorefrontState?.() || {};
+      await ctx.answerCbQuery();
+      await reply(ctx, describeRoyalVipHubStatus(state).text);
       return true;
     }
 
@@ -215,6 +263,32 @@ export async function handleStaffCallbackQuery({ ctx, store }) {
       await staffUnfreezePayment(store, unfreezeId, actorId);
       await ctx.answerCbQuery('Unfrozen');
       await reply(ctx, '🔓 Payment returned to review.');
+      return true;
+    }
+    const ignoreId = parseId(STAFF_CB.IGNORE, data);
+    if (ignoreId) {
+      await requireOperationalRole(store, actorId, canOperatePayments);
+      const payment = await store.getPaymentEvent(ignoreId);
+      await ctx.answerCbQuery();
+      if (!payment) {
+        await reply(ctx, 'Payment not found.');
+        return true;
+      }
+      if (payment.routing_status === 'ignored' || payment.routing_status === 'duplicate_ignored') {
+        await reply(ctx, 'This event is already ignored.');
+        return true;
+      }
+      await reply(ctx, ignoreConfirmText(payment), ignoreConfirmButtons(ignoreId));
+      return true;
+    }
+    const confirmIgnoreId = parseId(STAFF_CB.IGNORE_CONFIRM, data);
+    if (confirmIgnoreId) {
+      await requireOperationalRole(store, actorId, canOperatePayments);
+      const result = await staffIgnorePayment(store, confirmIgnoreId, actorId);
+      await ctx.answerCbQuery(result.alreadyIgnored ? 'Already ignored' : 'Ignored');
+      await reply(ctx, result.alreadyIgnored
+        ? 'This event is already ignored.'
+        : 'Event ignored. It is not a deposit credit event.');
       return true;
     }
     const retryId = parseId(STAFF_CB.RETRY, data);

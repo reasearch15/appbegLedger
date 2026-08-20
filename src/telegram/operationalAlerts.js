@@ -1,4 +1,4 @@
-import { staffGroupIdFromEnv } from './operationalRoles.js';
+import { isRoyalVipHubChat, staffGroupIdFromEnv } from './operationalRoles.js';
 import {
   paymentCardText,
   paymentCardButtons,
@@ -20,7 +20,9 @@ async function sendToStaffTargets(store, bot, text, extra = {}) {
     return { ...sent, reason: 'bot_unconfigured' };
   }
   const groupId = staffGroupIdFromEnv();
-  if (groupId) {
+  if (groupId && isRoyalVipHubChat(groupId)) {
+    sent.failures.push({ target: 'group', error: 'refused_hub_target' });
+  } else if (groupId) {
     try {
       await telegram.sendMessage(groupId, text, extra);
       sent.group = true;
@@ -33,7 +35,7 @@ async function sendToStaffTargets(store, bot, text, extra = {}) {
     : [];
   for (const role of roles) {
     const chatId = role.telegram_user_id;
-    if (!chatId || String(chatId) === String(groupId)) continue;
+    if (!chatId || String(chatId) === String(groupId) || isRoyalVipHubChat(chatId)) continue;
     try {
       await telegram.sendMessage(chatId, text, extra);
       sent.dms += 1;
@@ -65,7 +67,9 @@ export async function notifyOperationalStaffPayment(store, payment, {
   if (!dmEveryone) {
     const telegram = resolveBot(bot)?.telegram;
     const groupId = staffGroupIdFromEnv();
-    if (!telegram?.sendMessage || !groupId) return { group: false, dms: 0 };
+    if (!telegram?.sendMessage || !groupId || isRoyalVipHubChat(groupId)) {
+      return { group: false, dms: 0, reason: groupId && isRoyalVipHubChat(groupId) ? 'refused_hub_target' : 'unconfigured' };
+    }
     try {
       await telegram.sendMessage(groupId, text, buttons);
       return { group: true, dms: 0 };

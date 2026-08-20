@@ -5,17 +5,23 @@ export const STAFF_CB = {
   ASK: 'op:ak:',
   FREEZE: 'op:fr:',
   UNFREEZE: 'op:uf:',
+  IGNORE: 'op:ig:',
+  IGNORE_CONFIRM: 'op:ic:',
   RETRY: 'op:rt:',
   FP_GIVE: 'op:fg:',
   FP_DECLINE: 'op:fd:',
   FP_CONFIRM: 'op:fc:',
   FP_MSG: 'op:fm:',
+  CONFIDENCE: 'op:cm',
   CONF_ON: 'op:c1',
   CONF_OFF: 'op:c0',
   STAFF_ADD: 'op:sa',
   STAFF_LIST: 'op:sl',
   STAFF_REVOKE: 'op:sx:',
   CTRL: 'op:cc',
+  HUB: 'op:hm',
+  HUB_REFRESH: 'op:hr',
+  HUB_STATUS: 'op:hs',
   PENDING_PAYMENTS: 'op:pp',
   PENDING_FREEPLAY: 'op:pr',
   REVIEW: 'op:rv:'
@@ -34,17 +40,33 @@ export function controlCenterText(modeOn, role) {
   ].join('\n');
 }
 
-export function controlCenterButtons(role, { canToggle = false, canManage = false } = {}) {
+export function controlCenterButtons(role, { canToggle = false, canManage = false, canManageHub = false } = {}) {
   const rows = [];
   if (canToggle) {
-    rows.push([{ text: '⚡ CONFIDENCE', callback_data: STAFF_CB.CTRL }]);
+    rows.push([{ text: '⚡ CONFIDENCE MODE', callback_data: STAFF_CB.CONFIDENCE }]);
   }
-  rows.push([{ text: '💰 PENDING PAYMENTS', callback_data: STAFF_CB.PENDING_PAYMENTS }]);
-  rows.push([{ text: '🎁 FREEPLAY REQUESTS', callback_data: STAFF_CB.PENDING_FREEPLAY }]);
   if (canManage) {
     rows.push([{ text: '👥 STAFF MANAGEMENT', callback_data: STAFF_CB.STAFF_LIST }]);
   }
+  if (canManageHub) {
+    rows.push([{ text: '👑 HUB MANAGEMENT', callback_data: STAFF_CB.HUB }]);
+  }
+  rows.push([{ text: '💰 PAYMENTS', callback_data: STAFF_CB.PENDING_PAYMENTS }]);
+  rows.push([{ text: '🎁 FREEPLAY', callback_data: STAFF_CB.PENDING_FREEPLAY }]);
   return { inline_keyboard: rows };
+}
+
+export function hubManagementText() {
+  return '👑 HUB MANAGEMENT';
+}
+
+export function hubManagementButtons() {
+  return {
+    inline_keyboard: [
+      [{ text: '🔄 REFRESH HUB', callback_data: STAFF_CB.HUB_REFRESH }],
+      [{ text: '👁 VIEW HUB STATUS', callback_data: STAFF_CB.HUB_STATUS }]
+    ]
+  };
 }
 
 export function confidenceToggleButtons() {
@@ -80,8 +102,9 @@ export function paymentStatusLabel(status) {
     case 'searching':
     case 'unrouted':
       return '⚪ UNMATCHED';
-    case 'frozen':
-      return '❄️ FROZEN';
+    case 'ignored':
+    case 'duplicate_ignored':
+      return '🚫 IGNORED';
     case 'credit_failed':
       return '🔴 CREDIT FAILED';
     default:
@@ -120,6 +143,9 @@ export function paymentCardButtons(paymentId, { frozen = false, creditFailed = f
         frozen
           ? { text: '🔓 UNFREEZE', callback_data: `${STAFF_CB.UNFREEZE}${paymentId}` }
           : { text: '❄️ FREEZE', callback_data: `${STAFF_CB.FREEZE}${paymentId}` }
+      ],
+      [
+        { text: '🚫 IGNORE', callback_data: `${STAFF_CB.IGNORE}${paymentId}` }
       ]
     ]
   };
@@ -140,6 +166,27 @@ export function assignConfirmButtons(paymentId) {
   return {
     inline_keyboard: [[
       { text: '✅ CONFIRM & CREDIT', callback_data: `${STAFF_CB.ASSIGN_CONFIRM}${paymentId}` },
+      { text: '❌ CANCEL', callback_data: STAFF_CB.CTRL }
+    ]]
+  };
+}
+
+export function ignoreConfirmText(payment = {}) {
+  const amount = payment.parsed_amount != null ? `$${Number(payment.parsed_amount).toFixed(2)}` : '—';
+  return [
+    '🚫 IGNORE PAYMENT EVENT',
+    `Payment Name: ${payment.parsed_sender_name || 'Unknown'}`,
+    `Amount: ${amount}`,
+    '',
+    'This event is not a deposit credit event.',
+    'Ignore is not Freeze. The event is kept, but it will not be credited.'
+  ].join('\n');
+}
+
+export function ignoreConfirmButtons(paymentId) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ CONFIRM IGNORE', callback_data: `${STAFF_CB.IGNORE_CONFIRM}${paymentId}` },
       { text: '❌ CANCEL', callback_data: STAFF_CB.CTRL }
     ]]
   };

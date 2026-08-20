@@ -20,8 +20,12 @@ export function roleRank(role) {
   return ROLE_RANK[role] || 0;
 }
 
-export function canManageStaff(role) {
+export function canManageHub(role) {
   return role === OPERATIONAL_ROLES.ROOT_ADMIN || role === OPERATIONAL_ROLES.COADMIN;
+}
+
+export function canManageStaff(role) {
+  return canManageHub(role);
 }
 
 export function canToggleConfidenceMode(role) {
@@ -47,6 +51,12 @@ export function assertNotRootRemoval(targetRole) {
 export function staffGroupIdFromEnv(env = process.env) {
   const raw = String(env.STAFF_TELEGRAM_GROUP_ID || '').trim();
   return raw || null;
+}
+
+export function royalVipHubChannelIdFromEnv(env = process.env) {
+  const raw = String(env.ROYAL_VIP_HUB_CHANNEL_ID || '').trim();
+  if (!raw || !/^-?\d+$/.test(raw)) return null;
+  return raw;
 }
 
 export function rootAdminTelegramUserIdFromEnv(env = process.env) {
@@ -76,5 +86,13 @@ export function describeRootAdminEstablishment(env = process.env) {
 export function isStaffGroupChat(chatId, env = process.env) {
   const configured = staffGroupIdFromEnv(env);
   if (!configured) return false;
+  const hubId = royalVipHubChannelIdFromEnv(env);
+  if (hubId && String(chatId) === String(hubId)) return false;
   return String(chatId) === String(configured);
+}
+
+export function isRoyalVipHubChat(chatId, env = process.env) {
+  const hubId = royalVipHubChannelIdFromEnv(env);
+  if (!hubId) return false;
+  return String(chatId) === String(hubId);
 }
